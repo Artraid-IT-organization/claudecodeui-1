@@ -19,6 +19,8 @@ type UseShellConnectionOptions = {
   selectedSessionRef: MutableRefObject<ProjectSession | null | undefined>;
   initialCommandRef: MutableRefObject<string | null | undefined>;
   isPlainShellRef: MutableRefObject<boolean>;
+  /** Имя окна: два открытых терминала в одной папке — это два разных процесса. */
+  terminalId?: string | null;
   onProcessCompleteRef: MutableRefObject<((exitCode: number) => void) | null | undefined>;
   isInitialized: boolean;
   autoConnect: boolean;
@@ -43,6 +45,7 @@ export function useShellConnection({
   selectedSessionRef,
   initialCommandRef,
   isPlainShellRef,
+  terminalId,
   onProcessCompleteRef,
   isInitialized,
   autoConnect,
@@ -148,6 +151,7 @@ export function useShellConnection({
               rows: currentTerminal.rows,
               initialCommand: initialCommandRef.current,
               isPlainShell: isPlainShellRef.current,
+              terminalId: terminalId ?? null,
               forceRestart,
             });
           }, TERMINAL_INIT_DELAY_MS);
@@ -187,6 +191,7 @@ export function useShellConnection({
       isPlainShellRef,
       selectedProjectRef,
       selectedSessionRef,
+      terminalId,
       terminalRef,
       wsRef,
     ],

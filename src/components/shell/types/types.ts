@@ -14,6 +14,8 @@ export type ShellInitMessage = {
   rows: number;
   initialCommand: string | null | undefined;
   isPlainShell: boolean;
+  /** Имя окна командной строки: у каждого окна свой процесс на сервере. */
+  terminalId?: string | null;
   forceRestart?: boolean;
 };
 
@@ -41,6 +43,8 @@ export type UseShellRuntimeOptions = {
   selectedSession: ProjectSession | null | undefined;
   initialCommand: string | null | undefined;
   isPlainShell: boolean;
+  /** Имя окна командной строки — у каждого свой процесс на сервере. */
+  terminalId?: string | null;
   minimal: boolean;
   autoConnect: boolean;
   isRestarting: boolean;

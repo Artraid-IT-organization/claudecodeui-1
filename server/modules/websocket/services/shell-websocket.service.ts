@@ -18,6 +18,8 @@ type ShellIncomingMessage = {
   provider?: string;
   initialCommand?: string;
   isPlainShell?: boolean;
+  /** Имя окна командной строки: у каждого окна свой процесс. */
+  terminalId?: string;
   forceRestart?: boolean;
 };
 
@@ -329,7 +331,16 @@ export function handleShellConnection(
           isPlainShell && initialCommand
             ? `_cmd_${Buffer.from(initialCommand).toString('base64').slice(0, 16)}`
             : '';
-        ptySessionKey = `${projectPath}_${sessionId ?? 'default'}${commandSuffix}`;
+        // Имя окна входит в ключ.
+        //
+        // Без него две открытые командные строки в одной папке получали один и
+        // тот же ключ и цеплялись к ОДНОМУ процессу: второе окно писало
+        // «переподключился к существующему сеансу» и повторяло всё, что
+        // набирали в первом. Отдельные окна — отдельные процессы; при обрыве
+        // связи окно с тем же именем вернётся в свой.
+        const terminalId = readString(data.terminalId).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40);
+        const terminalSuffix = terminalId ? `_win_${terminalId}` : '';
+        ptySessionKey = `${projectPath}_${sessionId ?? 'default'}${commandSuffix}${terminalSuffix}`;
 
         if (isLoginCommand || forceRestart) {
           const oldSession = ptySessionsMap.get(ptySessionKey);

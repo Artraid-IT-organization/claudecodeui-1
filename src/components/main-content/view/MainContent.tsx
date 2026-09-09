@@ -249,6 +249,7 @@ function MainContent({
                   <StandaloneShell
                     project={project}
                     session={null}
+                    terminalId={term.id}
                     isPlainShell
                     showHeader={false}
                     isActive={term.id === activeTerminalId}

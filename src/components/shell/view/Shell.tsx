@@ -28,6 +28,8 @@ type ShellProps = {
   selectedSession?: ProjectSession | null;
   initialCommand?: string | null;
   isPlainShell?: boolean;
+  /** Имя окна: два терминала в одной папке — это два разных процесса. */
+  terminalId?: string | null;
   onProcessComplete?: ((exitCode: number) => void) | null;
   minimal?: boolean;
   autoConnect?: boolean;
@@ -39,6 +41,7 @@ export default function Shell({
   selectedSession = null,
   initialCommand = null,
   isPlainShell = false,
+  terminalId = null,
   onProcessComplete = null,
   minimal = false,
   autoConnect = false,
@@ -66,6 +69,7 @@ export default function Shell({
     selectedSession,
     initialCommand,
     isPlainShell,
+    terminalId,
     minimal,
     autoConnect,
     isRestarting,
