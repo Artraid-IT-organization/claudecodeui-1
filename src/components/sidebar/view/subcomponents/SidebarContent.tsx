@@ -602,6 +602,7 @@ export default function SidebarContent({
               </div>
             )}
             <SidebarProjectSessions
+              flat
               project={flatDisplayProject}
               isExpanded={true}
               sessions={projectListProps.getProjectSessions(flatDisplayProject)}

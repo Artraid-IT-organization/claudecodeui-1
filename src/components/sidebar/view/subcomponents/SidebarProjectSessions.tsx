@@ -60,6 +60,16 @@ function bucketSessionsByGroup(sessions: SessionWithProvider[]): {
 }
 
 type SidebarProjectSessionsProps = {
+  /**
+   * Список чатов открыт сам по себе, без строки проекта над ним.
+   *
+   * В обычном режиме список — ветка дерева: он сдвинут вправо и отчёркнут
+   * вертикальной линией, чтобы было видно, к какой папке относится. Когда
+   * папка одна и её строки на экране нет, сдвигать не от чего: линия висит в
+   * воздухе, а всё содержимое стоит в 25 точках от левого края при 12 справа
+   * — Егор это и заметил, «с одной стороны ближе к грани, чем с другой».
+   */
+  flat?: boolean;
   project: Project;
   isExpanded: boolean;
   sessions: SessionWithProvider[];
@@ -108,6 +118,7 @@ function SessionListSkeleton() {
 }
 
 export default function SidebarProjectSessions({
+  flat = false,
   project,
   isExpanded,
   sessions,
@@ -205,7 +216,7 @@ export default function SidebarProjectSessions({
   );
 
   return (
-    <div className="ml-3 space-y-1 border-l border-border pl-3">
+    <div className={flat ? 'space-y-1' : 'ml-3 space-y-1 border-l border-border pl-3'}>
       <div className="px-3 pb-1 pt-1 md:hidden">
         <button
           className="flex h-8 w-full items-center justify-center gap-2 rounded-md bg-primary text-xs font-medium text-primary-foreground transition-all duration-150 hover:bg-primary/90 active:scale-[0.98]"
