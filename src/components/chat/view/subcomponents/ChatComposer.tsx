@@ -439,7 +439,18 @@ export default function ChatComposer({
         </PromptInputBody>
 
         <PromptInputFooter className="gap-2">
-          <PromptInputTools className="scrollbar-hide min-w-0 overflow-x-auto [&>*]:shrink-0">
+          {/*
+            shrink-0 на самом ряду, а не только на его детях.
+
+            Дети и раньше не сжимались, но сжимался КОНТЕЙНЕР: справа в футере
+            стоит подсказка с flex-1, она жадно забирает ширину, ряд слева
+            схлопывался ниже своих же значков, а overflow резал их пополам —
+            микрофон выглядел разрезанным вертикальной границей. Уступать при
+            нехватке места должна подсказка: она для того и обрезается
+            многоточием. overflow-x-auto оставлен страховкой на случай, если
+            инструментов в ряду станет больше.
+          */}
+          <PromptInputTools className="scrollbar-hide shrink-0 overflow-x-auto [&>*]:shrink-0">
             <PromptInputButton
               tooltip={{ content: t('input.attachFiles') }}
               onClick={openAttachmentPicker}
