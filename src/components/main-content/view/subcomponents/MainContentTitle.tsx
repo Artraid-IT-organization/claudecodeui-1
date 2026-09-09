@@ -1,4 +1,5 @@
 import { useTranslation } from 'react-i18next';
+import { Terminal as TerminalIcon } from 'lucide-react';
 
 import LLMProviderLogo from '../../../llm-provider-logo/LLMProviderLogo';
 import type { AppTab, Project, ProjectSession } from '../../../../types/app';
@@ -10,6 +11,8 @@ type MainContentTitleProps = {
   selectedProject: Project;
   selectedSession: ProjectSession | null;
   shouldShowTasksTab: boolean;
+  /** Имя открытого окна командной строки — оно и стоит в шапке вместо чата. */
+  terminalTitle?: string | null;
 };
 
 function getTabTitle(activeTab: AppTab, shouldShowTasksTab: boolean, t: (key: string) => string, pluginDisplayName?: string) {
@@ -41,6 +44,7 @@ export default function MainContentTitle({
   selectedProject,
   selectedSession,
   shouldShowTasksTab,
+  terminalTitle = null,
 }: MainContentTitleProps) {
   const { t } = useTranslation();
   const { plugins } = usePlugins();
@@ -49,8 +53,8 @@ export default function MainContentTitle({
     ? plugins.find((p) => p.name === activeTab.replace('plugin:', ''))?.displayName
     : undefined;
 
-  const showSessionIcon = activeTab === 'chat' && Boolean(selectedSession);
-  const showChatNewSession = activeTab === 'chat' && !selectedSession;
+  const showSessionIcon = !terminalTitle && activeTab === 'chat' && Boolean(selectedSession);
+  const showChatNewSession = !terminalTitle && activeTab === 'chat' && !selectedSession;
 
   return (
     <div className="scrollbar-hide flex min-w-0 flex-1 items-center gap-2 overflow-x-auto">
@@ -60,8 +64,19 @@ export default function MainContentTitle({
         </div>
       )}
 
+      {terminalTitle && (
+        <div className="flex h-5 w-5 flex-shrink-0 items-center justify-center">
+          <TerminalIcon className="h-4 w-4 text-muted-foreground" />
+        </div>
+      )}
+
       <div className="min-w-0 flex-1">
-        {activeTab === 'chat' && selectedSession ? (
+        {terminalTitle ? (
+          <div className="min-w-0">
+            <h2 className="truncate text-sm font-semibold leading-tight text-foreground">{terminalTitle}</h2>
+            <div className="truncate text-[11px] leading-tight text-muted-foreground">{selectedProject.displayName}</div>
+          </div>
+        ) : activeTab === 'chat' && selectedSession ? (
           <div className="min-w-0">
             <h2 title={getSessionTitle(selectedSession)} className="truncate text-sm font-semibold leading-tight text-foreground">
               {getSessionTitle(selectedSession)}

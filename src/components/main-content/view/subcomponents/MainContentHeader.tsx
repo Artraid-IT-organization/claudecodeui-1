@@ -10,6 +10,7 @@ export default function MainContentHeader({
   shouldShowTasksTab,
   isMobile,
   onMenuClick,
+  terminalTitle = null,
 }: MainContentHeaderProps) {
   return (
     <header className="pwa-header-safe flex-shrink-0 border-b border-border/60 bg-background/95 px-3 py-2 backdrop-blur-sm sm:px-4">
@@ -20,6 +21,7 @@ export default function MainContentHeader({
           selectedProject={selectedProject}
           selectedSession={selectedSession}
           shouldShowTasksTab={shouldShowTasksTab}
+          terminalTitle={terminalTitle}
         />
       </div>
     </header>

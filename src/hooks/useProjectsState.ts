@@ -353,7 +353,12 @@ const removeSessionFromProject = (project: Project, sessionIdToDelete: string): 
   return updatedProject;
 };
 
-const VALID_TABS: Set<string> = new Set(['chat', 'files', 'shell', 'git', 'tasks', 'browser']);
+// 'shell' здесь намеренно нет. Командная строка перестала быть режимом
+// приложения: она открывается отдельным окном-вкладкой (см. useTerminalTabs), а
+// запрос вкладки 'shell' работает как «открой новое окно». Если бы старое
+// значение осталось разрешённым, у того, кто закрыл сайт на командной строке,
+// при следующем заходе не показалось бы ничего: режима такого больше нет.
+const VALID_TABS: Set<string> = new Set(['chat', 'files', 'git', 'tasks', 'browser']);
 
 const isValidTab = (tab: string): tab is AppTab => {
   return VALID_TABS.has(tab) || tab.startsWith('plugin:');

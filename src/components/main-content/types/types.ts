@@ -1,6 +1,7 @@
 import type { Dispatch, SetStateAction } from 'react';
 
 import type { AppTab, Project, ProjectSession } from '../../../types/app';
+import type { TerminalTab } from '../../../hooks/useTerminalTabs';
 import type {
   MarkSessionIdle,
   MarkSessionProcessing,
@@ -44,6 +45,10 @@ export type MainContentProps = {
   selectedSession: ProjectSession | null;
   activeTab: AppTab;
   setActiveTab: Dispatch<SetStateAction<AppTab>>;
+  /** Открытые окна командной строки: живут рядом с чатом, а не вместо него. */
+  terminals?: TerminalTab[];
+  /** Какое из них сейчас на экране; null — на экране чат или другая панель. */
+  activeTerminalId?: string | null;
   /** Whether the TaskMaster "Tasks" workspace tab should be offered — lifted up from MainContent so the sidebar's tab switcher can gate on it too. */
   shouldShowTasksTab: boolean;
   /** Whether the "Browser" workspace tab should be offered — lifted up from MainContent so the sidebar's tab switcher can gate on it too. */
@@ -72,6 +77,8 @@ export type MainContentProps = {
 
 export type MainContentHeaderProps = {
   activeTab: AppTab;
+  /** Имя открытого окна командной строки, если сейчас смотрят на него. */
+  terminalTitle?: string | null;
   selectedProject: Project;
   selectedSession: ProjectSession | null;
   shouldShowTasksTab: boolean;

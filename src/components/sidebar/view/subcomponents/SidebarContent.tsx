@@ -260,18 +260,21 @@ export default function SidebarContent({
         onSearchFilterChange={onSearchFilterChange}
         onClearSearchFilter={onClearSearchFilter}
         terminalSlot={
-          <Tooltip content={t('tabs.shell', { defaultValue: 'Командная строка' })} position="top">
+          // Не переключатель режима, а «открыть ещё одно окно»: каждое нажатие
+          // заводит новую командную строку и ставит её вкладкой рядом с
+          // чатами. Поэтому у кнопки нет состояния «нажата».
+          <Tooltip
+            content={t('tabs.newShell', { defaultValue: 'Новая командная строка' })}
+            position="top"
+          >
             <button
               type="button"
-              onClick={() => setActiveTab(activeTab === 'shell' ? 'chat' : 'shell')}
-              aria-pressed={activeTab === 'shell'}
-              aria-label={t('tabs.shell', { defaultValue: 'Командная строка' })}
-              title={t('tabs.shell', { defaultValue: 'Командная строка' })}
+              onClick={() => setActiveTab('shell')}
+              aria-label={t('tabs.newShell', { defaultValue: 'Новая командная строка' })}
+              title={t('tabs.newShell', { defaultValue: 'Новая командная строка' })}
               className={cn(
                 'flex h-7 items-center justify-center rounded-md px-2.5 text-xs font-normal transition-all',
-                activeTab === 'shell'
-                  ? 'bg-background text-foreground shadow-sm'
-                  : 'text-muted-foreground hover:text-foreground',
+                'text-muted-foreground hover:text-foreground',
               )}
             >
               <Terminal className="h-3 w-3" />
