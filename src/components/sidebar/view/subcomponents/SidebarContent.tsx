@@ -268,7 +268,7 @@ export default function SidebarContent({
               aria-label={t('tabs.shell', { defaultValue: 'Командная строка' })}
               title={t('tabs.shell', { defaultValue: 'Командная строка' })}
               className={cn(
-                'flex items-center justify-center rounded-md px-2.5 py-1.5 text-xs font-normal transition-all',
+                'flex h-7 items-center justify-center rounded-md px-2.5 text-xs font-normal transition-all',
                 activeTab === 'shell'
                   ? 'bg-background text-foreground shadow-sm'
                   : 'text-muted-foreground hover:text-foreground',

@@ -186,7 +186,7 @@ export default function SidebarProjectPickerTrigger({
           // В полосе вкладок кнопка должна выглядеть как её соседи (архив),
           // иначе она читается как посторонний элемент, случайно попавший внутрь.
           isTab
-            ? 'rounded-md px-2.5 py-1.5 text-xs font-normal'
+            ? 'rounded-md px-2.5  text-xs font-normal'
             : 'rounded-lg',
           !isTab && (isDesktop
             ? 'h-7 w-7 text-muted-foreground hover:bg-accent/80 hover:text-foreground'

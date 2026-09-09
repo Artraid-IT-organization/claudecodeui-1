@@ -230,7 +230,9 @@ export default function SidebarProjectSessions({
       </Button>
 
       {canOfferAutoGroup && (
-        <div className="px-1">
+        // Отступ такой же, как у кнопки «Новый сеанс» и у строк чатов ниже
+        // (12 точек): раньше здесь было 4, и кнопка выпирала за общий край.
+        <div className="px-3">
           <Button
             variant="outline"
             size="sm"

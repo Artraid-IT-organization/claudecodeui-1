@@ -190,7 +190,7 @@ export default function SidebarHeader({
                 onClick={() => onSearchModeChange('projects')}
                 aria-pressed={searchMode === 'projects'}
                 className={cn(
-                  "flex-1 flex items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-normal transition-all",
+                  "flex-1 flex h-7 items-center justify-center gap-1.5 rounded-md px-2 text-xs font-normal transition-all",
                   searchMode === 'projects'
                     ? "bg-background shadow-sm text-foreground"
                     : "text-muted-foreground hover:text-foreground"
@@ -207,7 +207,7 @@ export default function SidebarHeader({
                   aria-label={t('search.archiveOnlyTooltip', 'Archive only')}
                   title={t('search.archiveOnlyTooltip', 'Archive only')}
                   className={cn(
-                    "flex items-center justify-center rounded-md px-2.5 py-1.5 text-xs font-normal transition-all",
+                    "flex h-7 items-center justify-center rounded-md px-2.5 text-xs font-normal transition-all",
                     searchMode === 'archived'
                       ? "bg-background shadow-sm text-foreground"
                       : "text-muted-foreground hover:text-foreground"
@@ -309,7 +309,7 @@ export default function SidebarHeader({
                 onClick={() => onSearchModeChange('projects')}
                 aria-pressed={searchMode === 'projects'}
                 className={cn(
-                  "flex-1 flex items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-normal transition-all",
+                  "flex-1 flex h-7 items-center justify-center gap-1.5 rounded-md px-2 text-xs font-normal transition-all",
                   searchMode === 'projects'
                     ? "bg-background shadow-sm text-foreground"
                     : "text-muted-foreground hover:text-foreground"
@@ -326,7 +326,7 @@ export default function SidebarHeader({
                   aria-label={t('search.archiveOnlyTooltip', 'Archive only')}
                   title={t('search.archiveOnlyTooltip', 'Archive only')}
                   className={cn(
-                    "flex items-center justify-center rounded-md px-2.5 py-1.5 text-xs font-normal transition-all",
+                    "flex h-7 items-center justify-center rounded-md px-2.5 text-xs font-normal transition-all",
                     searchMode === 'archived'
                       ? "bg-background shadow-sm text-foreground"
                       : "text-muted-foreground hover:text-foreground"
