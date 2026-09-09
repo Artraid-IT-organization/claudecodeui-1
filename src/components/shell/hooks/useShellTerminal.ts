@@ -74,6 +74,25 @@ type UseShellTerminalResult = {
   disposeTerminal: () => void;
 };
 
+/**
+ * Видно ли окно терминала на экране.
+ *
+ * Пока командная строка была одна, вопрос не стоял: она либо на экране, либо
+ * размонтирована. Теперь окон несколько, и невыбранные просто спрятаны —
+ * браузер сообщает про них нулевой размер. Подгонка под нулевой размер честно
+ * пересчитывает сетку в один столбец, переносит по нему всю историю и сообщает
+ * этот размер запущенной программе: строки схлопываются, а то, что рисует
+ * рамки (тот же Клод в терминале), рассыпается. Проверка возвращает подгонку
+ * только видимым окнам.
+ */
+function isVisibleBox(element: HTMLElement | null): boolean {
+  if (!element) {
+    return false;
+  }
+  const rect = element.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+
 export function useShellTerminal({
   terminalContainerRef,
   terminalRef,
@@ -245,6 +264,10 @@ export function useShellTerminal({
         return;
       }
 
+      if (!isVisibleBox(terminalContainerRef.current)) {
+        return;
+      }
+
       currentFitAddon.fit();
       sendSocketMessage(wsRef.current, {
         type: 'resize',
@@ -271,6 +294,10 @@ export function useShellTerminal({
         const currentFitAddon = fitAddonRef.current;
         const currentTerminal = terminalRef.current;
         if (!currentFitAddon || !currentTerminal) {
+          return;
+        }
+
+        if (!isVisibleBox(terminalContainerRef.current)) {
           return;
         }
 
