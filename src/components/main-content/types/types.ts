@@ -79,6 +79,8 @@ export type MainContentHeaderProps = {
   activeTab: AppTab;
   /** Имя открытого окна командной строки, если сейчас смотрят на него. */
   terminalTitle?: string | null;
+  /** Открыть панель снимков состояния. Нет обработчика — нет и кнопки. */
+  onOpenCheckpoints?: () => void;
   selectedProject: Project;
   selectedSession: ProjectSession | null;
   shouldShowTasksTab: boolean;

@@ -23,6 +23,7 @@ import {
   normalizeImageDescriptors
 } from '@/shared/image-attachments.js';
 import { CLAUDE_PREDEFINED_MODELS } from '@/modules/providers/list/claude/claude-models.provider.js';
+import { checkpointService } from '@/modules/checkpoints/index.js';
 import { resolveClaudeCodeExecutablePath } from '@/shared/claude-cli-path.js';
 import {
   createNotificationEvent,
@@ -777,7 +778,55 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     // own stream because an async generator cannot be replayed once consumed.
     const promptMessages = await buildPromptMessages(command, options.images, options.files, options.cwd);
 
+    /*
+     * Инструменты, перед которыми имеет смысл снимать состояние.
+     *
+     * Только те, что реально меняют файлы или запускают команды. Чтение,
+     * поиск и вопросы ничего не портят — снимать перед ними значило бы
+     * забивать историю пустыми точками, между которыми нет разницы.
+     */
+    const CHANGING_TOOLS = new Set([
+      'Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash', 'BashOutput',
+    ]);
+
     sdkOptions.hooks = {
+      /*
+       * Снимок перед действием агента.
+       *
+       * Хук отрабатывает ДО инструмента, поэтому снятое состояние — это «как
+       * было до правки», ровно то, к чему человек захочет вернуться. Ошибки
+       * тут намеренно проглатываются: не сумели снять — потеряли одну точку
+       * отката, а не текущую работу агента. Ронять запуск из-за служебного
+       * снимка нельзя.
+       */
+      PreToolUse: [{
+        matcher: '',
+        hooks: [async (input) => {
+          try {
+            const toolName = typeof input?.tool_name === 'string' ? input.tool_name : '';
+            if (!CHANGING_TOOLS.has(toolName)) return {};
+
+            const projectPath = options.cwd || options.projectPath;
+            if (!projectPath) return {};
+
+            const toolInput = input?.tool_input || {};
+            const file =
+              typeof toolInput.file_path === 'string' ? toolInput.file_path
+              : typeof toolInput.notebook_path === 'string' ? toolInput.notebook_path
+              : null;
+
+            await checkpointService.snapshot({
+              projectPath,
+              sessionId: sessionId || capturedSessionId || null,
+              tool: toolName,
+              file,
+            });
+          } catch (error) {
+            console.warn('[Чекпойнты] снимок не сделан:', error?.message || error);
+          }
+          return {};
+        }]
+      }],
       Notification: [{
         matcher: '',
         hooks: [async (input) => {

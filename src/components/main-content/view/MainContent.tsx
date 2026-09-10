@@ -1,4 +1,4 @@
-import React, { lazy, Suspense, useEffect } from 'react';
+import React, { lazy, Suspense, useEffect, useState } from 'react';
 
 import ChatInterface from '../../chat/view/ChatInterface';
 import type { MainContentProps } from '../types/types';
@@ -37,6 +37,7 @@ const TaskMasterPanel = lazy(() =>
   import('../../task-master').then((m) => ({ default: m.TaskMasterPanel })),
 );
 const EditorSidebar = lazy(() => import('../../code-editor/view/EditorSidebar'));
+const CheckpointsPanel = lazy(() => import('../../checkpoints/CheckpointsPanel'));
 
 /** Пока кусок панели летит по сети — короткая надпись вместо пустоты. */
 function PanelFallback() {
@@ -120,6 +121,9 @@ function MainContent({
     }
   }, [selectedProject, currentProject?.projectId, setCurrentProject]);
 
+  // Панель снимков: выезжает справа поверх рабочей области.
+  const [showCheckpoints, setShowCheckpoints] = useState(false);
+
   useEffect(() => {
     if (!shouldShowTasksTab && activeTab === 'tasks') {
       setActiveTab('chat');
@@ -180,6 +184,7 @@ function MainContent({
     // "slid out of frame" later. flex-1 takes the space that is actually left.
     <div className="flex min-h-0 flex-1 flex-col">
       <MainContentHeader
+        onOpenCheckpoints={() => setShowCheckpoints(true)}
         activeTab={activeTab}
         terminalTitle={terminals.find((term) => term.id === activeTerminalId)?.title ?? null}
         selectedProject={selectedProject}
@@ -188,6 +193,27 @@ function MainContent({
         isMobile={isMobile}
         onMenuClick={onMenuClick}
       />
+
+      {showCheckpoints && (
+        <>
+          {/* Затемнение: нажатие мимо панели закрывает её. */}
+          <button
+            type="button"
+            aria-label="Закрыть снимки"
+            className="fixed inset-0 z-40 bg-background/60 backdrop-blur-sm"
+            onClick={() => setShowCheckpoints(false)}
+          />
+          <aside className="fixed inset-y-0 right-0 z-50 flex w-[min(420px,90vw)] flex-col border-l border-border bg-background shadow-xl">
+            <Suspense fallback={<PanelFallback />}>
+              <CheckpointsPanel
+                projectPath={selectedProject?.fullPath || selectedProject?.path || null}
+                sessionId={selectedSession?.id ?? null}
+                onClose={() => setShowCheckpoints(false)}
+              />
+            </Suspense>
+          </aside>
+        </>
+      )}
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <div className={`flex min-h-0 min-w-[200px] flex-col overflow-hidden ${editorExpanded ? 'hidden' : ''} flex-1`}>
