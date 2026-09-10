@@ -115,7 +115,8 @@
     "notifications": "Notifications",
     "plugins": "Plugins",
     "about": "About",
-    "presets": "Presets"
+    "presets": "Presets",
+    "memory": "Memory"
   },
   "about": {
     "sessionTitle": "Session",

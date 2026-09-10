@@ -1,4 +1,4 @@
-import { Bell, Bot, GitBranch, Info, Key, ListChecks, Mic, MonitorPlay, Palette, Puzzle, SlidersHorizontal, Wand2 } from 'lucide-react';
+import { Bell, Bot, GitBranch, Info, Key, ListChecks, Mic, MonitorPlay, Palette, Puzzle, SlidersHorizontal, Wand2, Brain } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { cn } from '../../../lib/utils';
@@ -24,6 +24,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'api', labelKey: 'mainTabs.apiTokens', icon: Key },
   { id: 'voice', labelKey: 'mainTabs.voice', icon: Mic },
   { id: 'presets', labelKey: 'mainTabs.presets', icon: Wand2 },
+  { id: 'memory', labelKey: 'mainTabs.memory', icon: Brain },
   { id: 'tasks', labelKey: 'mainTabs.tasks', icon: ListChecks },
   { id: 'browser', labelKey: 'mainTabs.browser', icon: MonitorPlay },
   { id: 'plugins', labelKey: 'mainTabs.plugins', icon: Puzzle },

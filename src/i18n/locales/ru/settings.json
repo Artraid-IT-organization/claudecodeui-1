@@ -100,7 +100,8 @@
     "about": "О программе",
     "voice": "Голос",
     "browser": "Браузер",
-    "presets": "Пресеты"
+    "presets": "Пресеты",
+    "memory": "Память"
   },
   "about": {
     "sessionTitle": "Сеанс",

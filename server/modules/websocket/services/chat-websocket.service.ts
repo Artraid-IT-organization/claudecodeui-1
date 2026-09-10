@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { WebSocket } from 'ws';
 
 import { credentialsDb, sessionsDb, userDb } from '@/modules/database/index.js';
+import { projectMemory } from '@/modules/memory/index.js';
 import { providerModelsService } from '@/modules/providers/index.js';
 import { chatRunRegistry } from '@/modules/websocket/services/chat-run-registry.service.js';
 import { connectedClients, WS_OPEN_STATE } from '@/modules/websocket/services/websocket-state.service.js';
@@ -307,9 +308,27 @@ async function handleChatSend(
       ? clientOptions.presetSystemPrompt.trim()
       : '';
 
+  // Память проекта: короткие выводы из прошлых разговоров. Без неё каждый
+  // новый разговор начинается с чистого листа, и человек в третий раз
+  // объясняет одно и то же. Фактов нет — блок пустой, всё как раньше.
+  let memoryBlock = '';
+  try {
+    const projectPathForMemory = session.project_path ?? null;
+    if (projectPathForMemory) {
+      memoryBlock = projectMemory.buildContextBlock(projectPathForMemory);
+    }
+  } catch (error) {
+    // Память — подспорье, а не обязательная часть запуска.
+    console.warn('[Память проекта] не удалось собрать блок:', error);
+  }
+
+  const systemPromptAddition = [memoryBlock, presetSystemPrompt]
+    .filter((part) => part && part.trim())
+    .join('\n\n');
+
   const runtimeOptions: AnyRecord = {
     ...clientOptions,
-    appendSystemPrompt: presetSystemPrompt || undefined,
+    appendSystemPrompt: systemPromptAddition || undefined,
     // Attachments are re-validated server-side: only direct children of the
     // global upload store may reach provider runtimes or their file tools.
     attachments: uniqueAttachments,
