@@ -24,6 +24,7 @@ import {
 } from '@/shared/image-attachments.js';
 import { CLAUDE_PREDEFINED_MODELS } from '@/modules/providers/list/claude/claude-models.provider.js';
 import { checkpointService } from '@/modules/checkpoints/index.js';
+import { fileReservations } from '@/modules/coordination/index.js';
 import { resolveClaudeCodeExecutablePath } from '@/shared/claude-cli-path.js';
 import {
   createNotificationEvent,
@@ -422,6 +423,13 @@ function addSession(sessionId, queryInstance, writer = null, releaseInput = null
  */
 function removeSession(sessionId) {
   activeSessions.delete(sessionId);
+  // Разговор закончился — отпускаем все файлы, которые он держал. Иначе
+  // упавший или прерванный чат заставил бы соседей ждать до истечения срока.
+  try {
+    if (sessionId) fileReservations.releaseSession(sessionId);
+  } catch (error) {
+    console.warn('[Координация] не удалось снять брони разговора:', error?.message || error);
+  }
 }
 
 /**
@@ -785,6 +793,12 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
      * поиск и вопросы ничего не портят — снимать перед ними значило бы
      * забивать историю пустыми точками, между которыми нет разницы.
      */
+    /*
+     * Брони файлов, взятые в этом запуске: ключ «сессия:файл» → номер брони.
+     * Живёт только на время запуска; всё, что не снялось, протухнет по сроку.
+     */
+    const pendingReservations = new Map();
+
     const CHANGING_TOOLS = new Set([
       'Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash', 'BashOutput',
     ]);
@@ -802,27 +816,99 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       PreToolUse: [{
         matcher: '',
         hooks: [async (input) => {
+          const toolName = typeof input?.tool_name === 'string' ? input.tool_name : '';
+          if (!CHANGING_TOOLS.has(toolName)) return {};
+
+          const projectPath = options.cwd || options.projectPath;
+          if (!projectPath) return {};
+
+          const toolInput = input?.tool_input || {};
+          const file =
+            typeof toolInput.file_path === 'string' ? toolInput.file_path
+            : typeof toolInput.notebook_path === 'string' ? toolInput.notebook_path
+            : null;
+
+          const activeSessionId = sessionId || capturedSessionId || null;
+
+          /*
+           * Шаг 1. Объявить намерение и, если надо, дождаться очереди.
+           *
+           * Два чата, одновременно правящих один файл, молча затирают работу
+           * друг друга: файл читается целиком и кладётся целиком, поэтому
+           * последняя запись побеждает, а первая исчезает без ошибки. Здесь
+           * второй чат ждёт, пока первый освободит файл, и лишь потом берётся.
+           * Не дождался — получает внятный отказ, который человек видит в
+           * ленте, вместо тихой пропажи своей работы.
+           */
+          if (file && activeSessionId) {
+            try {
+              const lease = await fileReservations.acquire({
+                projectPath,
+                filePath: file,
+                sessionId: activeSessionId,
+                sessionTitle: sessionSummary || null,
+              });
+
+              if (!lease.ok) {
+                const who = lease.holder.sessionTitle || 'другой разговор';
+                return {
+                  hookSpecificOutput: {
+                    hookEventName: 'PreToolUse',
+                    permissionDecision: 'deny',
+                    permissionDecisionReason:
+                      `Файл занят: его прямо сейчас правит «${who}». ` +
+                      `Ждал ${Math.round(lease.waitedMs / 1000)} секунд, он всё ещё занят. ` +
+                      'Возьмись за другой файл или повтори позже — иначе ваши правки затрут друг друга.',
+                  },
+                };
+              }
+
+              // Бронь снимаем, как только инструмент отработает. Сторожевой
+              // срок в самой брони страхует на случай, если сюда не дойдёт.
+              pendingReservations.set(`${activeSessionId}:${file}`, lease.reservationId);
+            } catch (error) {
+              // Доска объявлений — подстраховка, а не обязательный этап.
+              // Сломалась она — работа агента продолжается как раньше.
+              console.warn('[Координация] бронь не взята:', error?.message || error);
+            }
+          }
+
+          /* Шаг 2. Снимок «как было» — точка, к которой можно вернуться. */
           try {
-            const toolName = typeof input?.tool_name === 'string' ? input.tool_name : '';
-            if (!CHANGING_TOOLS.has(toolName)) return {};
-
-            const projectPath = options.cwd || options.projectPath;
-            if (!projectPath) return {};
-
-            const toolInput = input?.tool_input || {};
-            const file =
-              typeof toolInput.file_path === 'string' ? toolInput.file_path
-              : typeof toolInput.notebook_path === 'string' ? toolInput.notebook_path
-              : null;
-
             await checkpointService.snapshot({
               projectPath,
-              sessionId: sessionId || capturedSessionId || null,
+              sessionId: activeSessionId,
               tool: toolName,
               file,
             });
           } catch (error) {
             console.warn('[Чекпойнты] снимок не сделан:', error?.message || error);
+          }
+
+          return {};
+        }]
+      }],
+      PostToolUse: [{
+        matcher: '',
+        hooks: [async (input) => {
+          // Правка закончилась — освобождаем файл сразу, не дожидаясь срока.
+          try {
+            const toolInput = input?.tool_input || {};
+            const file =
+              typeof toolInput.file_path === 'string' ? toolInput.file_path
+              : typeof toolInput.notebook_path === 'string' ? toolInput.notebook_path
+              : null;
+            const activeSessionId = sessionId || capturedSessionId || null;
+            if (!file || !activeSessionId) return {};
+
+            const key = `${activeSessionId}:${file}`;
+            const reservationId = pendingReservations.get(key);
+            if (reservationId !== undefined) {
+              fileReservations.release(reservationId);
+              pendingReservations.delete(key);
+            }
+          } catch (error) {
+            console.warn('[Координация] бронь не снята:', error?.message || error);
           }
           return {};
         }]

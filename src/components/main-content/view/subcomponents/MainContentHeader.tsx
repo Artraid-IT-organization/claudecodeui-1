@@ -6,6 +6,7 @@ import type { MainContentHeaderProps } from '../../types/types';
 import MobileMenuButton from './MobileMenuButton';
 import MainContentTitle from './MainContentTitle';
 import ConnectionStatus from './ConnectionStatus';
+import BusyFilesIndicator from './BusyFilesIndicator';
 import PresetSelector from './PresetSelector';
 
 export default function MainContentHeader({
@@ -48,6 +49,10 @@ export default function MainContentHeader({
             </Button>
           </Tooltip>
         )}
+        <BusyFilesIndicator
+          projectPath={selectedProject?.fullPath || selectedProject?.path || null}
+          currentSessionId={selectedSession?.id ?? null}
+        />
         <ConnectionStatus />
       </div>
     </header>
