@@ -93,7 +93,8 @@
     "tasks": "Attività",
     "notifications": "Notifiche",
     "plugins": "Plugin",
-    "about": "Informazioni"
+    "about": "Informazioni",
+    "presets": "Preset"
   },
   "notifications": {
     "title": "Notifiche",

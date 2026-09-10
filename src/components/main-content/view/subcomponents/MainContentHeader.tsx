@@ -3,6 +3,7 @@ import type { MainContentHeaderProps } from '../../types/types';
 import MobileMenuButton from './MobileMenuButton';
 import MainContentTitle from './MainContentTitle';
 import ConnectionStatus from './ConnectionStatus';
+import PresetSelector from './PresetSelector';
 
 export default function MainContentHeader({
   activeTab,
@@ -24,6 +25,7 @@ export default function MainContentHeader({
           shouldShowTasksTab={shouldShowTasksTab}
           terminalTitle={terminalTitle}
         />
+        {activeTab === 'chat' && !terminalTitle && <PresetSelector />}
         <ConnectionStatus />
       </div>
     </header>

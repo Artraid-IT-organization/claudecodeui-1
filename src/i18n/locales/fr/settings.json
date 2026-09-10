@@ -93,7 +93,8 @@
     "tasks": "Tâches",
     "notifications": "Notifications",
     "plugins": "Plugins",
-    "about": "À propos"
+    "about": "À propos",
+    "presets": "Préréglages"
   },
   "notifications": {
     "title": "Notifications",

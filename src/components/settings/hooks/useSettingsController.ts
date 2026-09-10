@@ -57,7 +57,7 @@ type ActiveLoginProvider = AgentProvider | '';
 // not introduced by it) - normalizeMainTab() would silently fall back an
 // initialTab="voice" deep link to 'agents'. Fixed in passing since this
 // array was already being touched to add 'chatInput'.
-const KNOWN_MAIN_TABS: SettingsMainTab[] = ['agents', 'appearance', 'chatInput', 'git', 'api', 'voice', 'tasks', 'browser', 'notifications', 'plugins', 'about'];
+const KNOWN_MAIN_TABS: SettingsMainTab[] = ['agents', 'appearance', 'chatInput', 'git', 'api', 'voice', 'presets', 'tasks', 'browser', 'notifications', 'plugins', 'about'];
 
 const normalizeMainTab = (tab: string): SettingsMainTab => {
   // Keep backwards compatibility with older callers that still pass "tools".

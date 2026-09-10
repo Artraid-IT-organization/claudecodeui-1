@@ -7,6 +7,7 @@ import { TaskMasterProvider } from './contexts/TaskMasterContext';
 import { TasksSettingsProvider } from './contexts/TasksSettingsContext';
 import { WebSocketProvider } from './contexts/WebSocketContext';
 import { PluginsProvider } from './contexts/PluginsContext';
+import { PromptPresetsProvider } from './contexts/PromptPresetsContext';
 import AppContent from './components/app/AppContent';
 import i18n from './i18n/config.js';
 
@@ -109,6 +110,7 @@ export default function App() {
         <AuthProvider>
           <WebSocketProvider>
             <PluginsProvider>
+              <PromptPresetsProvider>
               <TasksSettingsProvider>
                 <TaskMasterProvider>
                 <ProtectedRoute>
@@ -153,6 +155,7 @@ export default function App() {
                 </ProtectedRoute>
                 </TaskMasterProvider>
               </TasksSettingsProvider>
+              </PromptPresetsProvider>
             </PluginsProvider>
           </WebSocketProvider>
         </AuthProvider>

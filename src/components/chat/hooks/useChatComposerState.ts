@@ -28,6 +28,8 @@ import type {
   PermissionMode,
   SessionEstablishedContext,
 } from '../types/types';
+
+import { usePromptPresetsContext } from '../../../contexts/PromptPresetsContext';
 import type { Project, ProjectSession, LLMProvider, ProviderModelOption } from '../../../types/app';
 import { escapeRegExp } from '../utils/chatFormatting';
 
@@ -649,6 +651,8 @@ export function useChatComposerState({
   // send time for immediate sends and at queue time for queued ones, so a
   // queued message keeps the provider settings it was composed under even if
   // it is later dispatched outside this composer (app-level auto-send).
+  const { activePreset } = usePromptPresetsContext();
+
   const buildSendOptions = useCallback((currentInput: string): QueuedSendOptions => {
     const getToolsSettings = () => {
       try {
@@ -684,8 +688,13 @@ export function useChatComposerState({
       toolsSettings,
       skipPermissions: toolsSettings?.skipPermissions || false,
       sessionSummary: getNotificationSessionSummary(selectedSession, currentInput),
+      // Активный пресет прилетает на сервер как надстройка над системным
+      // промптом Claude Code — заменять базовый нельзя, иначе агент теряет
+      // протокол работы с инструментами. Пустое = как раньше.
+      presetSystemPrompt: activePreset?.systemPrompt ?? undefined,
     };
   }, [
+    activePreset,
     currentProviderEffort,
     currentProviderModel,
     permissionMode,

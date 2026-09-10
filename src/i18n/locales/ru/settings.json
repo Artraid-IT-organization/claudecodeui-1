@@ -99,7 +99,8 @@
     "plugins": "Плагины",
     "about": "О программе",
     "voice": "Голос",
-    "browser": "Браузер"
+    "browser": "Браузер",
+    "presets": "Пресеты"
   },
   "about": {
     "sessionTitle": "Сеанс",
