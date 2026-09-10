@@ -101,6 +101,21 @@ export function useShellConnection({
         return;
       }
 
+      /*
+       * Возврат в живую сессию: сервер прислал снапшот экрана. Терминал
+       * очищается и рисуется одним куском — так возврат происходит мгновенно
+       * и без «пробежки» вывода от начала истории.
+       */
+      if (message.type === 'snapshot') {
+        const snapshot = typeof message.data === 'string' ? message.data : '';
+        const terminal = terminalRef.current;
+        if (terminal && snapshot) {
+          terminal.reset();
+          terminal.write(snapshot);
+        }
+        return;
+      }
+
     },
     [handleProcessCompletion, onOutputRef, terminalRef],
   );

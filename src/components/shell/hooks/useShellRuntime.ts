@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react';
 import type { FitAddon } from '@xterm/addon-fit';
+import type { SerializeAddon } from '@xterm/addon-serialize';
 import type { Terminal } from '@xterm/xterm';
 
 import type { UseShellRuntimeOptions, UseShellRuntimeResult } from '../types/types';
@@ -22,6 +23,7 @@ export function useShellRuntime({
   const terminalContainerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const serializeAddonRef = useRef<SerializeAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
   const selectedProjectRef = useRef(selectedProject);
@@ -60,6 +62,7 @@ export function useShellRuntime({
     terminalContainerRef,
     terminalRef,
     fitAddonRef,
+    serializeAddonRef,
     wsRef,
     selectedProject,
     minimal,

@@ -23,14 +23,54 @@ type ShellIncomingMessage = {
   forceRestart?: boolean;
 };
 
+/**
+ * Кольцевой буфер вывода PTY: кусочки вывода — в очередь, общий размер в
+ * байтах ограничен и старые куски отбрасываются по мере поступления новых.
+ *
+ * Пока лимит стоял в «числе кусков» (5000), никто не знал, сколько это байт.
+ * Скрипт с длинными строками мог накопить десятки МБ на одну спрятанную
+ * вкладку — при восьми окнах это лишние сотни мегабайт «на всякий случай».
+ * Теперь предел — фиксированный размер в байтах на окно, и он одинаковый
+ * для всех сессий.
+ */
+type PtyOutputBuffer = {
+  chunks: string[];
+  bytes: number;
+};
+
 type PtySessionEntry = {
   pty: IPty;
   ws: WebSocket | null;
-  buffer: string[];
+  buffer: PtyOutputBuffer;
+  /**
+   * Снапшот экрана, снятый клиентом перед уходом (xterm-addon-serialize).
+   * Возвращённый клиент применяет его до того, как получит буфер догона —
+   * так экран восстанавливается визуально идентичным, а не «сверху вниз с
+   * половиной ANSI-последовательностей», которая раньше рисовала мусор.
+   */
+  snapshot: string | null;
   timeoutId: NodeJS.Timeout | null;
   projectPath: string;
   sessionId: string | null;
 };
+
+/** 512 КБ на окно: хватает на несколько тысяч строк даже с цветом. */
+const PTY_BUFFER_MAX_BYTES = 512 * 1024;
+
+function appendToBuffer(buffer: PtyOutputBuffer, chunk: string): void {
+  buffer.chunks.push(chunk);
+  buffer.bytes += chunk.length;
+  while (buffer.bytes > PTY_BUFFER_MAX_BYTES && buffer.chunks.length > 1) {
+    const dropped = buffer.chunks.shift();
+    if (dropped !== undefined) {
+      buffer.bytes -= dropped.length;
+    }
+  }
+}
+
+function drainBufferToString(buffer: PtyOutputBuffer): string {
+  return buffer.chunks.join('');
+}
 
 const ptySessionsMap = new Map<string, PtySessionEntry>();
 const PTY_SESSION_TIMEOUT = 30 * 60 * 1000;
@@ -362,25 +402,41 @@ export function handleShellConnection(
             existingSession.timeoutId = null;
           }
 
-          ws.send(
-            JSON.stringify({
-              type: 'output',
-              data: '\x1b[36m[Reconnected to existing session]\x1b[0m\r\n',
-            })
-          );
+          /*
+           * Реплей при возврате.
+           *
+           * Сначала — снапшот экрана, снятый клиентом перед разрывом (если
+           * был): xterm.js применяет его как «здесь и было», без прокрутки.
+           * Потом — весь накопившийся с тех пор вывод, одним куском вместо
+           * тысячи маленьких сообщений: одно сообщение — один redraw в
+           * терминале, а не тысяча, так возврат выглядит мгновенным.
+           *
+           * Технический баннер «Reconnected to existing session» намеренно
+           * убран: он лез в самое начало экрана и сбивал вёрстку у программ,
+           * которые сами рисуют интерфейс (Клод в терминале, htop, mc). Факт
+           * возврата виден клиентом по метке type=snapshot.
+           */
+          if (existingSession.snapshot) {
+            ws.send(
+              JSON.stringify({
+                type: 'snapshot',
+                data: existingSession.snapshot,
+              })
+            );
+          }
 
-          if (existingSession.buffer.length > 0) {
-            existingSession.buffer.forEach((bufferedData) => {
-              ws.send(
-                JSON.stringify({
-                  type: 'output',
-                  data: bufferedData,
-                })
-              );
-            });
+          const backlog = drainBufferToString(existingSession.buffer);
+          if (backlog.length > 0) {
+            ws.send(
+              JSON.stringify({
+                type: 'output',
+                data: backlog,
+              })
+            );
           }
 
           existingSession.ws = ws;
+          existingSession.snapshot = null;
           return;
         }
 
@@ -433,7 +489,8 @@ export function handleShellConnection(
         ptySessionsMap.set(ptySessionKey, {
           pty: shellProcess,
           ws,
-          buffer: [],
+          buffer: { chunks: [], bytes: 0 },
+          snapshot: null,
           timeoutId: null,
           projectPath,
           sessionId,
@@ -449,12 +506,7 @@ export function handleShellConnection(
             return;
           }
 
-          if (session.buffer.length < 5000) {
-            session.buffer.push(chunk);
-          } else {
-            session.buffer.shift();
-            session.buffer.push(chunk);
-          }
+          appendToBuffer(session.buffer, chunk);
 
           if (session.ws && session.ws.readyState === WebSocket.OPEN) {
             let outputData = chunk;
@@ -579,6 +631,30 @@ export function handleShellConnection(
         if (shellProcess) {
           shellProcess.resize(readNumber(data.cols, 80), readNumber(data.rows, 24));
         }
+        return;
+      }
+
+      /*
+       * Снапшот экрана от клиента.
+       *
+       * Xterm-addon-serialize собирает всё, что сейчас видно в терминале
+       * (позиция курсора, цвета, содержимое), в одну строку с ANSI-кодами и
+       * шлёт её сюда перед закрытием вкладки. Мы просто держим последний
+       * снапшот у сессии — если тот же клиент вернётся, реплей начнётся с
+       * него, и экран восстановится в точности как был.
+       *
+       * Лимит на длину — просто отсечка от кривых данных, обычно снапшот
+       * помещается в 50-100 КБ.
+       */
+      if (data.type === 'snapshot') {
+        if (ptySessionKey) {
+          const session = ptySessionsMap.get(ptySessionKey);
+          if (session) {
+            const payload = readString(data.data);
+            session.snapshot = payload.length > 256 * 1024 ? null : payload;
+          }
+        }
+        return;
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
