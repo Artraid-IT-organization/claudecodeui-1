@@ -232,7 +232,8 @@
       "agentsCount_one": "Работает {{count}} агент",
       "agentsCount_few": "Работают {{count}} агента",
       "agentsCount_many": "Работают {{count}} агентов",
-      "waiting": "Ожидает модель"
+      "waiting": "Ожидает модель",
+      "reconnecting": "Связь потеряна, восстанавливаем"
     }
   },
   "projectSelection": {

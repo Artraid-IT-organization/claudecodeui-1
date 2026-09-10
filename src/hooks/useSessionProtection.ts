@@ -16,7 +16,17 @@ import { useCallback, useState } from 'react';
  * looked identical whether the model was reasoning, stuck, or already
  * finished - the exact complaint this replaces.
  */
-export type ActivityPhase = 'thinking' | 'writing' | 'tool' | 'agents' | 'waiting';
+// 'reconnecting' — не то, чем занят провайдер, а состояние связи с ним. Живёт
+// в том же перечислении намеренно: строка состояния одна, и человеку важно
+// видеть в ней одно понятное «что сейчас происходит», а не гадать между двумя
+// индикаторами.
+export type ActivityPhase =
+  | 'thinking'
+  | 'writing'
+  | 'tool'
+  | 'agents'
+  | 'waiting'
+  | 'reconnecting';
 
 export interface SessionActivity {
   /** Provider-supplied status line; null renders the phase label instead. */

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ArrowDownIcon } from 'lucide-react';
 
+import type { SessionActivity } from '../../../hooks/useSessionProtection';
 import { useTasksSettings } from '../../../contexts/TasksSettingsContext';
 import { useWebSocket } from '../../../contexts/WebSocketContext';
 import PermissionContext from '../../../contexts/PermissionContext';
@@ -16,6 +17,13 @@ import ChatMessagesPane from './subcomponents/ChatMessagesPane';
 import ChatRequestBar from './subcomponents/ChatRequestBar';
 import ChatComposer from './subcomponents/ChatComposer';
 import CommandResultModal from './subcomponents/CommandResultModal';
+
+/**
+ * Сколько ждать после восстановления связи, прежде чем признать ответ
+ * потерянным. Подписка уходит сразу, но подтверждение от сервера приходит не
+ * мгновенно — без этой паузы живой ответ объявлялся бы неудачей.
+ */
+const RECONNECT_GRACE_MS = 8000;
 
 function ChatInterface({
   isActive,
@@ -248,22 +256,73 @@ function ChatInterface({
   // Само падение лечится на сервере. Здесь — вторая половина обещания: если
   // связь всё же пропала посреди ответа, об этом говорится прямо, и видно,
   // что сообщение нужно отправить заново.
+  //
+  // Уточнение: сам по себе обрыв — ещё не провал. Браузер переподключается за
+  // считанные секунды, и подписка на сессию заново цепляется к ЖИВОМУ ответу,
+  // который всё это время считался на сервере. Объявлять неудачу сразу значит
+  // врать в половине случаев и заставлять переспрашивать зря.
+  //
+  // Поэтому обрыв сначала показывается как состояние — «Связь потеряна,
+  // восстанавливаем» в той же строке, где обычно видно, чем занят Клод. И
+  // только если после восстановления связи ответ так и не продолжился,
+  // появляется сообщение, что его нужно отправить заново.
+  const lostWhileWaitingRef = useRef(false);
+  const isProcessingRef = useRef(isProcessing);
+  isProcessingRef.current = isProcessing;
+
   const wasConnectedRef = useRef(isConnected);
   useEffect(() => {
-    const lostWhileWaiting = wasConnectedRef.current && !isConnected && isProcessing;
+    const wasConnected = wasConnectedRef.current;
     wasConnectedRef.current = isConnected;
-    if (!lostWhileWaiting) {
+
+    if (wasConnected && !isConnected && isProcessing) {
+      lostWhileWaitingRef.current = true;
       return;
     }
-    addMessage({
-      type: 'error',
-      content: t(
-        'errors.connectionLostWhileWaiting',
-        'Связь с сервером прервалась, ответ не получен. Отправьте сообщение ещё раз.',
-      ),
-      timestamp: new Date(),
-    });
+
+    if (wasConnected || !isConnected || !lostWhileWaitingRef.current) {
+      return;
+    }
+
+    // Связь вернулась. Даём серверу время подтвердить, что ответ ещё живёт:
+    // подписка уходит сразу, а подтверждение приходит не мгновенно.
+    const timer = setTimeout(() => {
+      if (!lostWhileWaitingRef.current) return;
+      lostWhileWaitingRef.current = false;
+      if (isProcessingRef.current) return;
+      addMessage({
+        type: 'error',
+        content: t(
+          'errors.connectionLostWhileWaiting',
+          'Связь с сервером прервалась, ответ не получен. Отправьте сообщение ещё раз.',
+        ),
+        timestamp: new Date(),
+      });
+    }, RECONNECT_GRACE_MS);
+    return () => clearTimeout(timer);
   }, [isConnected, isProcessing, addMessage, t]);
+
+  // Ответ продолжился сам — извиняться не за что, снимаем ожидание молча.
+  useEffect(() => {
+    if (isProcessing && isConnected) {
+      lostWhileWaitingRef.current = false;
+    }
+  }, [isProcessing, isConnected]);
+
+  // Пока связи нет, а ответ ждали, строка состояния показывает не пустоту и не
+  // приговор, а честное «восстанавливаем». Прерывать в этот момент нечего,
+  // поэтому кнопка остановки скрыта.
+  const activityWithConnection = useMemo<SessionActivity | null>(() => {
+    if (isConnected) return sessionActivity;
+    if (!sessionActivity && !isProcessing) return sessionActivity;
+    return {
+      statusText: null,
+      phase: 'reconnecting',
+      detail: null,
+      canInterrupt: false,
+      startedAt: sessionActivity?.startedAt ?? Date.now(),
+    };
+  }, [isConnected, isProcessing, sessionActivity]);
 
   // On WebSocket reconnect, request a bounded persisted-tail sync (deferred
   // while Chat is hidden), then re-subscribe — the
@@ -454,7 +513,7 @@ function ChatInterface({
           pendingPermissionRequests={pendingPermissionRequests}
           handlePermissionDecision={handlePermissionDecision}
           handleGrantToolPermission={handleGrantToolPermission}
-          activity={sessionActivity}
+          activity={activityWithConnection}
           isLoading={isProcessing}
           onAbortSession={handleAbortSession}
           permissionMode={permissionMode}

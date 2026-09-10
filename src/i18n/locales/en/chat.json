@@ -245,7 +245,8 @@
       "agents": "Agents running",
       "agentsCount_one": "{{count}} agent running",
       "agentsCount_other": "{{count}} agents running",
-      "waiting": "Waiting for the model"
+      "waiting": "Waiting for the model",
+      "reconnecting": "Connection lost, reconnecting"
     }
   },
   "projectSelection": {
