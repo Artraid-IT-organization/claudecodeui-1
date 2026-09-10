@@ -47,6 +47,8 @@ interface UseChatRealtimeHandlersArgs {
   onSessionProcessing?: MarkSessionProcessing;
   onSessionIdle?: MarkSessionIdle;
   onWebSocketReconnect?: () => void;
+  /** Сервер расписался в получении сообщения — запуск заведён. */
+  onChatAccepted?: (sessionId: string) => void;
   requestLatestMessages: (sessionId: string, allowNetwork?: boolean) => Promise<void>;
   sessionStore: SessionStore;
 }
@@ -83,6 +85,7 @@ export function useChatRealtimeHandlers({
   onSessionProcessing,
   onSessionIdle,
   onWebSocketReconnect,
+  onChatAccepted,
   requestLatestMessages,
   sessionStore,
 }: UseChatRealtimeHandlersArgs) {
@@ -158,6 +161,22 @@ export function useChatRealtimeHandlers({
         case 'websocket_reconnected':
           onWebSocketReconnect?.();
           return;
+
+        case 'chat_accepted': {
+          /*
+           * Расписка сервера: сообщение дошло и запуск заведён.
+           *
+           * Егор: «первое, что должно произойти, — отклик, что сообщение
+           * принято в работу; тогда даже если связь оборвалась, я знаю, что
+           * агент думает, и переживать не о чем». Признак работы поднимаем
+           * здесь, не дожидаясь первых слов ответа: провайдер может молчать
+           * минуту, и всё это время человеку нужно видеть, что дело идёт.
+           */
+          if (!sid) return;
+          onSessionProcessing?.(sid);
+          onChatAccepted?.(sid);
+          return;
+        }
 
         case 'chat_subscribed': {
           // Ack for chat.subscribe: authoritative processing state plus any

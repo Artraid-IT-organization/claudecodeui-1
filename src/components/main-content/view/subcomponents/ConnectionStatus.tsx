@@ -18,7 +18,12 @@ import { Tooltip } from '../../../../shared/view/ui';
  * сколько секунд назад разорвало. Секунды честнее, чем «offline» — сразу
  * понятно, действительно ли проблема надолго или это моргнуло.
  */
-export default function ConnectionStatus() {
+type Props = {
+  /** Идёт ли сейчас запуск агента в открытом разговоре. */
+  isProcessing?: boolean;
+};
+
+export default function ConnectionStatus({ isProcessing = false }: Props) {
   const { isConnected } = useWebSocket();
   const [droppedAt, setDroppedAt] = useState<number | null>(null);
   const [tick, setTick] = useState(0);
@@ -64,17 +69,30 @@ export default function ConnectionStatus() {
       ? `${secondsOff} с`
       : `${Math.floor(secondsOff / 60)} мин ${secondsOff % 60} с`;
 
+  /*
+   * Связь пропала, но запуск при этом жив: он идёт на сервере и обрыв
+   * переживает. Раньше в этот момент в ленту падало «ответ не получен,
+   * отправьте ещё раз» — и человек отправлял, а повторный запуск вытеснял
+   * первый, убивая ту самую работу, которую ждали. Теперь состояние
+   * показывается здесь и говорит правду: связи нет, работа продолжается.
+   */
+  const hint = isProcessing
+    ? `Нет связи ${label}, но работа продолжается на сервере. Ответ появится, когда связь вернётся — отправлять заново не нужно.`
+    : `Нет связи с сервером ${label}. Пытаюсь подключиться каждые 3 секунды.`;
+
   return (
-    <Tooltip
-      content={`Нет связи с сервером ${label}. Пытаюсь подключиться каждые 3 секунды.`}
-      position="bottom"
-    >
+    <Tooltip content={hint} position="bottom">
       <span
-        aria-label={`Нет связи с сервером ${label}`}
-        className="flex flex-shrink-0 items-center gap-1 rounded-md bg-red-500/10 px-1.5 py-0.5 text-[11px] font-medium text-red-500"
+        aria-label={hint}
+        className={
+          isProcessing
+            ? 'flex flex-shrink-0 items-center gap-1 rounded-md bg-amber-500/10 px-1.5 py-0.5 text-[11px] font-medium text-amber-600 dark:text-amber-400'
+            : 'flex flex-shrink-0 items-center gap-1 rounded-md bg-red-500/10 px-1.5 py-0.5 text-[11px] font-medium text-red-500'
+        }
       >
         <WifiOff className="h-3.5 w-3.5" />
         <span className="tabular-nums">{label}</span>
+        {isProcessing && <span className="whitespace-nowrap">· работа идёт</span>}
       </span>
     </Tooltip>
   );

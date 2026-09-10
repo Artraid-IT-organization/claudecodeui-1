@@ -18,6 +18,7 @@ export default function MainContentHeader({
   onMenuClick,
   terminalTitle = null,
   onOpenCheckpoints,
+  isSessionProcessing = false,
 }: MainContentHeaderProps) {
   return (
     <header className="pwa-header-safe flex-shrink-0 border-b border-border/60 bg-background/95 px-3 py-2 backdrop-blur-sm sm:px-4">
@@ -53,7 +54,7 @@ export default function MainContentHeader({
           projectPath={selectedProject?.fullPath || selectedProject?.path || null}
           currentSessionId={selectedSession?.id ?? null}
         />
-        <ConnectionStatus />
+        <ConnectionStatus isProcessing={isSessionProcessing} />
       </div>
     </header>
   );

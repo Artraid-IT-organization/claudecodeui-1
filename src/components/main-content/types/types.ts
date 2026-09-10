@@ -81,6 +81,8 @@ export type MainContentHeaderProps = {
   terminalTitle?: string | null;
   /** Открыть панель снимков состояния. Нет обработчика — нет и кнопки. */
   onOpenCheckpoints?: () => void;
+  /** Идёт ли сейчас запуск в открытом разговоре — для индикатора связи. */
+  isSessionProcessing?: boolean;
   selectedProject: Project;
   selectedSession: ProjectSession | null;
   shouldShowTasksTab: boolean;

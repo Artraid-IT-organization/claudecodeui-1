@@ -185,6 +185,9 @@ function MainContent({
     <div className="flex min-h-0 flex-1 flex-col">
       <MainContentHeader
         onOpenCheckpoints={() => setShowCheckpoints(true)}
+        isSessionProcessing={Boolean(
+          selectedSession?.id && processingSessions?.has?.(selectedSession.id),
+        )}
         activeTab={activeTab}
         terminalTitle={terminals.find((term) => term.id === activeTerminalId)?.title ?? null}
         selectedProject={selectedProject}

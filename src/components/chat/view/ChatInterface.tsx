@@ -5,13 +5,14 @@ import { ArrowDownIcon } from 'lucide-react';
 import { useTasksSettings } from '../../../contexts/TasksSettingsContext';
 import { useWebSocket } from '../../../contexts/WebSocketContext';
 import PermissionContext from '../../../contexts/PermissionContext';
-import type { ChatInterfaceProps, PermissionMode, Provider  } from '../types/types';
+import type { ChatInterfaceProps, ChatMessage, PermissionMode, Provider  } from '../types/types';
 import { useChatProviderState } from '../hooks/useChatProviderState';
 import { useChatSessionState } from '../hooks/useChatSessionState';
 import { useChatRealtimeHandlers } from '../hooks/useChatRealtimeHandlers';
 import { useChatComposerState } from '../hooks/useChatComposerState';
 import { useSessionStore } from '../../../stores/useSessionStore';
 
+import { authenticatedFetch } from '../../../utils/api';
 import ChatMessagesPane from './subcomponents/ChatMessagesPane';
 import ChatRequestBar from './subcomponents/ChatRequestBar';
 import ChatComposer from './subcomponents/ChatComposer';
@@ -237,6 +238,53 @@ function ChatInterface({
     resolvePermissionModeForProvider,
   });
 
+  /**
+   * «Переписать и попробовать заново».
+   *
+   * Создаёт новый разговор, повторяющий этот до выбранной реплики, переходит
+   * в него и подставляет исходный текст в поле ввода — человеку остаётся
+   * поправить формулировку и отправить. Прежний разговор не меняется: обе
+   * попытки живут рядом, между ними можно переключаться и сравнивать.
+   */
+  const handleForkFromMessage = useCallback(
+    async (message: ChatMessage) => {
+      const messageUuid = (message as { uuid?: string }).uuid;
+      if (!messageUuid || !currentSessionId) return;
+
+      try {
+        const response = await authenticatedFetch(
+          `/api/providers/sessions/${currentSessionId}/fork`,
+          {
+            method: 'POST',
+            body: JSON.stringify({ untilUuid: messageUuid }),
+          },
+        );
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload?.error?.message || payload?.error || 'не удалось создать копию');
+        }
+
+        const data = payload?.data ?? payload;
+        const newSessionId: string | undefined = data?.sessionId;
+        if (!newSessionId) throw new Error('сервер не вернул номер нового разговора');
+
+        // Сначала переход, потом текст: иначе подстановка попадёт в старый чат.
+        onNavigateToSession?.(newSessionId);
+        const original: string | null = data?.originalText ?? null;
+        if (original) {
+          window.setTimeout(() => setInput(original), 150);
+        }
+      } catch (error) {
+        console.error('Не удалось переписать сообщение:', error);
+        window.alert(
+          'Не получилось создать копию разговора: ' + ((error as Error).message || 'неизвестная причина'),
+        );
+      }
+    },
+    [currentSessionId, onNavigateToSession, setInput],
+  );
+
+
   // Обрыв связи во время ответа больше не остаётся без объяснения.
   //
   // Егор: «отправляю сообщение — и ни ответа, ни размышлений, ни ошибки,
@@ -248,22 +296,26 @@ function ChatInterface({
   // Само падение лечится на сервере. Здесь — вторая половина обещания: если
   // связь всё же пропала посреди ответа, об этом говорится прямо, и видно,
   // что сообщение нужно отправить заново.
-  const wasConnectedRef = useRef(isConnected);
-  useEffect(() => {
-    const lostWhileWaiting = wasConnectedRef.current && !isConnected && isProcessing;
-    wasConnectedRef.current = isConnected;
-    if (!lostWhileWaiting) {
-      return;
-    }
-    addMessage({
-      type: 'error',
-      content: t(
-        'errors.connectionLostWhileWaiting',
-        'Связь с сервером прервалась, ответ не получен. Отправьте сообщение ещё раз.',
-      ),
-      timestamp: new Date(),
-    });
-  }, [isConnected, isProcessing, addMessage, t]);
+  /*
+   * Обрыв связи посреди ответа больше не пишется в ленту.
+   *
+   * Как было и почему это оказалось вредно. При обрыве в ленту падало
+   * «ответ не получен, отправьте сообщение ещё раз». Но запуск в этот момент
+   * жив: он идёт на сервере и обрыв переживает — работает агент, читаются
+   * файлы, выполняются команды. Человек читал «отправьте ещё раз», отправлял,
+   * и повторный запуск ВЫТЕСНЯЛ первый. В журнале сервера это видно как
+   * «прерываю вытесненный запуск»: совет из сообщения своими руками убивал ту
+   * самую работу, ответа от которой ждали.
+   *
+   * Вторая беда — количество. Связь с телефоном рвётся десятками раз за час
+   * (замер по журналу: соединения живут от девяти секунд до минуты), и лента
+   * заполнялась бы красными плашками вперемешку с ответом.
+   *
+   * Где теперь видно состояние. Значок связи в шапке: пока связи нет, он
+   * красный и считает секунды, а рядом стоит признак работы — «Думает».
+   * Вместе это и есть честный ответ на вопрос «что происходит»: связи нет,
+   * работа идёт. Отдельная запись в ленте для этого не нужна.
+   */
 
   // On WebSocket reconnect, request a bounded persisted-tail sync (deferred
   // while Chat is hidden), then re-subscribe — the
@@ -432,6 +484,7 @@ function ChatInterface({
           onGrantToolPermission={handleGrantToolPermission}
           showRawParameters={showRawParameters}
           showThinking={showThinking}
+          onForkFromMessage={handleForkFromMessage}
           selectedProject={selectedProject}
         />
 
