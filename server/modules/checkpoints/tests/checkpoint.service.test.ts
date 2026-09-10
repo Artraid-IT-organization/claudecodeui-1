@@ -157,3 +157,25 @@ test('список снимков отдаёт подписи и привязк�
   assert.equal(list[0].sessionId, 'сессия-42');
   assert.ok(list[0].label.includes('app.js'), 'в подписи должен быть файл');
 });
+
+test('слишком большая папка снимками не обслуживается', async () => {
+  const project = await makeProject();
+
+  // Делаем папку заведомо больше порога: важно не столько число файлов,
+  // сколько то, что сервис откажется, а не начнёт снимать всё подряд.
+  const bulk = path.join(project, 'много');
+  await fsp.mkdir(bulk, { recursive: true });
+  for (let i = 0; i < 6100; i++) {
+    await fsp.writeFile(path.join(bulk, `файл-${i}.txt`), `строка ${i}\n`, 'utf8');
+  }
+
+  const id = await checkpointService.snapshot({
+    projectPath: project,
+    tool: 'Write',
+    file: null,
+    force: true,
+  });
+
+  assert.equal(id, null, 'для раздутой папки снимок не делается');
+  assert.deepEqual(await checkpointService.list(project), [], 'и в списке ничего не появляется');
+});

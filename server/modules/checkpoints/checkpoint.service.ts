@@ -40,6 +40,27 @@ const MAX_CHECKPOINTS = 300;
 /** Файлы тяжелее — не наши: это сборка, медиа или архивы. */
 const MAX_FILE_SIZE_KB = 1024;
 
+/*
+ * Потолок на размер проекта.
+ *
+ * Замер на этой машине: домашний каталог целиком даёт 410 МБ и 19 тысяч
+ * файлов даже после всех фильтров — это не проект, а всё хозяйство сразу.
+ * Снимать такое бессмысленно (человек всё равно откатывает конкретную работу,
+ * а не весь сервер), медленно (git перебирает девятнадцать тысяч путей на
+ * каждое действие агента) и опасно: на диске свободно четыре гигабайта.
+ *
+ * Нормальный проект в эти рамки укладывается с запасом: claudecodeui — 1377
+ * файлов и 10 МБ, sunschool — 144 файла и 14 МБ.
+ */
+const MAX_PROJECT_FILES = 6000;
+const MAX_PROJECT_SIZE_MB = 120;
+
+/**
+ * Вердикт «снимаем этот проект или нет» — считается один раз и запоминается.
+ * Пересчитывать на каждое действие агента накладно: это обход всего дерева.
+ */
+const projectEligibility = new Map<string, { ok: boolean; reason: string }>();
+
 /**
  * Что игнорируем. Формат — как в .gitignore.
  *
@@ -159,6 +180,89 @@ function run(args: string[], cwd: string, timeoutMs = 60_000): Promise<RunResult
   });
 }
 
+/**
+ * Прикидывает, стоит ли вообще снимать этот проект.
+ *
+ * Обходит дерево, считая только то, что реально попало бы в снимок. Обход
+ * прекращается досрочно, как только стало ясно, что порог превышен — на
+ * домашнем каталоге это экономит секунды.
+ */
+async function isProjectEligible(projectPath: string): Promise<{ ok: boolean; reason: string }> {
+  const cached = projectEligibility.get(projectPath);
+  if (cached) return cached;
+
+  const skipDirs = new Set([
+    'node_modules', '.git', 'dist', 'dist-server', 'build', '.next', 'out',
+    'coverage', '.cache', '.turbo', 'venv', '.venv', '__pycache__',
+    '.pytest_cache', 'target', 'vendor', '.gradle',
+  ]);
+  const skipExt = new Set([
+    '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.svg', '.mp4', '.mov',
+    '.wav', '.mp3', '.zip', '.tar', '.gz', '.pdf', '.woff', '.woff2', '.ttf',
+    '.eot', '.docx', '.xlsx', '.sqlite', '.sqlite3', '.db', '.bin', '.so',
+    '.dylib', '.node', '.log',
+  ]);
+
+  let files = 0;
+  let bytes = 0;
+  let exceeded = false;
+
+  const walk = async (dir: string, depth: number): Promise<void> => {
+    if (exceeded || depth > 12) return;
+    let entries;
+    try {
+      entries = await fsp.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (exceeded) return;
+      if (entry.name.startsWith('.') && entry.isDirectory() && entry.name !== '.claude') {
+        // Скрытые каталоги обычно служебные; .claude пропускаем осознанно —
+        // он и так в списке исключений ниже по размеру.
+        continue;
+      }
+      if (entry.isDirectory()) {
+        if (skipDirs.has(entry.name)) continue;
+        await walk(path.join(dir, entry.name), depth + 1);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      if (skipExt.has(path.extname(entry.name).toLowerCase())) continue;
+
+      try {
+        const stat = await fsp.stat(path.join(dir, entry.name));
+        if (stat.size > MAX_FILE_SIZE_KB * 1024) continue;
+        files += 1;
+        bytes += stat.size;
+        if (files > MAX_PROJECT_FILES || bytes > MAX_PROJECT_SIZE_MB * 1024 * 1024) {
+          exceeded = true;
+          return;
+        }
+      } catch {
+        // файл исчез между обходом и замером
+      }
+    }
+  };
+
+  await walk(projectPath, 0);
+
+  const verdict = exceeded
+    ? {
+        ok: false,
+        reason:
+          `в папке больше ${MAX_PROJECT_FILES} файлов или ${MAX_PROJECT_SIZE_MB} МБ — ` +
+          'снимки для неё отключены, чтобы не забить диск и не тормозить каждое действие',
+      }
+    : { ok: true, reason: '' };
+
+  projectEligibility.set(projectPath, verdict);
+  if (!verdict.ok) {
+    console.warn(`[Чекпойнты] ${projectPath}: ${verdict.reason}`);
+  }
+  return verdict;
+}
+
 /** Устойчивое имя папки под теневой репозиторий конкретного проекта. */
 function shadowDirFor(projectPath: string): string {
   const normalized = path.resolve(projectPath);
@@ -252,6 +356,10 @@ export const checkpointService = {
       if (now - previous < MIN_INTERVAL_MS) return null;
     }
     lastSnapshotAt.set(projectPath, now);
+
+    // Слишком большая папка — снимки для неё не ведём вовсе.
+    const eligibility = await isProjectEligible(projectPath);
+    if (!eligibility.ok) return null;
 
     return withProjectLock(projectPath, async () => {
       const gitDir = await ensureShadowRepo(projectPath);
