@@ -46,6 +46,12 @@ export default function PresetSelector() {
       size="sm"
       variant="ghost"
       triggerClassName="h-7 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground"
+      // Портал = меню рисуется в fixed-позиции поверх всего, а не внутри шапки:
+      // без этого меню наследовало полупрозрачный backdrop-blur шапки и на
+      // мобильном сливалось с текстом переписки под собой.
+      portal
+      align="right"
+      menuClassName="bg-background"
     />
   );
 }
