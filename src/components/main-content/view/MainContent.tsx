@@ -58,6 +58,8 @@ function MainContent({
   selectedProject,
   selectedSession,
   activeTab,
+  terminals = [],
+  activeTerminalId = null,
   setActiveTab,
   shouldShowTasksTab,
   shouldShowBrowserTab,
@@ -179,6 +181,7 @@ function MainContent({
     <div className="flex min-h-0 flex-1 flex-col">
       <MainContentHeader
         activeTab={activeTab}
+        terminalTitle={terminals.find((term) => term.id === activeTerminalId)?.title ?? null}
         selectedProject={selectedProject}
         selectedSession={selectedSession}
         shouldShowTasksTab={shouldShowTasksTab}
@@ -188,10 +191,10 @@ function MainContent({
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <div className={`flex min-h-0 min-w-[200px] flex-col overflow-hidden ${editorExpanded ? 'hidden' : ''} flex-1`}>
-          <div className={`h-full ${activeTab === 'chat' ? 'block' : 'hidden'}`}>
+          <div className={`h-full ${activeTab === 'chat' && activeTerminalId === null ? 'block' : 'hidden'}`}>
             <ErrorBoundary showDetails>
               <ChatInterface
-                isActive={activeTab === 'chat'}
+                isActive={activeTab === 'chat' && activeTerminalId === null}
                 selectedProject={selectedProject}
                 selectedSession={selectedSession}
                 ws={ws}
@@ -214,7 +217,7 @@ function MainContent({
             </ErrorBoundary>
           </div>
 
-          {activeTab === 'files' && (
+          {activeTerminalId === null && activeTab === 'files' && (
             <div className="h-full overflow-hidden">
               <Suspense fallback={<PanelFallback />}>
                 <FileTree selectedProject={selectedProject} onFileOpen={handleFileOpen} />
@@ -222,27 +225,41 @@ function MainContent({
             </div>
           )}
 
-          {activeTab === 'shell' && (
-            <div className="h-full w-full overflow-hidden">
-              <Suspense fallback={<PanelFallback />}>
-                {/*
-                  Командная строка одна на весь сервер, а не своя у каждого
-                  чата: «не по каждому чату, а именно общую». Поэтому сеанс
-                  сюда не передаётся — открывается обычная оболочка в каталоге
-                  проекта, а не продолжение конкретной переписки.
-                */}
-                <StandaloneShell
-                  project={selectedProject}
-                  session={null}
-                  isPlainShell
-                  showHeader={false}
-                  isActive={activeTab === 'shell'}
-                />
-              </Suspense>
-            </div>
-          )}
+          {/*
+            Окна командной строки.
 
-          {activeTab === 'git' && (
+            Каждое открытое окно остаётся на месте, даже когда смотришь чат:
+            оно прячется, но не размонтируется. Иначе переключение на чат
+            обрывало бы соединение и убивало всё, что в нём запущено — а Егор
+            просил именно «как дополнительный чат», куда можно вернуться.
+
+            Сеанс переписки сюда не передаётся: это обычная оболочка в каталоге
+            проекта, а не продолжение конкретного разговора.
+          */}
+          {terminals.map((term) => {
+            const project =
+              projects.find((candidate) => candidate.projectId === term.projectId) ?? selectedProject;
+
+            return (
+              <div
+                key={term.id}
+                className={`h-full w-full overflow-hidden ${term.id === activeTerminalId ? 'block' : 'hidden'}`}
+              >
+                <Suspense fallback={<PanelFallback />}>
+                  <StandaloneShell
+                    project={project}
+                    session={null}
+                    terminalId={term.id}
+                    isPlainShell
+                    showHeader={false}
+                    isActive={term.id === activeTerminalId}
+                  />
+                </Suspense>
+              </div>
+            );
+          })}
+
+          {activeTerminalId === null && activeTab === 'git' && (
             <div className="h-full overflow-hidden">
               <Suspense fallback={<PanelFallback />}>
                 <GitPanel
@@ -258,11 +275,11 @@ function MainContent({
 
           {shouldShowTasksTab && (
             <Suspense fallback={null}>
-              <TaskMasterPanel isVisible={activeTab === 'tasks'} />
+              <TaskMasterPanel isVisible={activeTerminalId === null && activeTab === 'tasks'} />
             </Suspense>
           )}
 
-          {shouldShowBrowserTab && activeTab === 'browser' && (
+          {activeTerminalId === null && shouldShowBrowserTab && activeTab === 'browser' && (
             <div className="h-full overflow-hidden">
               <Suspense fallback={<PanelFallback />}>
                 <BrowserUsePanel isVisible={activeTab === 'browser'} onShowSettings={onShowSettings} />
@@ -270,7 +287,7 @@ function MainContent({
             </div>
           )}
 
-          {activeTab.startsWith('plugin:') && (
+          {activeTerminalId === null && activeTab.startsWith('plugin:') && (
             <div className="h-full overflow-hidden">
               <Suspense fallback={<PanelFallback />}>
                 <PluginTabContent

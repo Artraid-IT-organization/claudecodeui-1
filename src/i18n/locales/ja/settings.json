@@ -93,7 +93,8 @@
     "tasks": "タスク",
     "notifications": "通知",
     "plugins": "プラグイン",
-    "about": "概要"
+    "about": "概要",
+    "presets": "プリセット"
   },
   "notifications": {
     "title": "通知",

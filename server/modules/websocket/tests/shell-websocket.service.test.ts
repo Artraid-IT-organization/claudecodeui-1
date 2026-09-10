@@ -149,3 +149,45 @@ test('общая командная строка без команды запу�
     'без команды оболочка не должна запускаться через -c: так она сразу выходит',
   );
 });
+
+test('два окна командной строки в одной папке — два разных процесса', () => {
+  // Пока имени окна не было, ключ процесса складывался из пути и сеанса.
+  // У двух обычных командных строк в одной папке он совпадал, и второе окно
+  // цеплялось к процессу первого: писало «переподключился к существующему
+  // сеансу» и повторяло чужой ввод. Егор просил несколько независимых окон —
+  // значит, разные имена дают разные процессы.
+  const spawned: unknown[] = [];
+  const dependencies = {
+    resolveProviderSessionId: () => null,
+    spawnPty: () => {
+      const pty = createFakePty();
+      spawned.push(pty);
+      return pty as never;
+    },
+  };
+
+  const init = (terminalId: string) =>
+    JSON.stringify({
+      type: 'init',
+      projectPath: process.cwd(),
+      sessionId: null,
+      hasSession: false,
+      provider: 'plain-shell',
+      isPlainShell: true,
+      terminalId,
+    });
+
+  const first = createFakeSocket();
+  handleShellConnection(first as never, dependencies);
+  first.emit('message', init(`win-a-${Date.now()}`));
+
+  const second = createFakeSocket();
+  handleShellConnection(second as never, dependencies);
+  second.emit('message', init(`win-b-${Date.now()}`));
+
+  assert.equal(spawned.length, 2);
+  assert.equal(
+    second.frames.some((frame) => frame.includes('Reconnected to existing session')),
+    false,
+  );
+});

@@ -9,6 +9,8 @@ type StandaloneShellProps = {
   session?: ProjectSession | null;
   command?: string | null;
   isPlainShell?: boolean | null;
+  /** Имя окна: два терминала в одной папке — это два разных процесса. */
+  terminalId?: string | null;
   isActive?: boolean;
   autoConnect?: boolean;
   onComplete?: ((exitCode: number) => void) | null;
@@ -25,6 +27,7 @@ export default function StandaloneShell({
   session = null,
   command = null,
   isPlainShell = null,
+  terminalId = null,
   isActive = true,
   autoConnect = true,
   onComplete = null,
@@ -66,6 +69,7 @@ export default function StandaloneShell({
           selectedSession={session}
           initialCommand={command}
           isPlainShell={shouldUsePlainShell}
+          terminalId={terminalId}
           isActive={isActive}
           onProcessComplete={handleProcessComplete}
           minimal={minimal}

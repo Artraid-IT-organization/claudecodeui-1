@@ -326,6 +326,17 @@ function mapCliOptionsToSDK(options = {}) {
     preset: 'claude_code'
   };
 
+  // Пресет промпта из шапки разговора.
+  //
+  // Активный пресет добавляется к системному промпту Claude Code, а не
+  // заменяет его: базовый промпт от SDK отвечает за протокол работы с
+  // инструментами и файлами, и без него агент теряет половину способностей.
+  // Пресет накладывает роль сверху: «отвечай коротко», «объясни как
+  // школьнику», «разбирай ошибку методично». Пустая строка = как раньше.
+  if (typeof options.appendSystemPrompt === 'string' && options.appendSystemPrompt.trim()) {
+    sdkOptions.appendSystemPrompt = options.appendSystemPrompt.trim();
+  }
+
   sdkOptions.settingSources = ['project', 'user', 'local'];
 
   // Turn on extended thinking. Without this the CLI subprocess is never told

@@ -38,6 +38,7 @@ import { createSystemModule } from './modules/system/index.js';
 import { createAgentModule } from './modules/agent/index.js';
 import projectModuleRoutes from './modules/projects/projects.routes.js';
 import notificationRoutes from './modules/notifications/notifications.routes.js';
+import { promptPresetsRoutes } from './modules/presets/index.js';
 import { userRoutes } from './modules/user/index.js';
 import {
     getPluginPort,
@@ -224,6 +225,7 @@ app.use('/api/settings', withUserRuntimeContext, settingsRoutes);
 app.use('/api/system', withUserRuntimeContext, systemRoutes);
 
 app.use('/api/notifications', withUserRuntimeContext, notificationRoutes);
+app.use('/api/prompt-presets', withUserRuntimeContext, promptPresetsRoutes);
 
 // User API Routes (protected)
 app.use('/api/user', withUserRuntimeContext, userRoutes);

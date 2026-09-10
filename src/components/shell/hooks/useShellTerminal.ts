@@ -4,6 +4,7 @@ import { ClipboardAddon, type IClipboardProvider } from '@xterm/addon-clipboard'
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { WebglAddon } from '@xterm/addon-webgl';
+import { SerializeAddon } from '@xterm/addon-serialize';
 import { Terminal } from '@xterm/xterm';
 
 import type { Project } from '../../../types/app';
@@ -61,6 +62,7 @@ type UseShellTerminalOptions = {
   terminalContainerRef: RefObject<HTMLDivElement>;
   terminalRef: MutableRefObject<Terminal | null>;
   fitAddonRef: MutableRefObject<FitAddon | null>;
+  serializeAddonRef: MutableRefObject<SerializeAddon | null>;
   wsRef: MutableRefObject<WebSocket | null>;
   selectedProject: Project | null | undefined;
   minimal: boolean;
@@ -74,10 +76,30 @@ type UseShellTerminalResult = {
   disposeTerminal: () => void;
 };
 
+/**
+ * Видно ли окно терминала на экране.
+ *
+ * Пока командная строка была одна, вопрос не стоял: она либо на экране, либо
+ * размонтирована. Теперь окон несколько, и невыбранные просто спрятаны —
+ * браузер сообщает про них нулевой размер. Подгонка под нулевой размер честно
+ * пересчитывает сетку в один столбец, переносит по нему всю историю и сообщает
+ * этот размер запущенной программе: строки схлопываются, а то, что рисует
+ * рамки (тот же Клод в терминале), рассыпается. Проверка возвращает подгонку
+ * только видимым окнам.
+ */
+function isVisibleBox(element: HTMLElement | null): boolean {
+  if (!element) {
+    return false;
+  }
+  const rect = element.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+
 export function useShellTerminal({
   terminalContainerRef,
   terminalRef,
   fitAddonRef,
+  serializeAddonRef,
   wsRef,
   selectedProject,
   minimal,
@@ -130,6 +152,18 @@ export function useShellTerminal({
     const nextFitAddon = new FitAddon();
     fitAddonRef.current = nextFitAddon;
     nextTerminal.loadAddon(nextFitAddon);
+
+    /*
+     * Сериализатор экрана.
+     *
+     * Позволяет снять весь видимый экран (курсор, цвета, содержимое) одной
+     * строкой ANSI-кодов. Пригождается один раз — перед закрытием вкладки:
+     * снимок уходит серверу, и когда та же вкладка снова откроется, сервер
+     * пришлёт его назад, экран мгновенно окажется в том же состоянии.
+     */
+    const nextSerializeAddon = new SerializeAddon();
+    serializeAddonRef.current = nextSerializeAddon;
+    nextTerminal.loadAddon(nextSerializeAddon);
 
     nextTerminal.loadAddon(new ClipboardAddonCtor(undefined, oscClipboardProvider));
 
@@ -245,6 +279,10 @@ export function useShellTerminal({
         return;
       }
 
+      if (!isVisibleBox(terminalContainerRef.current)) {
+        return;
+      }
+
       currentFitAddon.fit();
       sendSocketMessage(wsRef.current, {
         type: 'resize',
@@ -274,6 +312,10 @@ export function useShellTerminal({
           return;
         }
 
+        if (!isVisibleBox(terminalContainerRef.current)) {
+          return;
+        }
+
         currentFitAddon.fit();
         sendSocketMessage(wsRef.current, {
           type: 'resize',
@@ -287,6 +329,43 @@ export function useShellTerminal({
 
     return () => {
       terminalContainer.removeEventListener('copy', handleTerminalCopy);
+      resizeObserver.disconnect();
+      if (resizeTimeoutRef.current !== null) {
+        window.clearTimeout(resizeTimeoutRef.current);
+        resizeTimeoutRef.current = null;
+      }
+      dataSubscription.dispose();
+      closeSocket();
+      disposeTerminal();
+    };
+    // Демонтаж окна — попытка снять снапшот в самом конце. Если сервер
+    // ещё жив и WS открыт, отправим сериализованный экран: возврат в это же
+    // окно позже восстановит его в точности. Ошибки здесь глушим — снапшот
+    // это подсказка, не обязательство.
+    const captureSnapshotOnUnmount = () => {
+      const addon = serializeAddonRef.current;
+      const socket = wsRef.current;
+      if (!addon || !socket || socket.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      try {
+        const dump = addon.serialize();
+        if (dump && dump.length > 0) {
+          socket.send(JSON.stringify({ type: 'snapshot', data: dump }));
+        }
+      } catch {
+        /* сериализатор не готов — не страшно */
+      }
+    };
+
+    // Захватываем в локальную const: тайпчекер теряет narrowing на
+    // `terminalContainer` из-за новых ветвей контроля потока, добавленных
+    // выше (снапшот перед демонтажом).
+    const currentContainer = terminalContainer;
+
+    return () => {
+      captureSnapshotOnUnmount();
+      currentContainer?.removeEventListener('copy', handleTerminalCopy);
       resizeObserver.disconnect();
       if (resizeTimeoutRef.current !== null) {
         window.clearTimeout(resizeTimeoutRef.current);

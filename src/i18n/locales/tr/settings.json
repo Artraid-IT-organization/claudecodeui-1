@@ -94,7 +94,8 @@
     "computer": "Bilgisayar Kullanımı",
     "notifications": "Bildirimler",
     "plugins": "Eklentiler",
-    "about": "Hakkında"
+    "about": "Hakkında",
+    "presets": "Ön ayarlar"
   },
   "notifications": {
     "title": "Bildirimler",

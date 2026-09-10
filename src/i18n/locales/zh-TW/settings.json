@@ -94,7 +94,8 @@
     "computer": "電腦使用",
     "notifications": "通知",
     "plugins": "外掛",
-    "about": "關於"
+    "about": "關於",
+    "presets": "預設"
   },
   "notifications": {
     "title": "通知",

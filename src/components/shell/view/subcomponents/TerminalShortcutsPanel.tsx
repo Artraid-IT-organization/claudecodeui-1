@@ -6,10 +6,16 @@ import {
   ArrowDown,
   ArrowLeft,
   ArrowRight,
+  CornerDownLeft,
+  Loader2,
+  Mic,
+  Square,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { Terminal } from '@xterm/xterm';
 import { sendSocketMessage } from '../../utils/socket';
+import { useVoiceInput } from '../../../chat/hooks/useVoiceInput';
+import { useVoiceAvailable } from '../../../chat/hooks/useVoiceAvailable';
 
 type Shortcut =
   | { type: 'key'; id: string; label: string; sequence: string }
@@ -69,6 +75,36 @@ export default function TerminalShortcutsPanel({
     [wsRef],
   );
 
+  /*
+   * Голос в командную строку.
+   *
+   * На телефоне набирать длинную команду или задание для Клода неудобно, а
+   * экранная клавиатура вдобавок закрывает пол-экрана. Поэтому здесь тот же
+   * микрофон, что и в чате: надиктованный текст вставляется в строку как
+   * набранный руками — но НЕ отправляется сам.
+   *
+   * Не отправляется намеренно: это оболочка, а распознанное с голоса можно и
+   * не узнать до того, как оно выполнится. Рядом стоит отдельная кнопка ввода
+   * — прочитал, нажал.
+   */
+  const voiceAvailable = useVoiceAvailable();
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  const { state: voiceState, toggle: toggleVoice } = useVoiceInput(
+    useCallback(
+      (text: string) => {
+        const clean = text.trim();
+        if (clean) {
+          sendInput(clean);
+        }
+      },
+      [sendInput],
+    ),
+    useCallback((message: string) => {
+      setVoiceError(message);
+      window.setTimeout(() => setVoiceError(null), 4000);
+    }, []),
+  );
+
   const scrollToBottom = useCallback(() => {
     terminalRef.current?.scrollToBottom();
   }, [terminalRef]);
@@ -110,6 +146,38 @@ export default function TerminalShortcutsPanel({
   return (
     <div className={`pointer-events-none fixed inset-x-0 ${bottomOffset} z-20 px-2 md:hidden`}>
       <div className="pointer-events-auto flex items-center gap-1 overflow-x-auto rounded-lg border border-gray-700/80 bg-gray-900/95 px-1.5 py-1.5 shadow-lg backdrop-blur-sm [-webkit-overflow-scrolling:touch] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        {voiceAvailable && (
+          <button
+            type="button"
+            onPointerDown={preventFocusSteal}
+            onClick={toggleVoice}
+            disabled={!isConnected || voiceState === 'transcribing'}
+            className={voiceState === 'recording' ? KEY_BTN_ACTIVE : ICON_BTN}
+            title={voiceError || t('terminalShortcuts.voice', { defaultValue: 'Голосовой ввод' })}
+            aria-label={t('terminalShortcuts.voice', { defaultValue: 'Голосовой ввод' })}
+          >
+            {voiceState === 'recording' ? (
+              <Square className="h-4 w-4" />
+            ) : voiceState === 'transcribing' ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Mic className="h-4 w-4" />
+            )}
+          </button>
+        )}
+
+        <button
+          type="button"
+          onPointerDown={preventFocusSteal}
+          onClick={() => sendInput('\r')}
+          disabled={!isConnected}
+          className={ICON_BTN}
+          title={t('terminalShortcuts.enter', { defaultValue: 'Ввод' })}
+          aria-label={t('terminalShortcuts.enter', { defaultValue: 'Ввод' })}
+        >
+          <CornerDownLeft className="h-4 w-4" />
+        </button>
+
         <button
           type="button"
           onPointerDown={preventFocusSteal}

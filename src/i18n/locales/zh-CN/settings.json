@@ -112,7 +112,8 @@
     "browser": "浏览器",
     "notifications": "通知",
     "plugins": "插件",
-    "about": "关于"
+    "about": "关于",
+    "presets": "预设"
   },
   "notifications": {
     "title": "通知",

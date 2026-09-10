@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 
@@ -13,6 +13,7 @@ import { useDeviceSettings } from '../../hooks/useDeviceSettings';
 import { useSessionProtection } from '../../hooks/useSessionProtection';
 import { useProjectsState } from '../../hooks/useProjectsState';
 import { useOpenSessionTabs } from '../../hooks/useOpenSessionTabs';
+import { useTerminalTabs } from '../../hooks/useTerminalTabs';
 import { useQueuedMessageAutoSend } from '../../hooks/useQueuedMessageAutoSend';
 import { useBrowserUseEnabled } from '../../hooks/useBrowserUseEnabled';
 import { ensureLatestBuild, watchServiceWorkerUpdates } from '../../lib/appUpdate';
@@ -102,17 +103,69 @@ function AppContentInner() {
   const shouldShowTasksTab = Boolean(tasksEnabled && isTaskMasterInstalled);
   const shouldShowBrowserTab = useBrowserUseEnabled();
 
+  // Окна командной строки. Живут рядом с чатами: своя вкладка наверху, свой
+  // крестик, несколько сразу. Открываются одной дверью — запросом вкладки
+  // 'shell' (кнопка в боковой панели, палитра команд): вместо переключения
+  // режима приложения это заводит новое окно.
+  const {
+    terminals,
+    activeTerminalId,
+    openTerminal,
+    focusTerminal,
+    closeTerminal,
+    clearActiveTerminal,
+  } = useTerminalTabs(selectedProject?.projectId ?? null);
+
+  const selectTab = useCallback(
+    (tab: AppTab) => {
+      if (tab === 'shell') {
+        openTerminal();
+        return;
+      }
+      clearActiveTerminal();
+      setActiveTab(tab);
+    },
+    [clearActiveTerminal, openTerminal, setActiveTab],
+  );
+
+  // Открытый чат всегда важнее открытого окна командной строки: как только
+  // человек выбирает переписку — папку, чат, новый чат, ссылку из уведомления
+  // — окно уходит на задний план (не закрывается, вкладка остаётся).
+  const sidebarPropsLeavingTerminal = useMemo(
+    () => ({
+      ...sidebarSharedProps,
+      onProjectSelect: (...args: Parameters<typeof sidebarSharedProps.onProjectSelect>) => {
+        clearActiveTerminal();
+        return sidebarSharedProps.onProjectSelect(...args);
+      },
+      onSessionSelect: (...args: Parameters<typeof sidebarSharedProps.onSessionSelect>) => {
+        clearActiveTerminal();
+        return sidebarSharedProps.onSessionSelect(...args);
+      },
+      onNewSession: (...args: Parameters<typeof sidebarSharedProps.onNewSession>) => {
+        clearActiveTerminal();
+        return sidebarSharedProps.onNewSession(...args);
+      },
+    }),
+    [clearActiveTerminal, sidebarSharedProps],
+  );
+
+  // Смена адреса (ссылка, уведомление, результат поиска) — тот же уход.
+  useEffect(() => {
+    clearActiveTerminal();
+  }, [clearActiveTerminal, sessionId]);
+
   // The sidebar's workspace tab switcher lives inside the mobile drawer too;
   // picking a tab there should close the drawer like picking a project or
   // session does, so the user actually sees the tab they just switched to.
   const handleSidebarTabSelect = useCallback(
     (tab: AppTab) => {
-      setActiveTab(tab);
+      selectTab(tab);
       if (isMobile) {
         setSidebarOpen(false);
       }
     },
-    [isMobile, setActiveTab, setSidebarOpen],
+    [isMobile, selectTab, setSidebarOpen],
   );
 
   // Open-session tabs (VS Code-style strip above the chat area): a session
@@ -349,7 +402,7 @@ function AppContentInner() {
       {!isMobile ? (
         <div className="h-full flex-shrink-0 border-r border-border/50">
           <Sidebar
-            {...sidebarSharedProps}
+            {...sidebarPropsLeavingTerminal}
             onSessionDelete={handleSessionDeleteWithTabCleanup}
             activeTab={activeTab}
             setActiveTab={handleSidebarTabSelect}
@@ -382,7 +435,7 @@ function AppContentInner() {
             onTouchStart={(event) => event.stopPropagation()}
           >
             <Sidebar
-            {...sidebarSharedProps}
+            {...sidebarPropsLeavingTerminal}
             onSessionDelete={handleSessionDeleteWithTabCleanup}
             activeTab={activeTab}
             setActiveTab={handleSidebarTabSelect}
@@ -397,8 +450,15 @@ function AppContentInner() {
         <SessionTabsBar
           tabs={openTabs}
           activeSessionId={activeSessionId}
-          onSelect={switchToTab}
+          onSelect={(id) => {
+            clearActiveTerminal();
+            switchToTab(id);
+          }}
           onClose={closeTab}
+          terminals={terminals}
+          activeTerminalId={activeTerminalId}
+          onSelectTerminal={focusTerminal}
+          onCloseTerminal={closeTerminal}
         />
         <MainContent
           projects={projects}
@@ -406,6 +466,8 @@ function AppContentInner() {
           selectedSession={selectedSession}
           activeTab={activeTab}
           setActiveTab={setActiveTab}
+          terminals={terminals}
+          activeTerminalId={activeTerminalId}
           shouldShowTasksTab={shouldShowTasksTab}
           shouldShowBrowserTab={shouldShowBrowserTab}
           ws={ws}
@@ -436,7 +498,7 @@ function AppContentInner() {
         selectedProject={selectedProject}
         onStartNewChat={handleNewSession}
         onOpenSettings={() => openSettings()}
-        onShowTab={setActiveTab}
+        onShowTab={selectTab}
       />
     </div>
   );

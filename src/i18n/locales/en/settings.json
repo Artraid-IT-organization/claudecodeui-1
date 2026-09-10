@@ -114,7 +114,8 @@
     "browser": "Browser",
     "notifications": "Notifications",
     "plugins": "Plugins",
-    "about": "About"
+    "about": "About",
+    "presets": "Presets"
   },
   "about": {
     "sessionTitle": "Session",

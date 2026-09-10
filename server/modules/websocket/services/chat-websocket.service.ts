@@ -298,8 +298,18 @@ async function handleChatSend(
   // Brand-new sessions have no provider id yet, so the runtime starts fresh
   // and announces one, which the gateway writer captures and maps back to the
   // app session id.
+  // Активный пресет промпта из шапки разговора. Клиент кладёт готовый текст
+  // системной приписки в `presetSystemPrompt`; сюда переносим под именем,
+  // которое понимает claude-runtime (appendSystemPrompt). Пресет живёт только
+  // на времени одного запроса — сессия свою «системку» не хранит.
+  const presetSystemPrompt =
+    typeof clientOptions.presetSystemPrompt === 'string'
+      ? clientOptions.presetSystemPrompt.trim()
+      : '';
+
   const runtimeOptions: AnyRecord = {
     ...clientOptions,
+    appendSystemPrompt: presetSystemPrompt || undefined,
     // Attachments are re-validated server-side: only direct children of the
     // global upload store may reach provider runtimes or their file tools.
     attachments: uniqueAttachments,

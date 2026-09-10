@@ -112,7 +112,8 @@
     "browser": "Navegador",
     "notifications": "Notificaciones",
     "plugins": "Plugins",
-    "about": "Acerca de"
+    "about": "Acerca de",
+    "presets": "Preajustes"
   },
   "notifications": {
     "title": "Notificaciones",

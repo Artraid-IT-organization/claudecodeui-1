@@ -28,6 +28,8 @@ type ShellProps = {
   selectedSession?: ProjectSession | null;
   initialCommand?: string | null;
   isPlainShell?: boolean;
+  /** Имя окна: два терминала в одной папке — это два разных процесса. */
+  terminalId?: string | null;
   onProcessComplete?: ((exitCode: number) => void) | null;
   minimal?: boolean;
   autoConnect?: boolean;
@@ -39,6 +41,7 @@ export default function Shell({
   selectedSession = null,
   initialCommand = null,
   isPlainShell = false,
+  terminalId = null,
   onProcessComplete = null,
   minimal = false,
   autoConnect = false,
@@ -66,6 +69,7 @@ export default function Shell({
     selectedSession,
     initialCommand,
     isPlainShell,
+    terminalId,
     minimal,
     autoConnect,
     isRestarting,
@@ -271,23 +275,35 @@ export default function Shell({
 
   return (
     <div className="flex h-full w-full flex-col bg-gray-900">
-      <ShellHeader
-        isConnected={isConnected}
-        isInitialized={isInitialized}
-        isRestarting={isRestarting}
-        hasSession={Boolean(selectedSession)}
-        sessionDisplayNameShort={sessionDisplayNameShort}
-        onDisconnect={handleDisconnectShell}
-        onRestart={handleRestartShell}
-        statusNewSessionText={t('shell.status.newSession')}
-        statusInitializingText={t('shell.status.initializing')}
-        statusRestartingText={t('shell.status.restarting')}
-        disconnectLabel={t('shell.actions.disconnect')}
-        disconnectTitle={t('shell.actions.disconnectTitle')}
-        restartLabel={t('shell.actions.restart')}
-        restartTitle={t('shell.actions.restartTitle')}
-        disableRestart={isRestarting || !isInitialized}
-      />
+      {/*
+        В окне-вкладке своя строка состояния не нужна.
+
+        Имя окна и так стоит в шапке и во вкладке, а закрывается оно тем же
+        крестиком, что и чат. Отдельная полоса «Новый сеанс / Отключиться /
+        Перезапустить» была бы третьей полосой сверху подряд и съедала бы у
+        телефона сорок точек высоты — при том что перезапуск теперь это просто
+        закрыть окно и открыть новое, а если связь оборвалась, поверх терминала
+        появляется кнопка «Подключиться».
+      */}
+      {!terminalId && (
+        <ShellHeader
+          isConnected={isConnected}
+          isInitialized={isInitialized}
+          isRestarting={isRestarting}
+          hasSession={Boolean(selectedSession)}
+          sessionDisplayNameShort={sessionDisplayNameShort}
+          onDisconnect={handleDisconnectShell}
+          onRestart={handleRestartShell}
+          statusNewSessionText={t('shell.status.newSession')}
+          statusInitializingText={t('shell.status.initializing')}
+          statusRestartingText={t('shell.status.restarting')}
+          disconnectLabel={t('shell.actions.disconnect')}
+          disconnectTitle={t('shell.actions.disconnectTitle')}
+          restartLabel={t('shell.actions.restart')}
+          restartTitle={t('shell.actions.restartTitle')}
+          disableRestart={isRestarting || !isInitialized}
+        />
+      )}
 
       <div className="relative flex-1 overflow-hidden p-2">
         <div
