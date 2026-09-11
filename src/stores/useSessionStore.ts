@@ -369,15 +369,34 @@ function dedupeAdjacentAssistantEchoes(merged: NormalizedMessage[]): NormalizedM
           continue;
         }
       }
-      if (
-        prev.kind === 'text'
-        && m.kind === 'text'
-        && prev.role === 'assistant'
-        && m.role === 'assistant'
-      ) {
+      if (m.kind === 'text' && m.role === 'assistant') {
+        // Сравниваем не с соседом, а с ближайшим предыдущим ответом, пропуская
+        // блоки размышлений.
+        //
+        // Дубль 11.09.26: один и тот же ответ стоял в ленте дважды, а между
+        // копиями — «Думал 4 с». Сосед у второй копии был размышлением, и
+        // проверка на повтор её не замечала. Разделять копии размышлением
+        // естественно: живая строка закрывается и уступает место записи с
+        // диска, а блок размышления встаёт между ними по времени.
+        //
+        // Ложное срабатывание почти исключено: совпасть должен ВЕСЬ текст
+        // ответа целиком, а между копиями — только размышления и ничего
+        // больше. Настоящий повтор такой формы не имеет.
         const ms = (m.content || '').trim();
-        if (ms.length > 0 && ms === (prev.content || '').trim()) {
-          continue;
+        if (ms.length > 0) {
+          let i = out.length - 1;
+          while (i >= 0 && (out[i].kind === 'thinking' || out[i].kind === 'thinking_delta')) {
+            i -= 1;
+          }
+          const previousReply = i >= 0 ? out[i] : null;
+          if (
+            previousReply
+            && previousReply.kind === 'text'
+            && previousReply.role === 'assistant'
+            && ms === (previousReply.content || '').trim()
+          ) {
+            continue;
+          }
         }
       }
       if (prev.kind === 'thinking' && m.kind === 'thinking') {

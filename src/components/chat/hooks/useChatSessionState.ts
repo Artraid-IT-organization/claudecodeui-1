@@ -147,6 +147,11 @@ export function useChatSessionState({
   const [hasMoreMessages, setHasMoreMessages] = useState(false);
   const [totalMessages, setTotalMessages] = useState(0);
   const [isUserScrolledUp, setIsUserScrolledUp] = useState(false);
+  // Живое значение для отложенных проверок: состояние в замыкании таймера
+  // застывает на момент назначения, а нам нужно знать положение дел на момент
+  // срабатывания.
+  const isUserScrolledUpRef = useRef(isUserScrolledUp);
+  isUserScrolledUpRef.current = isUserScrolledUp;
   const [tokenBudget, setTokenBudget] = useState<Record<string, unknown> | null>(null);
   const [visibleMessageCount, setVisibleMessageCount] = useState(INITIAL_VISIBLE_MESSAGES);
   const [allMessagesLoaded, setAllMessagesLoaded] = useState(false);
@@ -1033,9 +1038,23 @@ export function useChatSessionState({
     if (isLoadingMoreRef.current || isLoadingMoreMessages || pendingScrollRestoreRef.current) return;
     if (searchScrollActiveRef.current) return;
 
-    if (!isUserScrolledUp) {
-      setTimeout(() => scrollToBottom(), 50);
+    if (isUserScrolledUp) {
+      return;
     }
+
+    // Проверка повторяется В МОМЕНТ срабатывания, а не только при назначении,
+    // и таймер снимается при пересборке.
+    //
+    // Рывки 11.09.26: во время ответа строки появляются часто, и на каждую
+    // назначался догон вниз через 50 мс. Ни отмены, ни перепроверки не было —
+    // поэтому стоило начать листать вверх, как уже назначенные догоны
+    // продолжали дёргать ленту вниз. Со стороны это выглядит так, будто лента
+    // не листается, а только дёргается.
+    const timer = setTimeout(() => {
+      if (isUserScrolledUpRef.current) return;
+      scrollToBottom();
+    }, 50);
+    return () => clearTimeout(timer);
   }, [chatMessages.length, isActive, isLoadingMoreMessages, isUserScrolledUp, scrollToBottom]);
 
   useEffect(() => {
