@@ -4,7 +4,9 @@ import path from 'node:path';
 import { projectsDb, sessionsDb } from '@/modules/database/index.js';
 import { sessionSynchronizerService } from '@/modules/providers/index.js';
 import { WS_OPEN_STATE, connectedClients } from '@/modules/websocket/index.js';
+import { scanStateDb } from '@/modules/database/repositories/scan-state.db.js';
 import { getRequestRuntimeContext } from '@/shared/request-context.js';
+import { getActiveAccountDir } from '@/shared/session-scope.js';
 import type { RealtimeClientConnection } from '@/shared/types.js';
 import { AppError, isPlatformOwnerWebUser } from '@/shared/utils.js';
 
@@ -181,6 +183,43 @@ function broadcastProgress(progress: ProgressUpdate) {
   });
 }
 
+
+let runningSync: Promise<unknown> | null = null;
+
+/**
+ * Держит указатель истории свежим, НЕ задерживая ответ.
+ *
+ * Раньше список проектов ждал полной пересборки истории. Замер на боевом
+ * сервере: /api/projects отвечал 141 секунду, тогда как соседние эндпоинты —
+ * доли секунды. Пересборка перечитывает сотни файлов стенограмм, а Node
+ * однопоточный, поэтому на это время в очередь вставали и все прочие запросы
+ * — каждый по две-три секунды. Со стороны это и есть «приложение замерло»:
+ * интерфейс не может отрисоваться, пока не придёт список.
+ *
+ * Ждём пересборку только когда этот аккаунт не индексировали НИ РАЗУ —
+ * иначе человеку показали бы пустой список вместо его чатов. Во всех
+ * остальных случаях отдаём то, что уже в базе, а пересборку запускаем в
+ * фоне: её результат подхватит следующее обновление списка.
+ *
+ * Одновременно идёт не больше одной пересборки — иначе несколько вкладок
+ * запустили бы по своей и съели процессор.
+ */
+async function refreshSessionIndex(): Promise<void> {
+  const neverIndexed = scanStateDb.getLastScannedAtForAccount(getActiveAccountDir()) === null;
+
+  if (neverIndexed) {
+    await sessionSynchronizerService.synchronizeSessions();
+    return;
+  }
+
+  if (!runningSync) {
+    runningSync = sessionSynchronizerService
+      .synchronizeSessions()
+      .catch(() => undefined)
+      .finally(() => { runningSync = null; });
+  }
+}
+
 /**
  * Reads all projects from DB and returns normalized session summaries.
  */
@@ -188,7 +227,7 @@ export async function getProjectsWithSessions(
   options: GetProjectsWithSessionsOptions = {}
 ): Promise<ProjectListItem[]> {
   if (!options.skipSynchronization) {
-    await sessionSynchronizerService.synchronizeSessions();
+    await refreshSessionIndex();
   }
 
   const projectRows = projectsDb.getProjectPaths((() => { const ctx = getRequestRuntimeContext(); const uid = ctx?.userId; return (uid != null && isPlatformOwnerWebUser(Number(uid))) ? null : ctx?.workspaceRoot; })()) as Array<{
@@ -256,7 +295,7 @@ export async function getArchivedProjectsWithSessions(
   options: Pick<GetProjectsWithSessionsOptions, 'skipSynchronization'> = {},
 ): Promise<ArchivedProjectListItem[]> {
   if (!options.skipSynchronization) {
-    await sessionSynchronizerService.synchronizeSessions();
+    await refreshSessionIndex();
   }
 
   const projectRows = projectsDb.getArchivedProjectPaths((() => { const ctx = getRequestRuntimeContext(); const uid = ctx?.userId; return (uid != null && isPlatformOwnerWebUser(Number(uid))) ? null : ctx?.workspaceRoot; })()) as Array<{
