@@ -325,6 +325,46 @@ function isAssistantTextEchoedInSameTurnOnServer(
 }
 
 /**
+ * Живая строка ответа — всегда КУСОК того же ответа, который потом ляжет на
+ * диск целиком. Поэтому сравнивать её с записью на диске по полному равенству
+ * мало: при обрыве связи строка застывает на половине фразы, и рядом с ней
+ * встаёт полный ответ с диска. Именно так 11.09.26 у Егора получилось
+ * «с чем сравнивать.» отдельным сообщением, а следом — та же фраза целиком.
+ *
+ * Здесь кусок признаётся куском: если в этом же ходе на диске есть ответ,
+ * внутри которого живая строка содержится, живую строку убираем. Для обычных
+ * сохранённых ответов такое правило было бы опасно (короткая реплика могла бы
+ * случайно оказаться внутри длинной), поэтому оно применяется ТОЛЬКО к живым
+ * строкам потока и только начиная с восьми символов.
+ */
+function isLiveFragmentOfServerReply(
+  message: NormalizedMessage,
+  serverMessages: NormalizedMessage[],
+  realtimeMessages: NormalizedMessage[],
+): boolean {
+  const fragment = (message.content || '').trim();
+  if (fragment.length < 8) {
+    return false;
+  }
+
+  const turnOrdinal = getUserTurnOrdinalBefore(message, serverMessages, realtimeMessages);
+  const turnRange = findServerTurnRangeByOrdinal(serverMessages, turnOrdinal);
+  if (!turnRange) {
+    return false;
+  }
+
+  return serverMessages
+    .slice(turnRange.start + 1, turnRange.end)
+    .some((serverMessage) => {
+      if (serverMessage.kind !== 'text' || serverMessage.role !== 'assistant') {
+        return false;
+      }
+      const full = (serverMessage.content || '').trim();
+      return full.length >= fragment.length && full.includes(fragment);
+    });
+}
+
+/**
  * Same idea as `isAssistantTextEchoedInSameTurnOnServer`, for a live thinking
  * block instead of the reply text. Persisted `thinking` rows carry no `role`.
  */
@@ -382,10 +422,23 @@ function dedupeAdjacentAssistantEchoes(merged: NormalizedMessage[]): NormalizedM
         // Ложное срабатывание почти исключено: совпасть должен ВЕСЬ текст
         // ответа целиком, а между копиями — только размышления и ничего
         // больше. Настоящий повтор такой формы не имеет.
+        //
+        // Дополнение того же дня: между копиями оказалось не только
+        // размышление, но и вызов команды — «Беру сессию этого разговора» /
+        // Bash / «Думал меньше секунды» / та же фраза снова. Пропускаем
+        // поэтому и служебные строки вызова тоже: они сами по себе ответом не
+        // являются. Планка в двадцать символов оставляет короткие реплики
+        // («Готово.», «Да.») в покое — их повтор может быть настоящим.
         const ms = (m.content || '').trim();
-        if (ms.length > 0) {
+        if (ms.length >= 20) {
           let i = out.length - 1;
-          while (i >= 0 && (out[i].kind === 'thinking' || out[i].kind === 'thinking_delta')) {
+          while (
+            i >= 0
+            && (out[i].kind === 'thinking'
+              || out[i].kind === 'thinking_delta'
+              || out[i].kind === 'tool_use'
+              || out[i].kind === 'tool_result')
+          ) {
             i -= 1;
           }
           const previousReply = i >= 0 ? out[i] : null;
@@ -437,6 +490,9 @@ function pruneRealtimeSupersededByServer(
       if (isAssistantTextEchoedInSameTurnOnServer(message, serverMessages, realtimeMessages)) {
         return false;
       }
+      if (isLiveFragmentOfServerReply(message, serverMessages, realtimeMessages)) {
+        return false;
+      }
       return true;
     }
 
@@ -475,7 +531,10 @@ function pruneRealtimeSupersededByServer(
   });
 }
 
-function computeMerged(server: NormalizedMessage[], realtime: NormalizedMessage[]): NormalizedMessage[] {
+// Открыта наружу нарочно: это единственный шов, на котором проверяется склейка
+// ленты. Случаи из снимков Егора 11.09.26 (дубль через вызов команды и
+// оборванный кусок фразы) прогоняются через неё напрямую, без браузера.
+export function computeMerged(server: NormalizedMessage[], realtime: NormalizedMessage[]): NormalizedMessage[] {
   if (realtime.length === 0) {
     return dedupeAdjacentAssistantEchoes(server);
   }
@@ -483,14 +542,20 @@ function computeMerged(server: NormalizedMessage[], realtime: NormalizedMessage[
     return dedupeAdjacentAssistantEchoes(realtime);
   }
 
-  const serverIds = new Set(server.map((message) => message.id));
-  const reconciledRealtime = removeOptimisticUserEchoes(server, realtime);
-  const extra = reconciledRealtime.filter((message) => {
-    if (serverIds.has(message.id)) {
-      return false;
-    }
-    return true;
-  });
+  // Сверка ровно одна, общая с обновлением ленты.
+  //
+  // Раньше здесь стояла своя, урезанная: живая строка выбрасывалась, только
+  // если её ОПОЗНАВАТЕЛЬНЫЙ НОМЕР уже встречался среди записей с диска. Но
+  // диск заводит ответу собственный номер, поэтому опознать по нему нельзя
+  // никогда — и живая копия оставалась. Дальше обе копии раскладывались по
+  // времени, между ними вставали вызов команды и блок размышлений, и проверка
+  // «повтор стоит вплотную» их уже не видела. Так у Егора 11.09.26 фраза
+  // «Лента не та — там нет моих ответов» встала в ленту дважды через Bash.
+  //
+  // Полная сверка (та же, что применяется при обновлении с сервера) смотрит на
+  // содержимое внутри одного хода, а не на номер, и снимает копию независимо
+  // от того, что оказалось между ними.
+  const extra = pruneRealtimeSupersededByServer(server, realtime);
 
   if (extra.length === 0) {
     return dedupeAdjacentAssistantEchoes(server);

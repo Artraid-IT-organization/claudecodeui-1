@@ -270,6 +270,29 @@ function ChatInterface({
   const isProcessingRef = useRef(isProcessing);
   isProcessingRef.current = isProcessing;
 
+  // Ответ мог не только продолжиться — он мог и ЗАКОНЧИТЬСЯ, пока связи не
+  // было. Снимок Егора 11.09.26: сообщение обрывается на полуслове («**Что»),
+  // а под ним красное «ответ не получен, отправьте ещё раз» — хотя ответ был
+  // получен полностью и лежал на диске, просто хвост не долетел по проводу.
+  // Отправив по этой подсказке ещё раз, он получал следующую ошибку — «в этой
+  // сессии уже идёт работа». Один неверный вывод порождал вторую ошибку.
+  //
+  // Поэтому перед приговором смотрим на саму ленту: если после последнего
+  // моего сообщения стоит ответ, ничего не потеряно — обновление ленты уже
+  // подставило его целиком вместо оборванного куска.
+  const chatMessagesRef = useRef(chatMessages);
+  chatMessagesRef.current = chatMessages;
+
+  const replyArrivedAfterLastUserMessage = useCallback(() => {
+    const rows = chatMessagesRef.current;
+    for (let index = rows.length - 1; index >= 0; index--) {
+      const type = rows[index]?.type;
+      if (type === 'user') return false;
+      if (type === 'assistant' && (rows[index].content || '').trim().length > 0) return true;
+    }
+    return false;
+  }, []);
+
   const wasConnectedRef = useRef(isConnected);
   useEffect(() => {
     const wasConnected = wasConnectedRef.current;
@@ -290,6 +313,7 @@ function ChatInterface({
       if (!lostWhileWaitingRef.current) return;
       lostWhileWaitingRef.current = false;
       if (isProcessingRef.current) return;
+      if (replyArrivedAfterLastUserMessage()) return;
       addMessage({
         type: 'error',
         content: t(
@@ -300,7 +324,7 @@ function ChatInterface({
       });
     }, RECONNECT_GRACE_MS);
     return () => clearTimeout(timer);
-  }, [isConnected, isProcessing, addMessage, t]);
+  }, [isConnected, isProcessing, addMessage, replyArrivedAfterLastUserMessage, t]);
 
   // Ответ продолжился сам — извиняться не за что, снимаем ожидание молча.
   useEffect(() => {
