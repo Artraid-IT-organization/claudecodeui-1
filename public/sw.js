@@ -4,7 +4,7 @@
 // Имя меняется вместе с любым изменением этого файла: браузер переустанавливает
 // служебный кэш только когда сам файл стал другим побайтово. Установленное на
 // экран «Домой» приложение месяц отдавало старую сборку именно поэтому.
-const CACHE_NAME = 'claude-ui-v5';
+const CACHE_NAME = 'claude-ui-v6';
 const urlsToCache = [
   '/manifest.json'
 ];
@@ -100,6 +100,32 @@ function retryingPage() {
 }
 
 // Fetch event — network-first for everything except hashed assets
+let stalePageRecoveryDone = false;
+
+/**
+ * Выбрасывает запомненную страницу и перезагружает открытые вкладки.
+ *
+ * Вызывается, когда кусок сборки отдал 404 — верный признак, что страница, из
+ * которой стартовали, осталась от снятой с сервера сборки. Без этого человек
+ * застревает на пустом экране: перезагрузка вручную ничего не меняет, потому
+ * что снова берётся та же запомненная страница.
+ */
+function recoverFromStalePage() {
+  if (stalePageRecoveryDone) {
+    return Promise.resolve();
+  }
+  stalePageRecoveryDone = true;
+  return caches.open(CACHE_NAME)
+    .then(cache => cache.delete(OFFLINE_PAGE_KEY))
+    .then(() => self.clients.matchAll({ type: 'window' }))
+    .then(clients => clients.forEach(client => {
+      if (typeof client.navigate === 'function') {
+        client.navigate(client.url);
+      }
+    }))
+    .catch(() => undefined);
+}
+
 self.addEventListener('fetch', event => {
   const url = event.request.url;
 
@@ -137,12 +163,29 @@ self.addEventListener('fetch', event => {
     return;
   }
 
-  // Hashed assets (JS/CSS in /assets/) — cache-first since filenames change per build
+  // Куски сборки (JS/CSS в /assets/) — сначала из кэша: имена содержат
+  // отпечаток содержимого и меняются с каждой сборкой, поэтому устаревшим
+  // ответ быть не может.
+  //
+  // Разбор белого экрана 11.09.26. Запомненная страница («последняя удачная»)
+  // ссылается на куски ТОЙ сборки. После нескольких выкаток этих файлов на
+  // сервере уже нет — сервер отвечает 404. Если человек загрузился из
+  // запомненной страницы, приложению нечем запуститься, и он видит пустой
+  // белый экран. Попасть туда легко: связь до сервера в США без VPN рвётся
+  // чаще, а на каждый обрыв подставляется как раз запомненная страница.
+  //
+  // Поэтому 404 на кусок сборки трактуется как «страница протухла»: запись
+  // выбрасывается, и вкладки перезагружаются — следующий заход пойдёт в сеть
+  // и принесёт актуальную страницу. Один раз на запуск воркера, чтобы не
+  // устроить круг перезагрузок.
   if (url.includes('/assets/')) {
     event.respondWith(
       caches.match(event.request).then(cached => {
         if (cached) return cached;
         return fetch(event.request).then(response => {
+          if (response.status === 404) {
+            return recoverFromStalePage().then(() => response);
+          }
           const clone = response.clone();
           caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
           return response;
