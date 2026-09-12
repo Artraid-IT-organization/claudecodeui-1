@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import { getConnection } from '@/modules/database/connection.js';
@@ -20,6 +21,32 @@ function resolveScope(scopeRootDir: string): string {
     } catch {
         return normalizeProjectPath(scopeRootDir);
     }
+}
+
+/**
+ * Рабочие области ОСТАЛЬНЫХ веб-пользователей, которые владелец площадки
+ * видеть не должен.
+ *
+ * У владельца список проектов намеренно не ограничен его рабочей областью: он
+ * ведёт проекты по всему серверу, и сузить его до одной папки значило бы
+ * отобрать половину работы. Но «не ограничен» случайно означало и «видит
+ * чужое»: 12.09.26 рабочее место приглашённого пользователя появилось у
+ * владельца в боковой панели рядом с его собственными проектами.
+ *
+ * Каталоги пользователей устроены единообразно (`~/.claude-webuser-<id>`), так
+ * что отличить чужой от своего можно по одному префиксу, без колонки владельца
+ * в таблице.
+ */
+function excludeOtherWebUserRoots(ownRootDir?: string | null): { clause: string; params: string[] } {
+    const webUserPrefix = normalizeProjectPath(path.join(os.homedir(), '.claude-webuser-'));
+    if (!ownRootDir) {
+        return { clause: ` AND project_path NOT LIKE ? || '%'`, params: [webUserPrefix] };
+    }
+    const ownRoot = resolveScope(ownRootDir);
+    return {
+        clause: ` AND (project_path NOT LIKE ? || '%' OR project_path = ? OR project_path LIKE ? || '/%')`,
+        params: [webUserPrefix, ownRoot, ownRoot],
+    };
 }
 
 function normalizeProjectDisplayName(projectPath: string, customProjectName: string | null): string {
@@ -115,7 +142,7 @@ export const projectsDb = {
      * (the default - every call site outside OPEN_REGISTRATION) returns every
      * active project exactly as before.
      */
-    getProjectPaths(scopeRootDir?: string | null): ProjectRepositoryRow[] {
+    getProjectPaths(scopeRootDir?: string | null, ownWorkspaceRoot?: string | null): ProjectRepositoryRow[] {
         const db = getConnection();
         if (scopeRootDir) {
             const normalizedScopeRoot = resolveScope(scopeRootDir);
@@ -126,11 +153,12 @@ export const projectsDb = {
                 AND (project_path = ? OR project_path LIKE ? || '/%')
             `).all(normalizedScopeRoot, normalizedScopeRoot) as ProjectRepositoryRow[];
         }
+        const guard = excludeOtherWebUserRoots(ownWorkspaceRoot);
         return db.prepare(`
             SELECT project_id, project_path, custom_project_name, isStarred, isArchived
             FROM projects
-            WHERE isArchived = 0
-        `).all() as ProjectRepositoryRow[];
+            WHERE isArchived = 0${guard.clause}
+        `).all(...guard.params) as ProjectRepositoryRow[];
     },
 
     /**
@@ -138,7 +166,7 @@ export const projectsDb = {
      * hidden workspaces without reintroducing them into the active sidebar list.
      * See getProjectPaths() above for `scopeRootDir` semantics.
      */
-    getArchivedProjectPaths(scopeRootDir?: string | null): ProjectRepositoryRow[] {
+    getArchivedProjectPaths(scopeRootDir?: string | null, ownWorkspaceRoot?: string | null): ProjectRepositoryRow[] {
         const db = getConnection();
         if (scopeRootDir) {
             const normalizedScopeRoot = resolveScope(scopeRootDir);
@@ -149,11 +177,12 @@ export const projectsDb = {
                 AND (project_path = ? OR project_path LIKE ? || '/%')
             `).all(normalizedScopeRoot, normalizedScopeRoot) as ProjectRepositoryRow[];
         }
+        const guard = excludeOtherWebUserRoots(ownWorkspaceRoot);
         return db.prepare(`
             SELECT project_id, project_path, custom_project_name, isStarred, isArchived
             FROM projects
-            WHERE isArchived = 1
-        `).all() as ProjectRepositoryRow[];
+            WHERE isArchived = 1${guard.clause}
+        `).all(...guard.params) as ProjectRepositoryRow[];
     },
 
     /**

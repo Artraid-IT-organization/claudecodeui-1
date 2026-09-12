@@ -223,6 +223,20 @@ async function refreshSessionIndex(): Promise<void> {
 /**
  * Reads all projects from DB and returns normalized session summaries.
  */
+/**
+ * Как ограничить список проектов для того, кто его запросил.
+ *
+ * Обычный пользователь видит только свою рабочую область. Владелец площадки —
+ * всё, кроме рабочих областей остальных: он ведёт проекты по всему серверу, но
+ * чужое рабочее место в его боковой панели — это утечка, а не удобство.
+ */
+function projectScopeArguments(): [string | null | undefined, string | null | undefined] {
+  const context = getRequestRuntimeContext();
+  const userId = context?.userId;
+  const isOwner = userId != null && isPlatformOwnerWebUser(Number(userId));
+  return isOwner ? [null, context?.workspaceRoot] : [context?.workspaceRoot, context?.workspaceRoot];
+}
+
 export async function getProjectsWithSessions(
   options: GetProjectsWithSessionsOptions = {}
 ): Promise<ProjectListItem[]> {
@@ -230,7 +244,7 @@ export async function getProjectsWithSessions(
     await refreshSessionIndex();
   }
 
-  const projectRows = projectsDb.getProjectPaths((() => { const ctx = getRequestRuntimeContext(); const uid = ctx?.userId; return (uid != null && isPlatformOwnerWebUser(Number(uid))) ? null : ctx?.workspaceRoot; })()) as Array<{
+  const projectRows = projectsDb.getProjectPaths(...projectScopeArguments()) as Array<{
     project_id: string;
     project_path: string;
     custom_project_name?: string | null;
@@ -298,7 +312,7 @@ export async function getArchivedProjectsWithSessions(
     await refreshSessionIndex();
   }
 
-  const projectRows = projectsDb.getArchivedProjectPaths((() => { const ctx = getRequestRuntimeContext(); const uid = ctx?.userId; return (uid != null && isPlatformOwnerWebUser(Number(uid))) ? null : ctx?.workspaceRoot; })()) as Array<{
+  const projectRows = projectsDb.getArchivedProjectPaths(...projectScopeArguments()) as Array<{
     project_id: string;
     project_path: string;
     custom_project_name?: string | null;
