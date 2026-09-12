@@ -230,11 +230,18 @@ async function refreshSessionIndex(): Promise<void> {
  * всё, кроме рабочих областей остальных: он ведёт проекты по всему серверу, но
  * чужое рабочее место в его боковой панели — это утечка, а не удобство.
  */
-function projectScopeArguments(): [string | null | undefined, string | null | undefined] {
+function projectScopeArguments(): [
+  string | null | undefined,
+  string | null | undefined,
+  string | null | undefined,
+] {
   const context = getRequestRuntimeContext();
   const userId = context?.userId;
   const isOwner = userId != null && isPlatformOwnerWebUser(Number(userId));
-  return isOwner ? [null, context?.workspaceRoot] : [context?.workspaceRoot, context?.workspaceRoot];
+  const accountDir = getActiveAccountDir();
+  return isOwner
+    ? [null, context?.workspaceRoot, accountDir]
+    : [context?.workspaceRoot, context?.workspaceRoot, accountDir];
 }
 
 export async function getProjectsWithSessions(

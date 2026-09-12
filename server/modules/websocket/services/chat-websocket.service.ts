@@ -7,7 +7,6 @@ import { providerModelsService } from '@/modules/providers/index.js';
 import { chatRunRegistry } from '@/modules/websocket/services/chat-run-registry.service.js';
 import { connectedClients, WS_OPEN_STATE } from '@/modules/websocket/services/websocket-state.service.js';
 import {
-  getGlobalImageAssetsDir,
   isImageAttachmentDescriptor,
   normalizeAttachmentDescriptors,
   type ChatAttachmentDescriptor,
@@ -20,7 +19,7 @@ import type {
   ProviderRuntimeWriter,
 } from '@/shared/types.js';
 import { isPlatformOwnerWebUser, OPEN_REGISTRATION, parseIncomingJsonObject } from '@/shared/utils.js';
-import { readRequestUserId, resolveWebUserRuntimeContext } from '@/shared/web-user-runtime.js';
+import { getImageAssetsDirForUser, readRequestUserId, resolveWebUserRuntimeContext } from '@/shared/web-user-runtime.js';
 
 /**
  * Basic per-user concurrency cap for OPEN_REGISTRATION instances (see
@@ -46,8 +45,9 @@ const MAX_CONCURRENT_RUNS_PER_USER = 3;
 export function filterAttachmentsToUploadStore(
   attachments: unknown,
   assetsRootOverride?: string,
+  userIdForAssets?: string | number | null,
 ): ChatAttachmentDescriptor[] {
-  const assetsRoot = path.resolve(assetsRootOverride ?? getGlobalImageAssetsDir());
+  const assetsRoot = path.resolve(assetsRootOverride ?? getImageAssetsDirForUser(userIdForAssets ?? null));
 
   return normalizeAttachmentDescriptors(attachments).filter((descriptor) => {
     // Relative paths are anchored in the store; absolute ones must already be in it.
@@ -228,7 +228,7 @@ async function handleChatSend(
     ...normalizeAttachmentDescriptors(clientOptions.files),
     ...normalizeAttachmentDescriptors(clientOptions.attachments),
   ];
-  const verifiedAttachments = filterAttachmentsToUploadStore(attachmentCandidates);
+  const verifiedAttachments = filterAttachmentsToUploadStore(attachmentCandidates, undefined, userId);
   const uniqueAttachments = verifiedAttachments.filter(
     (descriptor, index, all) => all.findIndex((candidate) => candidate.path === descriptor.path) === index,
   );

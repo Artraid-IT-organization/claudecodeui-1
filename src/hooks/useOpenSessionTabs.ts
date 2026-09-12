@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
 
+import { useAuth } from '../components/auth/context/AuthContext';
 import type { Project, ProjectSession } from '../types/app';
 import { getSessionTitle } from '../utils/pageTitle';
 
@@ -24,11 +25,27 @@ type StoredTab = {
   title?: string;
 };
 
-const STORAGE_KEY = 'open-session-tabs';
+/**
+ * Вкладки хранятся у КАЖДОГО пользователя отдельно.
+ *
+ * Ключ был один на весь браузер. 12.09.26 Егор открыл ссылку второго
+ * пользователя в своём браузере — и над пустым списком чужого рабочего стола
+ * висели его собственные вкладки с названиями его разговоров. Сервер здесь ни
+ * при чём: это остаток его входа в том же браузере, но выглядит как утечка и
+ * по сути ею является — названия чужих чатов видны тому, кто вошёл не под
+ * собой.
+ *
+ * Имя пользователя в ключе разводит их полностью: в одном браузере можно
+ * держать два входа, и вкладки не перемешаются.
+ */
+const STORAGE_KEY_PREFIX = 'open-session-tabs';
 
-const readStoredTabs = (): StoredTab[] => {
+const storageKeyFor = (userKey: string | null): string =>
+  userKey ? `${STORAGE_KEY_PREFIX}:${userKey}` : STORAGE_KEY_PREFIX;
+
+const readStoredTabs = (userKey: string | null): StoredTab[] => {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(storageKeyFor(userKey));
     if (!raw) return [];
 
     const parsed = JSON.parse(raw) as unknown;
@@ -48,9 +65,9 @@ const readStoredTabs = (): StoredTab[] => {
   }
 };
 
-const writeStoredTabs = (tabs: StoredTab[]) => {
+const writeStoredTabs = (userKey: string | null, tabs: StoredTab[]) => {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(tabs));
+    localStorage.setItem(storageKeyFor(userKey), JSON.stringify(tabs));
   } catch {
     // Storage unavailable/full: tabs simply won't survive a reload.
   }
@@ -80,8 +97,22 @@ type UseOpenSessionTabsArgs = {
 };
 
 export function useOpenSessionTabs({ projects, activeSessionId, activeSession, navigate }: UseOpenSessionTabsArgs) {
-  const [tabs, setTabs] = useState<StoredTab[]>(readStoredTabs);
+  const { user } = useAuth();
+  const userKey = user?.id != null ? String(user.id) : (user?.username ?? null);
+
+  const [tabs, setTabs] = useState<StoredTab[]>(() => readStoredTabs(userKey));
   const hasHydratedRef = useRef(false);
+  const loadedUserKeyRef = useRef(userKey);
+
+  // Сменился пользователь — берём ЕГО вкладки, а не оставляем прежние.
+  // Иначе после входа по чужой ссылке над пустым рабочим столом висели бы
+  // названия разговоров того, кто сидел в этом браузере до тебя.
+  useEffect(() => {
+    if (loadedUserKeyRef.current === userKey) return;
+    loadedUserKeyRef.current = userKey;
+    hasHydratedRef.current = false;
+    setTabs(readStoredTabs(userKey));
+  }, [userKey]);
 
   // Skip the very first write so a freshly-read (and therefore identical)
   // value doesn't cause a pointless localStorage write on mount.
@@ -90,8 +121,8 @@ export function useOpenSessionTabs({ projects, activeSessionId, activeSession, n
       hasHydratedRef.current = true;
       return;
     }
-    writeStoredTabs(tabs);
-  }, [tabs]);
+    writeStoredTabs(userKey, tabs);
+  }, [tabs, userKey]);
 
   // Whatever session is currently being viewed always gets a tab — this is
   // the single funnel that covers sidebar clicks, archived-session opens,

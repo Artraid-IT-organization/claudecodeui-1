@@ -19,7 +19,10 @@
  * хуже, чем отказать.
  */
 
+import path from 'node:path';
+
 import { credentialsDb, userDb } from '@/modules/database/index.js';
+import { getGlobalImageAssetsDir } from '@/shared/image-attachments.js';
 import type { AuthenticatedWebSocketRequest } from '@/shared/types.js';
 import { isPlatformOwnerWebUser, OPEN_REGISTRATION } from '@/shared/utils.js';
 import { getWebUserClaudeConfigDir } from '@/shared/web-user-paths.js';
@@ -86,4 +89,49 @@ export function resolveWebUserRuntimeContext(
       ANTHROPIC_API_KEY_CREDENTIAL_TYPE,
     ),
   };
+}
+
+/**
+ * Куда этот пользователь складывает загруженные картинки и файлы.
+ *
+ * Склад был один на всех: `~/.cloudcli/assets`. Имена там случайные, наугад
+ * чужой файл не назовёшь, но это не разделение, а его отсутствие с оговоркой.
+ * Егор 12.09.26: «нужно полное разделение, это совершенно другой аккаунт,
+ * ничего общего».
+ *
+ * Теперь у каждого своя полка: `~/.cloudcli/assets/u<id>`. На площадке без
+ * открытой регистрации склад остаётся прежним — там пользователь один.
+ */
+export function getImageAssetsDirForUser(userId: string | number | null): string {
+  const root = getGlobalImageAssetsDir();
+  if (!OPEN_REGISTRATION || userId === null) {
+    return root;
+  }
+  const numericUserId = Number(userId);
+  if (!Number.isFinite(numericUserId)) {
+    return root;
+  }
+  return path.join(root, `u${numericUserId}`);
+}
+
+/**
+ * Откуда этому пользователю МОЖНО читать.
+ *
+ * Писать всегда только на свою полку, но у владельца площадки есть прошлое:
+ * картинки его прежних разговоров лежат в корне склада, и путь к ним записан
+ * в истории чатов. Отрезать корень значило бы превратить картинки в старых
+ * разговорах в битые квадраты. Поэтому владельцу корень остаётся доступен на
+ * чтение — и только ему, и только на чтение.
+ *
+ * Полка другого пользователя не попадает в этот список никогда: корень
+ * разрешается точным совпадением каталога, а не «всё, что внутри».
+ */
+export function getReadableImageAssetsDirs(userId: string | number | null): string[] {
+  const own = getImageAssetsDirForUser(userId);
+  const root = getGlobalImageAssetsDir();
+  if (own === root) {
+    return [root];
+  }
+  const numericUserId = Number(userId);
+  return isPlatformOwnerWebUser(numericUserId) ? [own, root] : [own];
 }

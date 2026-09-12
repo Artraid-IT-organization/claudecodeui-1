@@ -1,9 +1,11 @@
-import fsSync, { promises as fs } from 'node:fs';
+import fsSync, { existsSync, promises as fs } from 'node:fs';
 import path from 'node:path';
 
 import mime from 'mime-types';
 
-import { getGlobalImageAssetsDir, toPosixPath } from '@/shared/image-attachments.js';
+import { toPosixPath } from '@/shared/image-attachments.js';
+import { getRequestRuntimeContext } from '@/shared/request-context.js';
+import { getImageAssetsDirForUser, getReadableImageAssetsDirs } from '@/shared/web-user-runtime.js';
 
 /**
  * Image mime types accepted for chat attachment uploads. SVG is allowed for
@@ -37,6 +39,18 @@ type UploadedImageFile = {
 
 type UploadedAttachmentFile = UploadedImageFile;
 
+/**
+ * Полка склада того, кто сейчас обратился.
+ *
+ * Все три места ниже — создание папки, запись пути в карточку вложения и
+ * выдача файла по ссылке — раньше звали один общий каталог. Теперь каждое
+ * спрашивает полку текущего пользователя; для площадки с одним пользователем
+ * ответ прежний.
+ */
+function currentUserAssetsDir(): string {
+  return getImageAssetsDirForUser(getRequestRuntimeContext()?.userId ?? null);
+}
+
 /** Returns whether one uploaded mime type may be stored as a chat image asset. */
 export function isAllowedImageMimeType(mimeType: string): boolean {
   return ALLOWED_IMAGE_MIME_TYPES.has(mimeType);
@@ -44,7 +58,7 @@ export function isAllowedImageMimeType(mimeType: string): boolean {
 
 /** Creates the global `~/.cloudcli/assets` folder if needed and returns it. */
 export async function ensureImageAssetsDir(): Promise<string> {
-  const assetsDir = getGlobalImageAssetsDir();
+  const assetsDir = currentUserAssetsDir();
   await fs.mkdir(assetsDir, { recursive: true });
   return assetsDir;
 }
@@ -55,7 +69,7 @@ export async function ensureImageAssetsDir(): Promise<string> {
  * history carries back to the UI.
  */
 export function buildStoredImageRecords(files: UploadedImageFile[]): StoredImageAsset[] {
-  const assetsDir = getGlobalImageAssetsDir();
+  const assetsDir = currentUserAssetsDir();
   return files.map((file) => ({
     name: file.originalname,
     path: toPosixPath(path.join(assetsDir, file.filename)),
@@ -85,13 +99,26 @@ export function resolveImageAssetFile(filename: string): string | null {
     return null;
   }
 
-  const assetsDir = path.resolve(getGlobalImageAssetsDir());
-  const resolved = path.resolve(assetsDir, trimmed);
-  if (!resolved.startsWith(assetsDir + path.sep)) {
-    return null;
+  // Полок может быть две: своя и — только у владельца площадки — старый общий
+  // корень, где лежат картинки его прежних разговоров. Имя уже проверено на
+  // отсутствие разделителей, поэтому найтись может лишь ПРЯМОЙ ребёнок
+  // каталога: полка другого пользователя лежит папкой и под это не подходит.
+  for (const directory of getReadableImageAssetsDirs(getRequestRuntimeContext()?.userId ?? null)) {
+    const assetsDir = path.resolve(directory);
+    const resolved = path.resolve(assetsDir, trimmed);
+    if (!resolved.startsWith(assetsDir + path.sep)) {
+      continue;
+    }
+    if (existsSync(resolved)) {
+      return resolved;
+    }
   }
 
-  return resolved;
+  // Ничего не нашлось: возвращаем путь на своей полке, чтобы вызывающий
+  // отличил «файла нет» от «имя недопустимо».
+  const ownDir = path.resolve(currentUserAssetsDir());
+  const ownResolved = path.resolve(ownDir, trimmed);
+  return ownResolved.startsWith(ownDir + path.sep) ? ownResolved : null;
 }
 
 /**

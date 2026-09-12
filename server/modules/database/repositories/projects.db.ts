@@ -142,16 +142,37 @@ export const projectsDb = {
      * (the default - every call site outside OPEN_REGISTRATION) returns every
      * active project exactly as before.
      */
-    getProjectPaths(scopeRootDir?: string | null, ownWorkspaceRoot?: string | null): ProjectRepositoryRow[] {
+    getProjectPaths(scopeRootDir?: string | null, ownWorkspaceRoot?: string | null, ownAccountDir?: string | null): ProjectRepositoryRow[] {
         const db = getConnection();
         if (scopeRootDir) {
             const normalizedScopeRoot = resolveScope(scopeRootDir);
+            // Своя рабочая область — И каталоги, где у этого пользователя есть
+            // собственные разговоры.
+            //
+            // Одной рабочей области мало. Разговор рождается там, где человек
+            // запустил работу, а это не обязательно его папка: приглашённый
+            // пользователь открыл терминал, тот стоял в чужом каталоге — и
+            // разговор навсегда привязался к чужому пути. По старому правилу
+            // такой разговор не показывался никому: владельцу чужой, а автору
+            // «вне рабочей области». Егор 12.09.26: «её чатов нет, по её
+            // ссылке должен открываться список её чатов».
+            //
+            // Видно при этом только СВОИ разговоры: список внутри проекта и так
+            // отбирается по каталогу аккаунта. Имя каталога человек узнаёт, но
+            // доступа к его файлам не получает — файловый обход проверяется
+            // отдельно и по рабочей области.
             return db.prepare(`
                 SELECT project_id, project_path, custom_project_name, isStarred, isArchived
                 FROM projects
                 WHERE isArchived = 0
-                AND (project_path = ? OR project_path LIKE ? || '/%')
-            `).all(normalizedScopeRoot, normalizedScopeRoot) as ProjectRepositoryRow[];
+                AND (
+                    project_path = ? OR project_path LIKE ? || '/%'
+                    OR project_path IN (
+                        SELECT DISTINCT project_path FROM sessions
+                        WHERE account_dir = ? AND isArchived = 0
+                    )
+                )
+            `).all(normalizedScopeRoot, normalizedScopeRoot, ownAccountDir ?? '\u0000нет') as ProjectRepositoryRow[];
         }
         const guard = excludeOtherWebUserRoots(ownWorkspaceRoot);
         return db.prepare(`
@@ -166,7 +187,7 @@ export const projectsDb = {
      * hidden workspaces without reintroducing them into the active sidebar list.
      * See getProjectPaths() above for `scopeRootDir` semantics.
      */
-    getArchivedProjectPaths(scopeRootDir?: string | null, ownWorkspaceRoot?: string | null): ProjectRepositoryRow[] {
+    getArchivedProjectPaths(scopeRootDir?: string | null, ownWorkspaceRoot?: string | null, ownAccountDir?: string | null): ProjectRepositoryRow[] {
         const db = getConnection();
         if (scopeRootDir) {
             const normalizedScopeRoot = resolveScope(scopeRootDir);
@@ -174,8 +195,13 @@ export const projectsDb = {
                 SELECT project_id, project_path, custom_project_name, isStarred, isArchived
                 FROM projects
                 WHERE isArchived = 1
-                AND (project_path = ? OR project_path LIKE ? || '/%')
-            `).all(normalizedScopeRoot, normalizedScopeRoot) as ProjectRepositoryRow[];
+                AND (
+                    project_path = ? OR project_path LIKE ? || '/%'
+                    OR project_path IN (
+                        SELECT DISTINCT project_path FROM sessions WHERE account_dir = ?
+                    )
+                )
+            `).all(normalizedScopeRoot, normalizedScopeRoot, ownAccountDir ?? '\u0000нет') as ProjectRepositoryRow[];
         }
         const guard = excludeOtherWebUserRoots(ownWorkspaceRoot);
         return db.prepare(`

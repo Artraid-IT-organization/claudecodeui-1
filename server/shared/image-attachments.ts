@@ -147,8 +147,18 @@ function getDirectoryPathVariants(directory: string): string[] {
  * the agent could already access on its own. Anything else (e.g. `~/.ssh`) is
  * refused, so a caller-supplied descriptor can never leak arbitrary files.
  */
-export function isAllowedImageSourcePath(resolvedPath: string, cwd?: string): boolean {
-  return [getGlobalImageAssetsDir(), cwd || process.cwd()].some((directory) =>
+export function isAllowedImageSourcePath(
+  resolvedPath: string,
+  cwd?: string,
+  assetsDirs?: string[],
+): boolean {
+  // Каталоги склада передаются снаружи: чей это пользователь, знает вызывающий,
+  // а не этот модуль. Без списка остаётся прежнее поведение — общий склад,
+  // единственно верное на площадке с одним пользователем.
+  const allowedAssetDirs = assetsDirs && assetsDirs.length > 0
+    ? assetsDirs
+    : [getGlobalImageAssetsDir()];
+  return [...allowedAssetDirs, cwd || process.cwd()].some((directory) =>
     getDirectoryPathVariants(directory).some((directoryVariant) =>
       isPathInsideDirectory(resolvedPath, directoryVariant)
     )
