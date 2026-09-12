@@ -655,7 +655,8 @@
    * ничего больше. Здесь остаётся только вид.
    *
    * Отступы задаются самой строке, а не обёртке: обёртка в ленте лишена полей
-   * (`[&_p]:my-0` в разметке сообщения), и подзаголовок слипался бы с текстом.
+   * (`mb-2.5 last:mb-0` в рендерере абзаца), и подзаголовок слипался бы с
+   * текстом.
    */
   .chat-message .prose .md-subheading > strong {
     display: block;
@@ -686,7 +687,8 @@
    */
   .chat-message .prose h2 code,
   .chat-message .prose h3 code,
-  .chat-message .prose h4 code {
+  .chat-message .prose h4 code,
+  .chat-message .prose h5 code {
     font-size: 0.92em;
     font-weight: inherit;
   }
