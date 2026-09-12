@@ -251,20 +251,44 @@ const markdownComponents = {
 
   // Заголовки: заметный отрыв сверху, минимальный снизу — чтобы заголовок
   // читался как начало блока, а не висел между двумя одинаковыми пробелами.
+  //
+  // Размеры задаются ЗДЕСЬ, а не в index.css: разметка `#` рендерится не в
+  // `h1`, а в `h2` (сдвиг на уровень, чтобы в документе оставался один h1), и
+  // правила вида `.prose h1` промахивались мимо. Плюс utility-классы лежат в
+  // слое выше `components`, так что CSS всё равно бы не перебил их.
+  //
+  // Шкала снята со снимка расширения Claude Code, который прислал Егор:
+  // крупный заголовок примерно в 1,7 раза выше основного текста, средний —
+  // в 1,35, мелкий — в 1,15. При базовых 13 пикселах это даёт 22 / 18 / 15.
+  // Раньше стояло 17 / 15 / 14 — от текста отличалось на два пиксела, и глаз
+  // разницу не ловил.
   h1: ({ children }: { children?: React.ReactNode }) => (
-    <h2 className="mb-2 mt-5 text-[17px] font-semibold leading-snug text-foreground first:mt-0">{children}</h2>
+    <h2 className="mb-2 mt-5 text-[22px] font-bold leading-tight tracking-[-0.01em] text-foreground first:mt-0">{children}</h2>
   ),
   h2: ({ children }: { children?: React.ReactNode }) => (
-    <h3 className="mb-2 mt-5 text-[15px] font-semibold leading-snug text-foreground first:mt-0">{children}</h3>
+    <h3 className="mb-2 mt-5 text-[18px] font-bold leading-snug text-foreground first:mt-0">{children}</h3>
   ),
   h3: ({ children }: { children?: React.ReactNode }) => (
-    <h4 className="mb-1.5 mt-4 text-[14px] font-semibold leading-snug text-foreground first:mt-0">{children}</h4>
+    <h4 className="mb-1.5 mt-4 text-[15px] font-semibold leading-snug text-foreground first:mt-0">{children}</h4>
   ),
   h4: ({ children }: { children?: React.ReactNode }) => (
-    <h5 className="mb-1.5 mt-4 text-[13px] font-semibold leading-snug text-foreground first:mt-0">{children}</h5>
+    <h5 className="mb-1.5 mt-4 text-[13.5px] font-semibold leading-snug text-foreground first:mt-0">{children}</h5>
   ),
 
-  p: ({ children }: { children?: React.ReactNode }) => <div className="mb-2.5 last:mb-0">{children}</div>,
+  /*
+   * Абзац, который целиком состоит из одной жирной фразы, — это подзаголовок,
+   * и ему нужен свой размер. Отличить его от «жирное слово внутри
+   * предложения» одним CSS нельзя: `:only-child` считает только теги и не
+   * видит текст вокруг, поэтому правило раздувало любое выделенное слово и
+   * рвало абзац на три куска. Здесь же видны настоящие потомки: один
+   * элемент `strong` и ничего больше — значит подзаголовок.
+   */
+  p: ({ children }: { children?: React.ReactNode }) => {
+    const kids = React.Children.toArray(children);
+    const isSubheading =
+      kids.length === 1 && React.isValidElement(kids[0]) && (kids[0] as React.ReactElement).type === 'strong';
+    return <div className={`mb-2.5 last:mb-0${isSubheading ? ' md-subheading' : ''}`}>{children}</div>;
+  },
   ul: ({ children }: { children?: React.ReactNode }) => (
     <ul className="mb-2.5 list-outside list-disc space-y-1 pl-5 marker:text-muted-foreground last:mb-0">{children}</ul>
   ),
