@@ -1,6 +1,7 @@
 import path from 'node:path';
 
 import { projectsDb, sessionsDb } from '@/modules/database/index.js';
+import { chatGroupsDb } from '@/modules/database/repositories/chat-groups.js';
 import { generateDisplayName } from '@/modules/projects/index.js';
 import { ChatSessionWriter } from '@/modules/websocket/services/chat-session-writer.service.js';
 import { connectedClients, WS_OPEN_STATE } from '@/modules/websocket/services/websocket-state.service.js';
@@ -63,9 +64,20 @@ const MAX_BUFFERED_EVENTS_PER_RUN = 5000;
 const runs = new Map<string, ChatRun>();
 
 async function broadcastCanonicalSessionUpsert(appSessionId: string): Promise<void> {
-  const row = sessionsDb.getSessionById(appSessionId);
+  let row = sessionsDb.getSessionById(appSessionId);
   if (!row || row.isArchived) {
     return;
+  }
+
+  // Чаты, начатые с сайта, сообщают о себе отсюда, а не через наблюдателя за
+  // файлами. Без подбора здесь новый чат со словом «SunSchool» в названии
+  // оставался без группы — проверено на живом сайте 13.09.26.
+  try {
+    if (chatGroupsDb.autoAssignSession(row.session_id)) {
+      row = sessionsDb.getSessionById(appSessionId) ?? row;
+    }
+  } catch (error) {
+    console.error('[chat-groups] подбор группы не удался:', error);
   }
 
   const projectPath = row.project_path;
@@ -84,6 +96,8 @@ async function broadcastCanonicalSessionUpsert(appSessionId: string): Promise<vo
       summary: row.custom_name || '',
       messageCount: 0,
       lastActivity: row.updated_at ?? row.created_at ?? new Date().toISOString(),
+      groupId: row.group_id ?? null,
+      groupLabel: row.group_label ?? null,
     },
     project: project
       ? {
