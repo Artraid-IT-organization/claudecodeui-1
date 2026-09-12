@@ -80,6 +80,8 @@ function MainContent({
   onProjectSelect,
   onSessionSelect,
   onProjectsRefresh,
+  onSessionArchived,
+  onSessionRestored,
 }: MainContentProps) {
   const { preferences } = useUiPreferences();
   const { showRawParameters, showThinking, sendByCtrlEnter } = preferences;
@@ -187,6 +189,8 @@ function MainContent({
         shouldShowTasksTab={shouldShowTasksTab}
         isMobile={isMobile}
         onMenuClick={onMenuClick}
+        onSessionArchived={onSessionArchived}
+        onSessionRestored={onSessionRestored}
       />
 
       <div className="flex min-h-0 flex-1 overflow-hidden">

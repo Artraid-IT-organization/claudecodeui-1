@@ -280,6 +280,20 @@ export const api = {
   // LLM call. Assignments land through the usual session_upserted websocket
   // broadcast, so this response is mainly useful for immediate UI feedback
   // (spinner/toast) rather than something callers need to apply themselves.
+  // Группы чатов: список (свежие сверху), создание, группа одного чата.
+  chatGroups: () => authenticatedFetch('/api/chat-groups'),
+  createChatGroup: (name, keywords = []) =>
+    authenticatedFetch('/api/chat-groups', {
+      method: 'POST',
+      body: JSON.stringify({ name, keywords }),
+    }),
+  sessionChatGroup: (sessionId) =>
+    authenticatedFetch(`/api/chat-groups/session/${encodeURIComponent(sessionId)}`),
+  setSessionChatGroup: (sessionId, groupId) =>
+    authenticatedFetch(`/api/chat-groups/session/${encodeURIComponent(sessionId)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ groupId }),
+    }),
   organizeProjectSessions: (projectId) =>
     authenticatedFetch(`/api/projects/${encodeURIComponent(projectId)}/organize-sessions`, {
       method: 'POST',

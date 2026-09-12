@@ -1023,6 +1023,21 @@ export function useProjectsState({
     [clearSessionAttention, navigate, selectedSession?.id],
   );
 
+  /**
+   * Чат ушёл в архив из шапки: убрать его из списка слева, но оставить открытым.
+   * В отличие от удаления, человек остаётся в разговоре и видит, что произошло,
+   * а вернуть чат может тем же меню.
+   */
+  const removeSessionFromList = useCallback(
+    (sessionIdToRemove: string) => {
+      clearSessionAttention(sessionIdToRemove);
+      setProjects((prevProjects) =>
+        prevProjects.map((project) => removeSessionFromProject(project, sessionIdToRemove)),
+      );
+    },
+    [clearSessionAttention],
+  );
+
   const handleSidebarRefresh = useCallback(async () => {
     try {
       const response = await api.projects();
@@ -1204,6 +1219,7 @@ export function useProjectsState({
     handleSessionSelect,
     handleNewSession,
     handleSessionDelete,
+    removeSessionFromList,
     loadMoreProjectSessions,
     handleProjectDelete,
     handleSidebarRefresh,

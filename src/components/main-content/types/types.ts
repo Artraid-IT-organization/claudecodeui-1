@@ -73,6 +73,10 @@ export type MainContentProps = {
   onSessionSelect: (session: ProjectSession) => void;
   /** Silently re-syncs the sidebar project list after worktree projects change. */
   onProjectsRefresh: () => void;
+  /** Чат убран в архив из шапки — убрать его из списка слева. */
+  onSessionArchived?: (sessionId: string) => void;
+  /** Чат возвращён из архива — список слева перечитать. */
+  onSessionRestored?: (sessionId: string) => void;
 };
 
 export type MainContentHeaderProps = {
@@ -84,6 +88,8 @@ export type MainContentHeaderProps = {
   shouldShowTasksTab: boolean;
   isMobile: boolean;
   onMenuClick: () => void;
+  onSessionArchived?: (sessionId: string) => void;
+  onSessionRestored?: (sessionId: string) => void;
 };
 
 export type MainContentStateViewProps = {

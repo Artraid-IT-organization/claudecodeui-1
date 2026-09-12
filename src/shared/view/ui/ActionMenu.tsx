@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronDown, Loader2, type LucideIcon } from 'lucide-react';
+import { Check, ChevronDown, Loader2, type LucideIcon } from 'lucide-react';
 
 import { cn } from '../../../lib/utils';
 
@@ -20,6 +20,8 @@ export type ActionMenuItem = {
   isDanger?: boolean;
   showDividerBefore?: boolean;
   closeOnSelect?: boolean;
+  /** Отмечен галочкой: выбранный вариант из нескольких. */
+  checked?: boolean;
 };
 
 type ActionMenuProps = {
@@ -58,7 +60,7 @@ export default function ActionMenu({
   onOpenChange,
 }: ActionMenuProps) {
   const [isOpen, setIsOpen] = React.useState(false);
-  const [portalPosition, setPortalPosition] = React.useState<{ top: number; left: number } | null>(null);
+  const [portalPosition, setPortalPosition] = React.useState<{ top: number; left: number; maxHeight: number } | null>(null);
   const rootRef = React.useRef<HTMLDivElement | null>(null);
   const triggerRef = React.useRef<HTMLButtonElement | null>(null);
   const menuRef = React.useRef<HTMLDivElement | null>(null);
@@ -114,7 +116,14 @@ export default function ActionMenu({
       return;
     }
 
-    const closeOnViewportChange = () => setMenuOpen(false);
+    const closeOnViewportChange = (event: Event) => {
+      // Прокрутка САМОГО меню не должна его закрывать: длинный список групп
+      // листается внутри, а слушатель висит на всём окне с перехватом.
+      if (event.type === 'scroll' && menuRef.current?.contains(event.target as Node)) {
+        return;
+      }
+      setMenuOpen(false);
+    };
     window.addEventListener('resize', closeOnViewportChange);
     window.addEventListener('scroll', closeOnViewportChange, true);
     return () => {
@@ -168,11 +177,16 @@ export default function ActionMenu({
       const menuWidth = 260;
       const estimatedHeight = (header ? 52 : 0)
         + items.reduce((height, item) => height + (item.description ? 58 : 40) + (item.showDividerBefore ? 9 : 0), 12);
+      const fitsBelow = rect.bottom + 6 + estimatedHeight <= window.innerHeight - 8;
+      // Кнопка у верхнего края (шапка) — меню всегда вниз, даже если не влезает:
+      // тогда оно получает потолок высоты и прокручивается, а не прыгает вверх
+      // за край экрана.
+      const openBelow = fitsBelow || rect.top < window.innerHeight / 2;
+      const top = openBelow ? rect.bottom + 6 : Math.max(8, rect.top - estimatedHeight - 6);
       setPortalPosition({
-        top: rect.bottom + 6 + estimatedHeight <= window.innerHeight - 8
-          ? rect.bottom + 6
-          : Math.max(8, rect.top - estimatedHeight - 6),
+        top,
         left: Math.max(8, Math.min(rect.right - menuWidth, window.innerWidth - menuWidth - 8)),
+        maxHeight: openBelow ? window.innerHeight - top - 8 : rect.top - 6 - top,
       });
     }
     setMenuOpen(true);
@@ -185,7 +199,7 @@ export default function ActionMenu({
       role="menu"
       tabIndex={-1}
       className={cn(
-        portal ? 'fixed z-[70]' : 'absolute top-full z-50 mt-2',
+        portal ? 'fixed z-[70] overflow-y-auto overscroll-contain' : 'absolute top-full z-50 mt-2',
         'min-w-[220px] rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-lg',
         'animate-in fade-in-0 zoom-in-95',
         !portal && (align === 'right' ? 'right-0' : 'left-0'),
@@ -227,6 +241,7 @@ export default function ActionMenu({
                   </span>
                 )}
               </span>
+              {item.checked && <Check className="mt-0.5 h-4 w-4 flex-shrink-0 text-primary" aria-label="выбрано" />}
             </button>
           </React.Fragment>
         );

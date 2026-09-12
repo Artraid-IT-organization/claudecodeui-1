@@ -88,6 +88,7 @@ function AppContentInner() {
     handleProjectSelect,
     handleSessionSelect,
     handleSessionDelete,
+    removeSessionFromList,
   } = useProjectsState({
     sessionId,
     navigate,
@@ -491,6 +492,8 @@ function AppContentInner() {
           onProjectSelect={handleProjectSelect}
           onSessionSelect={handleSessionSelect}
           onProjectsRefresh={() => void refreshProjectsSilently()}
+          onSessionArchived={removeSessionFromList}
+          onSessionRestored={() => void refreshProjectsSilently()}
         />
       </div>
 

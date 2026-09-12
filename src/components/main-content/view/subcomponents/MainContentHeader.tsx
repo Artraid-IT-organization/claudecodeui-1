@@ -3,7 +3,7 @@ import type { MainContentHeaderProps } from '../../types/types';
 import MobileMenuButton from './MobileMenuButton';
 import MainContentTitle from './MainContentTitle';
 import ConnectionStatus from './ConnectionStatus';
-import PresetSelector from './PresetSelector';
+import ChatGroupSelector from './ChatGroupSelector';
 
 export default function MainContentHeader({
   activeTab,
@@ -13,6 +13,8 @@ export default function MainContentHeader({
   isMobile,
   onMenuClick,
   terminalTitle = null,
+  onSessionArchived,
+  onSessionRestored,
 }: MainContentHeaderProps) {
   return (
     <header className="pwa-header-safe flex-shrink-0 border-b border-border/60 bg-background/95 px-3 py-2 backdrop-blur-sm sm:px-4">
@@ -25,7 +27,19 @@ export default function MainContentHeader({
           shouldShowTasksTab={shouldShowTasksTab}
           terminalTitle={terminalTitle}
         />
-        {activeTab === 'chat' && !terminalTitle && <PresetSelector />}
+        {/*
+          На этом месте раньше был переключатель пресетов. Егор попросил вместо
+          него группу чата и архив: это нужно каждый день, а пресеты — редко,
+          и включаются теперь в настройках.
+        */}
+        {activeTab === 'chat' && !terminalTitle && (
+          <ChatGroupSelector
+            sessionId={selectedSession?.id ?? null}
+            sessionGroupId={selectedSession ? (selectedSession.groupId ?? null) : undefined}
+            onArchived={onSessionArchived}
+            onRestored={onSessionRestored}
+          />
+        )}
         <ConnectionStatus />
       </div>
     </header>

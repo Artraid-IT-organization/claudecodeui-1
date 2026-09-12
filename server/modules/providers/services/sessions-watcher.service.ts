@@ -5,6 +5,7 @@ import { promises as fsPromises } from 'node:fs';
 import chokidar, { type FSWatcher } from 'chokidar';
 
 import { projectsDb, sessionsDb } from '@/modules/database/index.js';
+import { chatGroupsDb } from '@/modules/database/repositories/chat-groups.js';
 import { sessionSynchronizerService } from '@/modules/providers/services/session-synchronizer.service.js';
 import { WS_OPEN_STATE, connectedClients } from '@/modules/websocket/index.js';
 import type { LLMProvider } from '@/shared/types.js';
@@ -145,6 +146,18 @@ async function buildSessionUpsertedEvent(updatedProviderSessionId: string): Prom
     return null;
   }
 
+  // Чат появился или сменил название — подобрать ему группу по словам. Ручной
+  // выбор человека подбор не трогает (см. chat-groups.ts). Ошибка подбора не
+  // должна мешать списку слева узнать о чате, поэтому она только пишется в лог.
+  let groupedRow = row;
+  try {
+    if (chatGroupsDb.autoAssignSession(row.session_id)) {
+      groupedRow = sessionsDb.getSessionById(row.session_id) ?? row;
+    }
+  } catch (error) {
+    console.error('[chat-groups] подбор группы не удался:', error);
+  }
+
   const projectPath = row.project_path;
   const project = projectPath ? projectsDb.getProjectPath(projectPath) : null;
   const displayName = project?.custom_project_name?.trim()
@@ -160,8 +173,8 @@ async function buildSessionUpsertedEvent(updatedProviderSessionId: string): Prom
       summary: row.custom_name || '',
       messageCount: 0,
       lastActivity: row.updated_at ?? row.created_at ?? new Date().toISOString(),
-      groupId: row.group_id ?? null,
-      groupLabel: row.group_label ?? null,
+      groupId: groupedRow.group_id ?? null,
+      groupLabel: groupedRow.group_label ?? null,
     },
     project: project
       ? {

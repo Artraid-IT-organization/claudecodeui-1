@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Pencil, Plus, Trash2, Save, X } from 'lucide-react';
+import { Check, Pencil, Plus, Trash2, Save, X } from 'lucide-react';
 
 import { Button, Input } from '../../../../shared/view/ui';
 import { usePromptPresetsContext } from '../../../../contexts/PromptPresetsContext';
@@ -26,7 +26,9 @@ function makeNewDraft(): EditingState {
 }
 
 export default function PromptPresetsTab() {
-  const { presets, isLoading, error, create, update, remove, refresh } = usePromptPresetsContext();
+  const { presets, isLoading, error, create, update, remove, refresh, activeId, setActiveId } =
+    usePromptPresetsContext();
+  const activePreset = activeId ? presets.find((preset) => preset.id === activeId) ?? null : null;
   const [editing, setEditing] = useState<EditingState | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -83,7 +85,8 @@ export default function PromptPresetsTab() {
         <div>
           <h3 className="text-base font-semibold text-foreground">Пресеты промптов</h3>
           <p className="mt-1 text-xs text-muted-foreground">
-            Сохранённые «роли» модели: одно нажатие в шапке разговора — и стиль ответа меняется.
+            Сохранённые «роли» модели. Включённый пресет добавляется к каждому сообщению.
+            Сейчас включён: <span className="font-medium text-foreground">{activePreset?.name ?? 'ни один'}</span>.
           </p>
         </div>
         <Button onClick={startNew} size="sm" className="gap-1">
@@ -145,7 +148,21 @@ export default function PromptPresetsTab() {
                       {preset.systemPrompt || '(пустой промпт)'}
                     </p>
                   </div>
-                  <div className="flex flex-shrink-0 gap-1">
+                  <div className="flex flex-shrink-0 items-start gap-1">
+                    {/*
+                      Раньше пресет включался в шапке разговора. Там теперь
+                      группа чата, а включение переехало сюда — рядом с самим
+                      пресетом, чтобы было видно, что именно включаешь.
+                    */}
+                    <Button
+                      size="sm"
+                      variant={preset.id === activeId ? 'default' : 'outline'}
+                      onClick={() => setActiveId(preset.id === activeId ? null : preset.id)}
+                      className="h-8 gap-1 px-2 text-xs"
+                    >
+                      {preset.id === activeId && <Check className="h-3.5 w-3.5" />}
+                      {preset.id === activeId ? 'Включён' : 'Включить'}
+                    </Button>
                     <Button
                       size="icon"
                       variant="ghost"
