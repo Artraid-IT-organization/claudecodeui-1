@@ -145,11 +145,29 @@ export function matchGroupForText(
 ): { id: string; name: string } | null {
   const haystack = text.toLowerCase();
   for (const group of groups) {
-    if (group.keywords.some((word) => haystack.includes(word))) {
+    if (group.keywords.some((word) => startsWordAt(haystack, word))) {
       return { id: group.id, name: group.name };
     }
   }
   return null;
+}
+
+/**
+ * Слово для подбора должно стоять С НАЧАЛА слова в тексте: «бот» находит
+ * «Бот не отвечает» и «ботов», но не «Работа». Простой поиск подстроки на
+ * живых данных отправил «Работа c Thoughts» в «Телеграм-боты» — а «работа»
+ * одно из самых частых слов в названиях. Конец слова не проверяется намеренно:
+ * «бриф» должен находить «брифы», «заставк» — «заставка».
+ */
+function startsWordAt(haystack: string, word: string): boolean {
+  let index = haystack.indexOf(word);
+  while (index >= 0) {
+    if (index === 0 || !/[\p{L}\p{N}]/u.test(haystack[index - 1])) {
+      return true;
+    }
+    index = haystack.indexOf(word, index + 1);
+  }
+  return false;
 }
 
 export const chatGroupsDb = {

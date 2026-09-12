@@ -49,6 +49,14 @@ test('слова подбирают группу без учёта регист�
   assert.equal(matchGroupForText('SSH между серверами', groups), null);
 });
 
+test('слово ищется с начала слова: «бот» не прячется внутри «Работа»', () => {
+  const groups = [{ id: 'b', name: 'Боты', keywords: ['бот', 'bot'] }];
+  assert.equal(matchGroupForText('Работа c Thoughts', groups), null);
+  assert.equal(matchGroupForText('MaClaudeServerBot доступ', groups), null);
+  assert.equal(matchGroupForText('Ботов стало больше', groups)?.id, 'b');
+  assert.equal(matchGroupForText('чат /home/claude/sozidateli-bot', groups)?.id, 'b');
+});
+
 test('автоматика раскладывает чаты, ручной выбор она не трогает', async () => {
   await withIsolatedDatabase(() => {
     const school = chatGroupsDb.create(ACCOUNT, { name: 'SunSchool', keywords: ['SunSchool', 'бриф'] });
