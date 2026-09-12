@@ -2,7 +2,7 @@ import path from 'node:path';
 
 import type { WebSocket } from 'ws';
 
-import { credentialsDb, sessionsDb, userDb } from '@/modules/database/index.js';
+import { sessionsDb } from '@/modules/database/index.js';
 import { providerModelsService } from '@/modules/providers/index.js';
 import { chatRunRegistry } from '@/modules/websocket/services/chat-run-registry.service.js';
 import { connectedClients, WS_OPEN_STATE } from '@/modules/websocket/services/websocket-state.service.js';
@@ -20,9 +20,7 @@ import type {
   ProviderRuntimeWriter,
 } from '@/shared/types.js';
 import { isPlatformOwnerWebUser, OPEN_REGISTRATION, parseIncomingJsonObject } from '@/shared/utils.js';
-import { getWebUserClaudeConfigDir } from '@/shared/web-user-paths.js';
-
-const ANTHROPIC_API_KEY_CREDENTIAL_TYPE = 'anthropic_api_key';
+import { readRequestUserId, resolveWebUserRuntimeContext } from '@/shared/web-user-runtime.js';
 
 /**
  * Basic per-user concurrency cap for OPEN_REGISTRATION instances (see
@@ -34,41 +32,6 @@ const ANTHROPIC_API_KEY_CREDENTIAL_TYPE = 'anthropic_api_key';
  */
 const MAX_CONCURRENT_RUNS_PER_USER = 3;
 
-/**
- * Resolves this OPEN_REGISTRATION user's own CLAUDE_CONFIG_DIR and Anthropic
- * API key so the chat runtime dispatch below can pass them straight through
- * to the Claude SDK's per-call `env` (claude-runtime.provider.js). The chat
- * WebSocket's 'message' handler runs outside any HTTP request's call stack,
- * so the AsyncLocalStorage context that covers REST routes cannot reach it -
- * this resolves the same per-user values explicitly instead.
- *
- * Returns nulls when OPEN_REGISTRATION is off (the runtime then falls back to
- * process.env, i.e. Account 1/2's existing behavior) or when userId is unset.
- */
-function resolveOpenRegistrationRuntimeContext(
-  userId: string | number | null,
-): { claudeConfigDir: string | null; anthropicApiKey: string | null } {
-  if (!OPEN_REGISTRATION || userId === null) {
-    return { claudeConfigDir: null, anthropicApiKey: null };
-  }
-
-  const numericUserId = Number(userId);
-  if (!Number.isFinite(numericUserId)) {
-    return { claudeConfigDir: null, anthropicApiKey: null };
-  }
-
-  // Mirror the same slot-awareness applied in requestRuntimeContextMiddleware
-  // for the HTTP path. The WebSocket 'message' handler runs outside any HTTP
-  // request's ALS context, so the slot must be resolved here explicitly.
-  const ownerSlot = isPlatformOwnerWebUser(numericUserId)
-    ? userDb.getActiveOwnerAccountSlot(numericUserId)
-    : undefined;
-
-  return {
-    claudeConfigDir: getWebUserClaudeConfigDir(numericUserId, ownerSlot),
-    anthropicApiKey: credentialsDb.getActiveCredential(numericUserId, ANTHROPIC_API_KEY_CREDENTIAL_TYPE),
-  };
-}
 
 /**
  * Trust boundary for client-supplied image attachments: chat.send options come
@@ -131,28 +94,6 @@ type ChatWebSocketDependencies = {
   runtime: ProviderRuntimeGateway;
 };
 
-/**
- * Extracts the authenticated request user id in the formats currently produced
- * by platform and OSS auth code paths.
- */
-function readRequestUserId(
-  request: AuthenticatedWebSocketRequest | undefined
-): string | number | null {
-  const user = request?.user;
-  if (!user) {
-    return null;
-  }
-
-  if (typeof user.id === 'string' || typeof user.id === 'number') {
-    return user.id;
-  }
-
-  if (typeof user.userId === 'string' || typeof user.userId === 'number') {
-    return user.userId;
-  }
-
-  return null;
-}
 
 function sendJson(ws: WebSocket, payload: unknown): void {
   if (ws.readyState === WS_OPEN_STATE) {
@@ -221,7 +162,7 @@ async function handleChatSend(
     return;
   }
 
-  const openRegistrationContext = resolveOpenRegistrationRuntimeContext(userId);
+  const openRegistrationContext = resolveWebUserRuntimeContext(userId);
   const numericUserId = userId !== null ? Number(userId) : NaN;
   // Owner bypass: when the owner's ~/.claude-webuser-<id> is symlinked to
   // their real ~/.claude, the SDK authenticates via the existing OAuth session

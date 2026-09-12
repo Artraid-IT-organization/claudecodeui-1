@@ -5,7 +5,9 @@ import path from 'node:path';
 import pty, { type IPty } from 'node-pty';
 import { WebSocket, type RawData } from 'ws';
 
-import { parseIncomingJsonObject } from '@/shared/utils.js';
+import type { AuthenticatedWebSocketRequest } from '@/shared/types.js';
+import { OPEN_REGISTRATION, parseIncomingJsonObject } from '@/shared/utils.js';
+import { readRequestUserId, resolveWebUserRuntimeContext } from '@/shared/web-user-runtime.js';
 
 type ShellIncomingMessage = {
   type?: string;
@@ -330,9 +332,30 @@ function prioritizeUserNpmGlobalBin(env: NodeJS.ProcessEnv): { key: string; valu
  */
 export function handleShellConnection(
   ws: WebSocket,
-  dependencies: ShellWebSocketDependencies
+  dependencies: ShellWebSocketDependencies,
+  request?: AuthenticatedWebSocketRequest
 ): void {
   console.log('[INFO] Shell websocket connected');
+
+  // Чей это терминал. Без этого процесс оболочки наследовал каталог настроек
+  // сервера — общий, владельца площадки, — и `/login`, набранный в терминале
+  // любым приглашённым, менял аккаунт владельцу. Подробности и разбор случая
+  // 12.09.26 — в shared/web-user-runtime.ts.
+  const runtimeContext = resolveWebUserRuntimeContext(readRequestUserId(request));
+
+  // Не смогли определить, чей это терминал, — не открываем его вовсе. Молча
+  // запустить оболочку в общем каталоге значит дать незнакомцу писать в
+  // настройки владельца площадки; отказ здесь неприятен, но честен.
+  if (OPEN_REGISTRATION && !runtimeContext.claudeConfigDir) {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Не удалось определить пользователя — командная строка не открыта. Войдите заново.',
+      }));
+      ws.close();
+    }
+    return;
+  }
 
   let shellProcess: IPty | null = null;
   let ptySessionKey: string | null = null;
@@ -483,6 +506,16 @@ export function handleShellConnection(
             TERM: 'xterm-256color',
             COLORTERM: 'truecolor',
             FORCE_COLOR: '3',
+            // Свой каталог настроек — иначе вход в терминале лёг бы в общий.
+            // Проверка выше не пускает сюда неопознанного пользователя, так
+            // что на площадке с открытой регистрацией значение здесь есть
+            // всегда; на одноаккаунтной остаётся окружение процесса.
+            ...(runtimeContext.claudeConfigDir
+              ? { CLAUDE_CONFIG_DIR: runtimeContext.claudeConfigDir }
+              : {}),
+            ...(runtimeContext.anthropicApiKey
+              ? { ANTHROPIC_API_KEY: runtimeContext.anthropicApiKey }
+              : {}),
           },
         });
 

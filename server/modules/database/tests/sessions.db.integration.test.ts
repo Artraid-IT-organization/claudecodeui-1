@@ -53,7 +53,19 @@ test('session archive queries hide archived rows from active project views', asy
   });
 });
 
-test('createSession reactivates archived rows when the session becomes active again', async () => {
+/**
+ * Повторная запись сессии обновляет её, но НЕ возвращает из архива.
+ *
+ * Раньше возвращала, и это ломало главное, о чём просил владелец: убрать из
+ * списка чатов запуски ботов и скриптов. Их там были сотни, они убирались в
+ * архив — и тут же возвращались обратно, потому что пересборка истории
+ * перезаписывает каждую строку, а перезапись считалась признаком «сессия
+ * снова живая». Признак оказался ложным: заново читая файл с диска, мы узнаём
+ * содержимое, а не намерение человека.
+ *
+ * Разархивировать теперь можно только руками — это и есть решение человека.
+ */
+test('createSession updates an archived row without pulling it back into the list', async () => {
   await withIsolatedDatabase(() => {
     sessionsDb.createSession('session-reused', 'claude', '/workspace/demo-project', 'First Name');
     sessionsDb.updateSessionIsArchived('session-reused', true);
@@ -62,13 +74,17 @@ test('createSession reactivates archived rows when the session becomes active ag
 
     const activeSessions = sessionsDb.getAllSessions();
     const archivedSessions = sessionsDb.getArchivedSessions();
-    const restoredSession = sessionsDb.getSessionById('session-reused');
+    const reusedSession = sessionsDb.getSessionById('session-reused');
 
-    assert.equal(activeSessions.length, 1);
-    assert.equal(activeSessions[0]?.session_id, 'session-reused');
-    assert.equal(activeSessions[0]?.custom_name, 'Updated Name');
-    assert.equal(archivedSessions.length, 0);
-    assert.equal(restoredSession?.isArchived, 0);
+    assert.equal(activeSessions.length, 0);
+    assert.equal(archivedSessions.length, 1);
+    assert.equal(archivedSessions[0]?.session_id, 'session-reused');
+    assert.equal(reusedSession?.custom_name, 'Updated Name');
+    assert.equal(reusedSession?.isArchived, 1);
+
+    // Вернуть в список можно — но только явным действием.
+    sessionsDb.updateSessionIsArchived('session-reused', false);
+    assert.equal(sessionsDb.getAllSessions().length, 1);
   });
 });
 
