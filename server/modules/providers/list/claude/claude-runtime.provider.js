@@ -14,6 +14,7 @@
 
 import crypto from 'crypto';
 import { promises as fs } from 'fs';
+import path from 'path';
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
 
@@ -622,11 +623,22 @@ function createHeldPromptStream(messages) {
  * @param {string} cwd - Current working directory for project-specific configs
  * @returns {Object|null} MCP servers object or null if none found
  */
-async function loadMcpConfig(cwd) {
+async function loadMcpConfig(cwd, claudeConfigDir) {
   try {
-    // getClaudeJsonPath() honors CLAUDE_CONFIG_DIR (multi-account setups) -
-    // see its doc comment in shared/utils.ts.
-    const claudeConfigPath = getClaudeJsonPath();
+    // Каталог настроек передаётся явно, а не берётся из окружения.
+    //
+    // getClaudeJsonPath() умеет читать контекст запроса, но этот код работает
+    // в обработчике веб-сокета, куда контекст запроса не дотягивается, — и
+    // молча откатывался к каталогу владельца площадки. 12.09.26 это значило,
+    // что приглашённый пользователь получал ПОДКЛЮЧЕНИЯ владельца: почту,
+    // календарь, диск, заметки. Не настройку интерфейса, а доступ к чужим
+    // данным.
+    //
+    // Нужный каталог у вызывающего уже есть — он же задаёт его рантайму, —
+    // поэтому передаём его сюда, вместо того чтобы угадывать по окружению.
+    const claudeConfigPath = claudeConfigDir
+      ? path.join(claudeConfigDir, '.claude.json')
+      : getClaudeJsonPath();
 
     // Check if config file exists
     try {
@@ -767,7 +779,7 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       effortModels,
     });
 
-    const mcpServers = await loadMcpConfig(options.cwd);
+    const mcpServers = await loadMcpConfig(options.cwd, options.claudeConfigDir);
     if (mcpServers) {
       sdkOptions.mcpServers = mcpServers;
     }
