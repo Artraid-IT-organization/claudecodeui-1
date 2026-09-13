@@ -380,6 +380,24 @@ export const sessionsDb = {
     ).run(effort, sessionId);
   },
 
+  /**
+   * Запомнить путь к файлу переписки, если он ещё не записан.
+   *
+   * У чата, начатого с сайта, путь появляется только после периодического
+   * обхода файлов — минуты спустя. До этого история отдавалась пустой, и
+   * открытая вкладка не видела ответа (живой тест 13.09.26: запрос истории
+   * вернул 0 сообщений при готовом ответе в файле). Уже записанный путь не
+   * перезаписывается.
+   */
+  setJsonlPathIfMissing(sessionId: string, jsonlPath: string): void {
+    const db = getConnection();
+    db.prepare(
+      `UPDATE sessions
+       SET jsonl_path = ?
+       WHERE session_id = ? AND jsonl_path IS NULL`
+    ).run(jsonlPath, sessionId);
+  },
+
   updateSessionCustomName(sessionId: string, customName: string): void {
     const db = getConnection();
     db.prepare(

@@ -7,7 +7,7 @@ import readline from 'node:readline';
 import type { IProviderSessions } from '@/shared/interfaces.js';
 import type { AnyRecord, FetchHistoryOptions, FetchHistoryResult, NormalizedMessage } from '@/shared/types.js';
 import { parseFilesInputTag } from '@/shared/image-attachments.js';
-import { createNormalizedMessage, generateMessageId, readObjectRecord, sliceTailPage } from '@/shared/utils.js';
+import { createNormalizedMessage, generateMessageId, getClaudeConfigDir, readObjectRecord, sliceTailPage } from '@/shared/utils.js';
 import { sessionsDb } from '@/modules/database/index.js';
 
 import { readSessionLines } from './transcript-tail-cache.js';
@@ -117,6 +117,30 @@ async function parseAgentTools(filePath: string): Promise<AnyRecord[]> {
   return tools;
 }
 
+/**
+ * Найти файл переписки по номеру разговора, когда путь ещё не записан в базе.
+ * Ищем в папке аккаунта текущего запроса: `<аккаунт>/projects/<папка>/<id>.jsonl`.
+ */
+async function locateTranscript(providerSessionId: string): Promise<string | null> {
+  if (!/^[0-9a-f-]{36}$/i.test(providerSessionId)) {
+    return null;
+  }
+  const projectsRoot = path.join(getClaudeConfigDir(), 'projects');
+  let dirs: string[] = [];
+  try {
+    dirs = await fsp.readdir(projectsRoot);
+  } catch {
+    return null;
+  }
+  for (const dir of dirs) {
+    const candidate = path.join(projectsRoot, dir, `${providerSessionId}.jsonl`);
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
 async function getSessionMessages(
   sessionId: string,
   providerSessionId: string,
@@ -126,10 +150,18 @@ async function getSessionMessages(
   try {
     // The DB row is keyed by the app-facing session id, while the JSONL rows
     // on disk carry the provider-native id — both ids are needed here.
-    const jsonLPath = sessionsDb.getSessionById(sessionId)?.jsonl_path;
+    const storedPath = sessionsDb.getSessionById(sessionId)?.jsonl_path;
+    const jsonLPath = storedPath || await locateTranscript(providerSessionId);
 
     if (!jsonLPath) {
       return { messages: [], total: 0, hasMore: false };
+    }
+    if (!storedPath) {
+      try {
+        sessionsDb.setJsonlPathIfMissing(sessionId, jsonLPath);
+      } catch {
+        // Не записали — найдём снова при следующем запросе.
+      }
     }
 
     const projectDir = path.dirname(jsonLPath);
