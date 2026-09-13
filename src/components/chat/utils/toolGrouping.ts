@@ -25,11 +25,24 @@ function isGroupableToolMessage(message: ChatMessage): message is ChatMessage & 
   return Boolean(message.isToolUse && message.toolName && !message.isSubagentContainer);
 }
 
-// Messages that render nothing (e.g. reasoning hidden when showThinking is off)
-// shouldn't split an otherwise-continuous run of the same tool — providers like
-// Codex interleave hidden reasoning between consecutive tool calls.
+/**
+ * Блок размышления без единого слова внутри.
+ *
+ * Модель на подписке Егора своих размышлений не отдаёт: приходит только сам
+ * факт «думал N секунд» и пустое содержимое. Такой блок в ленте — строка
+ * «Думал несколько секунд», которую нечем развернуть. Егор 13.09.26: «это не
+ * информативно, не вижу в этом смысла… чтобы лишней воды вообще не было».
+ * То, что ИИ сейчас думает, показывает плашка над полем ввода, а не эти строки.
+ */
+export function isEmptyThinking(message: ChatMessage): boolean {
+  return Boolean(message.isThinking && !String(message.content ?? '').trim());
+}
+
+// Messages that render nothing (reasoning hidden when showThinking is off, or an
+// empty thinking block) shouldn't split an otherwise-continuous run of the same
+// tool — providers interleave reasoning between consecutive tool calls.
 function rendersNothing(message: ChatMessage, showThinking: boolean): boolean {
-  return Boolean(message.isThinking && !showThinking);
+  return Boolean(message.isThinking && (!showThinking || isEmptyThinking(message)));
 }
 
 export function groupConsecutiveTools(

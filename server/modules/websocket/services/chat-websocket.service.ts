@@ -354,11 +354,28 @@ function handleChatSubscribe(
     }
 
     const lastSeqRaw = (target as AnyRecord).lastSeq;
-    const lastSeq = typeof lastSeqRaw === 'number' && Number.isFinite(lastSeqRaw)
+    const clientLastSeq = typeof lastSeqRaw === 'number' && Number.isFinite(lastSeqRaw)
       ? Math.max(0, Math.floor(lastSeqRaw))
       : 0;
+    const clientRunRaw = (target as AnyRecord).runStartedAt;
+    const clientRunStartedAt = typeof clientRunRaw === 'number' && Number.isFinite(clientRunRaw)
+      ? clientRunRaw
+      : null;
 
     const run = chatRunRegistry.getRun(sessionId);
+
+    // Счётчик вкладки годится для досылки, только если он про ЭТУ работу.
+    // Нумерация у каждой работы своя, и вкладка, пережившая прошлую долгую
+    // работу, помнит номер, до которого новая ещё не дошла, — досылка по нему
+    // вернула бы пустоту. 13.09.26 так у Егора пропадала плашка «работает»:
+    // сервер чат считал занятым, а вкладка ни одного события не получала.
+    // Старая вкладка без метки: номер больше, чем у работы вообще бывает, —
+    // точно чужой, досылаем с начала.
+    const lastSeq = run
+      && ((clientRunStartedAt !== null && clientRunStartedAt !== run.startedAt)
+        || (clientRunStartedAt === null && clientLastSeq > run.lastSeq))
+      ? 0
+      : clientLastSeq;
     const isProcessing = chatRunRegistry.isProcessing(sessionId);
 
     // Future live events for this run should land on the socket that asked —
@@ -376,6 +393,7 @@ function handleChatSubscribe(
       sessionId,
       isProcessing,
       lastSeq: run?.lastSeq ?? 0,
+      runStartedAt: run?.startedAt ?? null,
       pendingPermissions,
       timestamp: new Date().toISOString(),
     });

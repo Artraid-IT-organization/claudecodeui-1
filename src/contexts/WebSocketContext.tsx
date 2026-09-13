@@ -16,6 +16,8 @@ export type ServerEvent = {
   type?: string;
   sessionId?: string;
   seq?: number;
+  /** Метка работы события — см. chat/utils/liveRunCursor. */
+  runStartedAt?: number | null;
   [key: string]: unknown;
 };
 

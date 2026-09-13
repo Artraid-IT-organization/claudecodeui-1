@@ -235,6 +235,12 @@ export type NormalizedMessage = {
    * the live events they missed across websocket reconnects.
    */
   seq?: number;
+  /**
+   * Метка работы, к которой относится событие (время её запуска). Нумерация
+   * `seq` у каждой работы своя и начинается с 1 — без метки вкладка не может
+   * отличить первое событие новой работы от давно виденного события старой.
+   */
+  runStartedAt?: number;
   role?: 'user' | 'assistant';
   content?: string;
   /**

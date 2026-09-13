@@ -156,6 +156,7 @@ function decorateAndRecordEvent(run: ChatRun, message: NormalizedMessage): Norma
     ...message,
     sessionId: run.appSessionId,
     seq: run.lastSeq,
+    runStartedAt: run.startedAt,
   };
 
   if (message.kind === 'complete') {

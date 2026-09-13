@@ -11,6 +11,7 @@ import { createMessageHistoryRefreshCoordinator } from '../utils/messageHistoryR
 import { createCachedDiffCalculator, type DiffCalculator } from '../utils/messageTransforms';
 
 import { normalizedToChatMessages } from './useChatMessages';
+import { knownRunStartedAt } from '../utils/liveRunCursor';
 
 /**
  * Сколько загруженных сообщений показывать сразу.
@@ -745,6 +746,7 @@ export function useChatSessionState({
       sessions: [{
         sessionId: selectedSession.id,
         lastSeq: lastSeqRef.current.get(selectedSession.id) ?? 0,
+        runStartedAt: knownRunStartedAt(selectedSession.id) ?? null,
       }],
     });
   }, [lastSeqRef, selectedProject, selectedSession, sendMessage, statusCheckSentAtRef, ws]);

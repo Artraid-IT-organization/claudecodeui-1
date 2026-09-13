@@ -17,6 +17,7 @@ import ChatMessagesPane from './subcomponents/ChatMessagesPane';
 import ChatRequestBar from './subcomponents/ChatRequestBar';
 import ChatComposer from './subcomponents/ChatComposer';
 import CommandResultModal from './subcomponents/CommandResultModal';
+import { knownRunStartedAt } from '../utils/liveRunCursor';
 
 /**
  * Сколько ждать после восстановления связи, прежде чем признать ответ
@@ -362,6 +363,7 @@ function ChatInterface({
       sessions: [{
         sessionId: selectedSession.id,
         lastSeq: lastSeqRef.current.get(selectedSession.id) ?? 0,
+        runStartedAt: knownRunStartedAt(selectedSession.id) ?? null,
       }],
     });
   }, [isActive, requestLatestMessages, selectedProject, selectedSession, sendMessage]);

@@ -98,20 +98,33 @@ export const BashCommandDisplay: React.FC<BashCommandDisplayProps> = ({
             !hasOutput && 'opacity-0',
           )}
         />
-        <span className="flex-shrink-0 select-none font-mono text-xs font-semibold text-emerald-500 dark:text-emerald-400">
-          $
-        </span>
-        {/* Not a <code> tag: the global `.chat-message code` rule forces
-            `white-space: pre-wrap !important`, which would defeat `truncate`
-            and render collapsed multi-line commands in full. */}
-        <span
-          className={cn(
-            'min-w-0 flex-1 font-mono text-xs text-foreground',
-            open ? 'whitespace-pre-wrap break-all' : 'truncate',
-          )}
-        >
-          {command}
-        </span>
+        {/* В строке — что делается, а не сама команда.
+            Егор 13.09.26 на строки «Bash / cd … python3 - <<'PY' …»: «это не
+            информативно, не вижу в этом смысла». У команды есть короткое
+            описание — его и показываем; саму команду видно при раскрытии.
+            Без описания (другие провайдеры) остаётся прежний вид. */}
+        {description ? (
+          <span className={cn('min-w-0 flex-1 text-xs text-foreground/90', open ? 'whitespace-normal' : 'truncate')}>
+            {description}
+          </span>
+        ) : (
+          <>
+            <span className="flex-shrink-0 select-none font-mono text-xs font-semibold text-emerald-500 dark:text-emerald-400">
+              $
+            </span>
+            {/* Not a <code> tag: the global `.chat-message code` rule forces
+                `white-space: pre-wrap !important`, which would defeat `truncate`
+                and render collapsed multi-line commands in full. */}
+            <span
+              className={cn(
+                'min-w-0 flex-1 font-mono text-xs text-foreground',
+                open ? 'whitespace-pre-wrap break-all' : 'truncate',
+              )}
+            >
+              {command}
+            </span>
+          </>
+        )}
 
         {isRunning && (
           <span className="h-2.5 w-2.5 flex-shrink-0 animate-spin rounded-full border-[1.5px] border-muted-foreground/30 border-t-emerald-400" />
@@ -134,17 +147,11 @@ export const BashCommandDisplay: React.FC<BashCommandDisplayProps> = ({
         </button>
       </div>
 
-      {description && !open && (
-        <div className="truncate px-2.5 pb-1.5 pl-[2.4rem] text-[11px] italic text-muted-foreground/70">
-          {description}
-        </div>
-      )}
-
       {/* Expanded output */}
       {open && hasOutput && (
         <div className="settings-content-enter border-t border-border/50 bg-background/50">
           {description && (
-            <div className="px-3 pt-2 text-[11px] italic text-muted-foreground/70">{description}</div>
+            <div className="whitespace-pre-wrap break-all px-3 pt-2 font-mono text-[11px] text-muted-foreground/80">$ {command}</div>
           )}
           <pre
             className={cn(

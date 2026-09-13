@@ -8,6 +8,7 @@ import type { MarkSessionIdle, MarkSessionProcessing } from '../../../hooks/useS
 import type { PendingPermissionRequest } from '../types/types';
 import type { ProjectSession, LLMProvider } from '../../../types/app';
 import type { SessionStore, NormalizedMessage } from '../../../stores/useSessionStore';
+import { noteRun } from '../utils/liveRunCursor';
 
 const isActionablePermissionRequest = (request: { toolName?: unknown } | null | undefined): boolean => {
   return request?.toolName !== 'ExitPlanMode' && request?.toolName !== 'exit_plan_mode';
@@ -147,6 +148,9 @@ export function useChatRealtimeHandlers({
       // deltas) idempotent under duplicate delivery, matching the server's
       // own "unique monotonic seq" contract.
       if (sid && typeof msg.seq === 'number') {
+        // Новая работа — счёт номеров заново, иначе её события выбросятся
+        // как «уже виденные» (см. liveRunCursor).
+        noteRun(sid, msg.runStartedAt, lastSeqRef.current);
         const known = lastSeqRef.current.get(sid) ?? 0;
         if (msg.seq <= known) {
           return;
@@ -163,6 +167,10 @@ export function useChatRealtimeHandlers({
           // Ack for chat.subscribe: authoritative processing state plus any
           // pending tool-permission prompts for the run.
           if (!sid) return;
+
+          // Ответ на подписку тоже несёт метку работы: досылка пропущенного
+          // идёт сразу после него и должна приниматься с нуля.
+          noteRun(sid, msg.runStartedAt, lastSeqRef.current);
 
           if (msg.isProcessing) {
             onSessionProcessing?.(sid);

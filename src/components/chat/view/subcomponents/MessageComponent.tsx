@@ -12,6 +12,7 @@ import { formatUsageLimitText, stripProposedPlanEnvelope } from '../../utils/cha
 import type { Project } from '../../../../types/app';
 import { ToolRenderer, ToolErrorDisplay, shouldHideToolResult } from '../../tools';
 import { Reasoning, ReasoningTrigger, ReasoningContent, Shimmer } from '../../../../shared/view/ui';
+import { isEmptyThinking } from '../../utils/toolGrouping';
 
 import ChatMessageImages from './ChatMessageImages';
 import ChatMessageFiles from './ChatMessageFiles';
@@ -109,7 +110,7 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
 
 
   const formattedTime = useMemo(() => new Date(message.timestamp).toLocaleTimeString(), [message.timestamp]);
-  const shouldHideThinkingMessage = Boolean(message.isThinking && !showThinking);
+  const shouldHideThinkingMessage = Boolean(message.isThinking && (!showThinking || isEmptyThinking(message)));
 
   if (shouldHideThinkingMessage) {
     return null;

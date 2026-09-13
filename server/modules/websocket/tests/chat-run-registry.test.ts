@@ -280,3 +280,28 @@ test('startRun rejects a second concurrent run for the same session', async () =
     assert.ok(third);
   });
 });
+
+test('каждое событие работы несёт метку этой работы', async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createAppSession('app-run-stamp', 'claude', '/workspace/demo');
+    const run = chatRunRegistry.startRun({
+      appSessionId: 'app-run-stamp',
+      provider: 'claude',
+      providerSessionId: null,
+      connection: new FakeConnection(),
+      userId: null,
+    });
+    assert.ok(run);
+
+    run.writer.send({ kind: 'stream_delta', provider: 'claude', sessionId: 'x', content: 'a' });
+    run.writer.send({ kind: 'stream_delta', provider: 'claude', sessionId: 'x', content: 'b' });
+
+    const replayed = chatRunRegistry.replayEvents('app-run-stamp', 0);
+    assert.equal(replayed.length, 2);
+    for (const event of replayed) {
+      // Без метки вкладка, помнящая номера прошлой работы, выбрасывала события
+      // новой как «уже виденные» — и не показывала плашку «работает».
+      assert.equal(event.runStartedAt, run.startedAt);
+    }
+  });
+});
