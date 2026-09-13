@@ -61,6 +61,8 @@ interface UseChatComposerStateArgs {
   tokenBudget: Record<string, unknown> | null;
   sendMessage: (message: unknown) => void;
   sendByCtrlEnter?: boolean;
+  /** Растёт на каждое нажатие «Новый сеанс»: новый чат всегда открывается с пустым полем. */
+  newSessionTrigger?: number;
   onSessionProcessing?: MarkSessionProcessing;
   /**
    * Invoked with the freshly allocated session id when the user sends the
@@ -258,6 +260,7 @@ export function useChatComposerState({
   tokenBudget,
   sendMessage,
   sendByCtrlEnter,
+  newSessionTrigger,
   onSessionProcessing,
   onSessionEstablished,
   onInputFocusChange,
@@ -1129,6 +1132,30 @@ export function useChatComposerState({
   useEffect(() => {
     inputValueRef.current = input;
   }, [input]);
+
+  // «Новый сеанс» — всегда пустое поле.
+  //
+  // У нового чата до первой отправки нет id, и его черновик живёт в области
+  // проекта. Если набрать текст в новом чате и нажать «Новый сеанс» ещё раз,
+  // область не меняется и подмена не срабатывает — текст оставался в поле
+  // «якобы нового» чата. Нажатие — прямое намерение начать с чистого листа,
+  // поэтому черновик нового чата этого проекта стирается, а поле очищается,
+  // если сейчас открыт именно новый чат. Если открыт обычный чат, поле не
+  // трогаем: подмена ниже сама загрузит пустой черновик, когда откроется новый.
+  const lastNewSessionTriggerRef = useRef(newSessionTrigger ?? 0);
+  useEffect(() => {
+    const trigger = newSessionTrigger ?? 0;
+    if (trigger === lastNewSessionTriggerRef.current) {
+      return;
+    }
+    lastNewSessionTriggerRef.current = trigger;
+    const newChatScope = draftScopeFor(selectedProjectId, null);
+    clearDraftInput(newChatScope);
+    if (draftOwnerRef.current === newChatScope) {
+      inputValueRef.current = '';
+      setInput('');
+    }
+  }, [newSessionTrigger, selectedProjectId]);
 
   // Сохранение черновика стоит ВЫШЕ подмены. При переключении чата есть один
   // кадр, где область уже новая, а в `input` ещё текст старого чата: сверка с

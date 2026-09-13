@@ -233,6 +233,7 @@ function ChatInterface({
     tokenBudget,
     sendMessage,
     sendByCtrlEnter,
+    newSessionTrigger,
     onSessionProcessing,
     onSessionEstablished: handleSessionEstablished,
     onInputFocusChange,
