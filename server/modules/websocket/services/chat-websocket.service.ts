@@ -303,12 +303,15 @@ async function handleChatAbort(
   // можно только сигналом процессу.
   if ((!run || run.status !== 'running') && isSurvivorRunning(sessionId)) {
     stopSurvivor(sessionId);
+    // «Работа завершена» с отметкой отмены: «чат свободен» вкладка может
+    // отбросить как устаревший (см. onGone в server/index.ts).
     sendJson(ws, {
-      kind: 'chat_subscribed',
+      kind: 'complete',
       sessionId,
-      isProcessing: false,
-      lastSeq: 0,
-      pendingPermissions: [],
+      actualSessionId: sessionId,
+      provider: 'claude',
+      exitCode: 0,
+      aborted: true,
       timestamp: new Date().toISOString(),
     });
     return;
