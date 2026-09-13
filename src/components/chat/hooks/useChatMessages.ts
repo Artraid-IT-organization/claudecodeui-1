@@ -6,7 +6,6 @@
 import type { NormalizedMessage } from '../../../stores/useSessionStore';
 import type { ChatMessage, SubagentChildTool } from '../types/types';
 import { formatUsageLimitText } from '../utils/chatFormatting';
-import { isSubagentToolName } from '../tools/configs/toolConfigs';
 
 function formatToolResultContent(content: unknown): string {
   const text = typeof content === 'string' ? content : JSON.stringify(content);
@@ -195,7 +194,12 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
 
       case 'tool_use': {
         const tr = trRef;
-        const isSubagentContainer = isSubagentToolName(msg.toolName);
+        // Отдельная карточка суб-агента — только для старого имени Task.
+        // Для Agent карточка рисовалась двумя строками «Task / Subagent / critic: …»
+        // и «Agent / Subagent result» — служебные слова вместо дела. Егор просил
+        // «только нужное»: вызов агента остаётся одной строкой с его описанием.
+        // Счётчик «Работают агенты» на плашке узнаёт оба имени (useChatRealtimeHandlers).
+        const isSubagentContainer = msg.toolName === 'Task';
 
         // Build child tools from subagentTools
         const childTools: SubagentChildTool[] = [];
