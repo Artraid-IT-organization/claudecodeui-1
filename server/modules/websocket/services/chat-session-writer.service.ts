@@ -52,6 +52,19 @@ export class ChatSessionWriter {
    */
   isWebSocketWriter = true;
 
+  /**
+   * Все вкладки браузера, подписанные на этот запуск.
+   *
+   * Раньше запуск держал ровно одно подключение, и каждая новая подписка
+   * вытесняла прежнюю: открыл чат на компьютере — телефон перестал получать
+   * ответ, хотя экран оставался открытым. После того как страница стала
+   * подписываться ещё и на чаты фоновых вкладок (13.09.26), это ударило бы по
+   * всем открытым чатам сразу. Теперь события уходят во все живые подписки,
+   * закрытые отсеиваются при отправке. `ws` остаётся последним подключением —
+   * для кода, который читает его напрямую.
+   */
+  private readonly connections = new Set<RealtimeClientConnection>();
+
   private readonly options: ChatSessionWriterOptions;
   /**
    * The provider-native session id as the runtime knows it. Kept locally
@@ -64,6 +77,7 @@ export class ChatSessionWriter {
   constructor(options: ChatSessionWriterOptions) {
     this.options = options;
     this.ws = options.connection;
+    this.connections.add(options.connection);
     this.userId = options.userId;
     this.providerSessionId = options.providerSessionId;
   }
@@ -118,6 +132,7 @@ export class ChatSessionWriter {
 
   updateWebSocket(newConnection: RealtimeClientConnection): void {
     this.ws = newConnection;
+    this.connections.add(newConnection);
   }
 
   setSessionId(sessionId: string): void {
@@ -138,8 +153,14 @@ export class ChatSessionWriter {
   }
 
   private forward(message: NormalizedMessage): void {
-    if (this.ws.readyState === WS_OPEN_STATE) {
-      this.ws.send(JSON.stringify(message));
+    const payload = JSON.stringify(message);
+    for (const connection of this.connections) {
+      if (connection.readyState === WS_OPEN_STATE) {
+        connection.send(payload);
+      } else if (connection !== this.ws) {
+        // Закрытая вкладка больше не получит событий — и не держит память.
+        this.connections.delete(connection);
+      }
     }
   }
 }
