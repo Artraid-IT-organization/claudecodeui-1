@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import type { ChatMessage } from '../types/types';
 import { isToolGroupItem } from './toolGrouping';
-import { describeWorkStretch, groupWorkStretches, isWorkStretchItem, workStretchRows } from './workStretch';
+import { describeWorkStretch, groupWorkStretches, isMostlyRussian, isWorkStretchItem, workStretchRows } from './workStretch';
 
 const at = (n: number) => `2026-09-13T10:00:${String(n).padStart(2, '0')}Z`;
 const user = (text: string, n = 0): ChatMessage => ({ type: 'user', content: text, timestamp: at(n) });
@@ -69,15 +69,16 @@ test('план на утверждение и вопрос с вариантам
 
 const EN = "I've created a branch from the clean head and I'm starting to build a private list of how message types are handled.";
 
-test('английская внутренняя кухня в ключевые мысли не попадает', () => {
+test('английские мысли тоже ключевые — на русский их переводит показ', () => {
   const items = groupWorkStretches([user('a', 1), think(EN, 2), tool('Bash', 3), think(LONG, 4), reply('Готово.', 5)]);
   const stretch = items[1] as Extract<(typeof items)[number], { _isStretch: true }>;
-  assert.equal(stretch.keyThoughts.length, 1);
-  assert.equal(stretch.keyThoughts[0].content, LONG);
-  assert.equal(describeWorkStretch(stretch), 'Ход работы · 1 мысль · 1 действие');
+  assert.equal(stretch.keyThoughts.length, 2);
+  assert.equal(describeWorkStretch(stretch), 'Ход работы · 2 мысли · 1 действие');
+  assert.equal(isMostlyRussian(EN), false);
+  assert.equal(isMostlyRussian(LONG), true);
 });
 
-test('показываются не больше трёх последних русских мыслей', () => {
+test('показываются не больше трёх последних мыслей', () => {
   const msgs = [user('a', 1)];
   for (let i = 0; i < 6; i += 1) { msgs.push(think(`${LONG} Шаг ${i}.`, 2 + i)); msgs.push(tool('Bash', 20 + i)); }
   msgs.push(reply('Готово.', 40));

@@ -426,6 +426,11 @@ export const api = {
   // User endpoints
   user: {
     usageLimits: () => authenticatedFetch('/api/user/usage-limits'),
+    translateThoughts: (texts) =>
+      authenticatedFetch('/api/user/translate-thoughts', {
+        method: 'POST',
+        body: JSON.stringify({ texts }),
+      }),
     gitConfig: () => authenticatedFetch('/api/user/git-config'),
     updateGitConfig: (gitName, gitEmail) =>
       authenticatedFetch('/api/user/git-config', {

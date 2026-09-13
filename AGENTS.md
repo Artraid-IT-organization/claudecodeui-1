@@ -159,3 +159,9 @@ Claude Code для VS Code: работа свёрнута, ответ модел
 - **Стартовый файл.** `ProviderLoginModal` подключает терминал через `lazy`: цепочка ProtectedRoute → Onboarding → ProviderLoginModal → StandaloneShell → Shell затаскивала xterm в главный кусок. Проверка пути: `node ~/tmp-ccui/perf/import_path.mjs xterm` из корня репо.
 - **Старт агента** (журнал `claude --debug-file`): ~3,8 с — запрос списка сервисов claude.ai (`/v1/mcp_servers`), подключение Notion/Miro 1,4–1,8 с, хуки SessionStart все вместе 0,75 с. `MCP_CONNECTION_NONBLOCKING` у CLI 2.1.270 уже включён по умолчанию.
 - **Открытие чата, ещё два тяжёлых запроса** (замер после выкатки 14.09): `token-usage` читал всю стенограмму ради последнего счётчика (89 МБ, 1,3 с) — теперь `readClaudeTokenUsageFromTail` читает с конца кусками от 256 КБ; `file-tree/.../files` для проекта `/home/claude` обходил дом до предела 10 000 и отдавал 413 (1–1,6 с) на каждое открытие — сервис помнит отказ 10 минут (`tooLargeTrees`).
+
+## Мысли в «Ходе работы» — перевод, а не русские размышления (14.09.26)
+- Модели язык размышлений НЕ задаём (Егор: «пусть размышляет на английском, он так умнее»). Указание «думай по-русски» замерами не работало (1 из 5) — снято с сайта, из ~/.claude/CLAUDE.md и команд 1–6.
+- Ключевые мысли — любые непустые ≥20 букв, последние 3 (`workStretch.ts`). Нерусские переводит `server/modules/user/thought-translation.ts` (POST /api/user/translate-thoughts): Haiku, без размышлений и инструментов, `persistSession:false`, `settingSources:[]` (иначе хуки/CLAUDE.md на каждый перевод и служебные чаты в списке), входом смотрящего. Кэш — файл под sha256 текста в ~/.cloudcli/thought-translations; сбой → исходный текст с пометкой.
+- Запрос только при раскрытии свёртки (`WorkStretchContainer`): свёрнутая лента подписку не тратит.
+- Чаты из командной строки пишут текст размышлений только при `showThinkingSummaries: true` в ~/.claude/settings.json (иначе display omitted → пустые блоки).

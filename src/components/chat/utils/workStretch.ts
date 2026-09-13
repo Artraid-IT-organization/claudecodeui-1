@@ -33,20 +33,27 @@ export interface WorkStretchItem {
 export const KEY_THOUGHTS_LIMIT = 3;
 
 /**
- * Мысль, которую стоит показать человеку: написана по-русски.
+ * Мысль, которую стоит показать человеку: не пустая и не служебная короткая
+ * реплика («жду», «проверю»). Язык не важен.
  *
- * Первая версия отбирала мысли по длине (от 80 символов), и на живой странице
- * раскрытая свёртка стала стеной из 22 длинных английских абзацев вроде «I've
- * created a branch feat/honest-phases…». Пересказ размышлений почти всегда
- * длинный, так что длина ничего не отсеивала. Егор просил «описывай их на
- * русском… только то, что мне нужно знать». Модели теперь при запуске велено
- * размышлять по-русски и только о важном — такие мысли и показываются, а
- * внутренняя английская кухня остаётся за кадром.
+ * 13.09.26 здесь отбирались только русские мысли, а модели велели размышлять
+ * по-русски. Замеры 14.09 показали, что указание не работает (1 русская проба
+ * из 5), и Егор решил иначе: «пусть Claude размышляет на английском, он так
+ * умнее, а результаты пусть показываются на русском». Поэтому отбираются мысли
+ * на любом языке, а на русский их переводит показ (WorkStretchContainer через
+ * /api/user/translate-thoughts). Стены из десятков абзацев не будет:
+ * показываются только последние KEY_THOUGHTS_LIMIT.
  */
 export function isReadableThought(message: ChatMessage): boolean {
   if (!message.isThinking || isEmptyThinking(message)) return false;
   const letters = String(message.content ?? '').match(/\p{L}/gu) ?? [];
-  if (letters.length < 20) return false;
+  return letters.length >= 20;
+}
+
+/** Текст уже по-русски — переводить не нужно. */
+export function isMostlyRussian(text: string): boolean {
+  const letters = text.match(/\p{L}/gu) ?? [];
+  if (letters.length === 0) return true;
   const cyrillic = letters.filter((ch) => /[\u0400-\u04FF]/.test(ch)).length;
   return cyrillic / letters.length >= 0.5;
 }
@@ -70,7 +77,7 @@ function isWorkMessage(message: ChatMessage): boolean {
   return false;
 }
 
-/** Ключевые мысли хода работы: русские, не больше последних KEY_THOUGHTS_LIMIT. */
+/** Ключевые мысли хода работы: не больше последних KEY_THOUGHTS_LIMIT. */
 export function selectKeyThoughts(messages: ChatMessage[]): ChatMessage[] {
   return messages.filter(isReadableThought).slice(-KEY_THOUGHTS_LIMIT);
 }
