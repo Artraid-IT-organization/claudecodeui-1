@@ -74,12 +74,31 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
     (длительность округляется), из-за чего завершённые блоки навсегда
     оставались мерцающими и список было не отличить от живого.
   */
+  /*
+    Первые слова мысли прямо в свёрнутом заголовке. Егор 13.09.26: «чтобы я
+    видел размышления». Раскрывать каждый блок ради того, чтобы узнать, о чём
+    модель думала, — лишнее нажатие; а развёрнутые целиком блоки снова залили
+    бы ленту. Начало мысли в одну строку даёт и то и другое.
+  */
+  const thinkingPreview = useMemo(() => {
+    if (!message.isThinking) return '';
+    const flat = String(message.content || '').replace(/[#*_`>]/g, '').replace(/\s+/g, ' ').trim();
+    return flat.length > 90 ? `${flat.slice(0, 90)}…` : flat;
+  }, [message.content, message.isThinking]);
   const thinkingLabel = useCallback((isStreaming: boolean, duration?: number) => {
     if (isStreaming) return <Shimmer>{t('thinking.header.live')}</Shimmer>;
-    if (duration === undefined) return <p>{t('thinking.header.few')}</p>;
-    if (duration === 0) return <p>{t('thinking.header.fast')}</p>;
-    return <p>{t('thinking.header.seconds', { count: duration })}</p>;
-  }, [t]);
+    const head = duration === undefined
+      ? t('thinking.header.few')
+      : duration === 0
+        ? t('thinking.header.fast')
+        : t('thinking.header.seconds', { count: duration });
+    return (
+      <p className="min-w-0 truncate text-left">
+        {head}
+        {thinkingPreview && <span className="text-muted-foreground/70">{`: ${thinkingPreview}`}</span>}
+      </p>
+    );
+  }, [t, thinkingPreview]);
   const isGrouped = prevMessage && prevMessage.type === message.type &&
     ((prevMessage.type === 'assistant') ||
       (prevMessage.type === 'user') ||

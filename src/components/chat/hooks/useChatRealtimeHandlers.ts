@@ -258,11 +258,14 @@ export function useChatRealtimeHandlers({
       // --- Streaming: buffer for performance ---
       if (msg.kind === 'thinking_delta') {
         const text = (msg.content as string) || '';
-        if (!text || !sid) return;
+        if (!sid) return;
         // Каждый delta размышления — прямое доказательство, что модель думает
         // прямо сейчас. Раньше индикатор об этом не знал и крутил выдуманные
         // слова по таймеру, из-за чего «думает» и «завис» выглядели одинаково.
+        // Пустой delta тоже считается: сервер шлёт его в самом начале блока
+        // размышления, когда текста ещё нет (он придёт пересказом в конце).
         onSessionProcessing?.(sid, { phase: 'thinking', detail: null, canInterrupt: true });
+        if (!text) return;
         if (!accumulatedThinkingRef.current.has(sid)) {
           thinkingStartedAtRef.current.set(sid, Date.now());
         }

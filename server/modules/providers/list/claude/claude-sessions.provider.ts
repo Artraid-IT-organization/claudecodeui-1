@@ -405,7 +405,18 @@ export class ClaudeSessionsProvider implements IProviderSessions {
         // the one that was actually live does anything.
         return [createNormalizedMessage({ kind: 'stream_end', sessionId, provider: PROVIDER })];
       }
-      // message_start / message_delta / message_stop / content_block_start:
+      // Начало блока размышления — единственный живой признак того, что
+      // модель думает: пересказ хода мысли (display: 'summarized') приходит
+      // одним куском в конце, а до него поток молчит. Живой тест 13.09.26:
+      // 14 секунд размышления плашка показывала «Ожидает модель», хотя модель
+      // думала. Пустой thinking_delta — сигнал «думает», текста в нём нет.
+      if (streamEvent.type === 'content_block_start') {
+        const block = streamEvent.content_block as AnyRecord | undefined;
+        if (block?.type === 'thinking' || block?.type === 'redacted_thinking') {
+          return [createNormalizedMessage({ kind: 'thinking_delta', content: '', sessionId, provider: PROVIDER })];
+        }
+      }
+      // message_start / message_delta / message_stop / прочие content_block_start:
       // nothing the chat UI needs live today.
       return [];
     }

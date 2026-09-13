@@ -125,7 +125,7 @@ test('claude: other stream_event subtypes produce no live message', () => {
     {
       type: 'stream_event',
       session_id: SESSION_ID,
-      event: { type: 'content_block_start', index: 0, content_block: { type: 'thinking' } },
+      event: { type: 'content_block_start', index: 0, content_block: { type: 'text' } },
     },
     SESSION_ID,
   );
@@ -141,4 +141,21 @@ test('claude: other stream_event subtypes produce no live message', () => {
   assert.deepEqual(messageStart, []);
   assert.deepEqual(blockStart, []);
   assert.deepEqual(inputJsonDelta, []);
+});
+
+test('claude: начало блока размышления сразу даёт сигнал «думает» (пустой thinking_delta)', () => {
+  const provider = new ClaudeSessionsProvider();
+
+  const thinkingStart = provider.normalizeMessage(
+    {
+      type: 'stream_event',
+      session_id: SESSION_ID,
+      event: { type: 'content_block_start', index: 0, content_block: { type: 'thinking' } },
+    },
+    SESSION_ID,
+  );
+
+  assert.equal(thinkingStart.length, 1);
+  assert.equal(thinkingStart[0].kind, 'thinking_delta');
+  assert.equal(thinkingStart[0].content, '');
 });
