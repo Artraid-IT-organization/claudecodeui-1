@@ -167,25 +167,33 @@ export function useSlashCommands({
     clearCommandQueryTimer();
   }, [clearCommandQueryTimer]);
 
+  // Зависим от самого проекта, а не от объекта: объект пересоздаётся при
+  // каждой перезагрузке списка проектов и после данных taskmaster, и список
+  // команд при открытии чата запрашивался дважды (замер 14.09.26).
+  const commandsProjectId = selectedProject?.projectId;
+  const commandsProjectFullPath = selectedProject?.fullPath;
+  const commandsProjectPath = selectedProject?.path;
+  const hasSelectedProject = Boolean(selectedProject);
+
   useEffect(() => {
     let cancelled = false;
 
     const fetchCommands = async () => {
-      if (!selectedProject) {
+      if (!hasSelectedProject) {
         setSlashCommands([]);
         setFilteredCommands([]);
         return;
       }
 
       try {
-        const workspacePath = selectedProject.fullPath || selectedProject.path || '';
+        const workspacePath = commandsProjectFullPath || commandsProjectPath || '';
         const response = await authenticatedFetch('/api/commands/list', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            projectPath: workspacePath || selectedProject.path,
+            projectPath: workspacePath || commandsProjectPath,
           }),
         });
 
@@ -219,7 +227,7 @@ export function useSlashCommands({
           })),
         ];
 
-        const parsedHistory = readCommandHistory(selectedProject.projectId);
+        const parsedHistory = readCommandHistory(commandsProjectId as string);
         const sortedCommands = [...allCommands].sort((commandA, commandB) => {
           const commandAUsage = parsedHistory[commandA.name] || 0;
           const commandBUsage = parsedHistory[commandB.name] || 0;
@@ -241,7 +249,7 @@ export function useSlashCommands({
     return () => {
       cancelled = true;
     };
-  }, [selectedProject, provider]);
+  }, [hasSelectedProject, commandsProjectId, commandsProjectFullPath, commandsProjectPath, provider]);
 
   useEffect(() => {
     if (!showCommandMenu) {

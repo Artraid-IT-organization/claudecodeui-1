@@ -91,8 +91,38 @@ export const storeAuthToken = (token) => {
   return true;
 };
 
+// Одинаковые запросы на чтение, отправленные одновременно, уходят на сервер
+// один раз. При открытии чата разные части страницы независимо просили одно и
+// то же (список проектов, данные taskmaster) с разницей в десятки миллисекунд —
+// замер 14.09.26: 38 запросов, из них повторов на сервер ушло больше десятка.
+// Склеиваются только запросы, которые ещё в полёте; готовый ответ не
+// запоминается, так что свежесть данных та же. Запрос со своим сигналом отмены
+// не склеивается: отмена одного не должна обрывать другой.
+const inFlightReads = new Map();
+
+const isShareableRead = (options) => {
+  const method = (options.method || 'GET').toUpperCase();
+  return method === 'GET' && !options.body && !options.signal && !options.headers;
+};
+
 // Utility function for authenticated API calls
 export const authenticatedFetch = (url, options = {}) => {
+  if (isShareableRead(options)) {
+    const key = `${getStoredAuthToken() || ''} ${url}`;
+    let shared = inFlightReads.get(key);
+    if (!shared) {
+      shared = sendAuthenticatedFetch(url, options).finally(() => {
+        inFlightReads.delete(key);
+      });
+      inFlightReads.set(key, shared);
+    }
+    // Исходный ответ не читается никем, каждый получает свою копию.
+    return shared.then((response) => response.clone());
+  }
+  return sendAuthenticatedFetch(url, options);
+};
+
+const sendAuthenticatedFetch = (url, options = {}) => {
   const token = getStoredAuthToken();
 
   const defaultHeaders = {};
