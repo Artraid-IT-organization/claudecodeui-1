@@ -1,6 +1,6 @@
-import { createReadStream } from 'node:fs';
+import { createReadStream, type Stats } from 'node:fs';
+import { stat } from 'node:fs/promises';
 import path from 'node:path';
-import readline from 'node:readline';
 
 import { sessionsDb } from '@/modules/database/index.js';
 import {
@@ -63,6 +63,87 @@ type TitleCandidates = {
   firstUserText?: string;
   lastPrompt?: string;
 };
+
+type TitleScanState = {
+  sessionId: string;
+  ino: number;
+  /** Сколько байт стенограммы уже прочитано — до последнего перевода строки. */
+  offset: number;
+  candidates: TitleCandidates;
+};
+
+/**
+ * Что уже найдено в каждой стенограмме и докуда она прочитана. Запись — пара
+ * коротких строк на чат, поэтому потолок в тысячи чатов стоит единицы
+ * мегабайт; самые давно не менявшиеся вытесняются первыми.
+ */
+const TITLE_SCAN_CACHE_LIMIT = 5000;
+const titleScanCache = new Map<string, TitleScanState>();
+
+function rememberTitleScan(filePath: string, state: TitleScanState): void {
+  titleScanCache.delete(filePath);
+  titleScanCache.set(filePath, state);
+  if (titleScanCache.size > TITLE_SCAN_CACHE_LIMIT) {
+    const oldest = titleScanCache.keys().next().value;
+    if (oldest !== undefined) {
+      titleScanCache.delete(oldest);
+    }
+  }
+}
+
+/** Для тестов: забыть, докуда прочитаны стенограммы. */
+export function resetTitleScanCacheForTests(): void {
+  titleScanCache.clear();
+}
+
+/**
+ * Разбирает одну строку стенограммы и дописывает найденное: самое позднее
+ * название каждого вида, самое первое сообщение человека.
+ */
+function applyTitleEvent(rawLine: string, sessionId: string, candidates: TitleCandidates): void {
+  const line = rawLine.trim();
+  if (!line) {
+    return;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return;
+  }
+
+  const data = parsed as Record<string, unknown>;
+  const eventType = typeof data.type === 'string' ? data.type : undefined;
+  const eventSessionId = typeof data.sessionId === 'string' ? data.sessionId : undefined;
+  if (eventSessionId !== sessionId) {
+    return;
+  }
+
+  if (candidates.firstUserText === undefined && eventType === 'user') {
+    // Tool results are also written as role:user turns, and carry no
+    // text block - those are skipped, so this lands on the first thing
+    // the person actually typed.
+    const opening = extractUserMessageText(data);
+    if (opening) {
+      candidates.firstUserText = opening;
+    }
+  }
+
+  const aiTitle = typeof data.aiTitle === 'string' ? data.aiTitle : undefined;
+  const lastPrompt = typeof data.lastPrompt === 'string' ? data.lastPrompt : undefined;
+  const claudeRenamedTitle = typeof data.customTitle === 'string' ? data.customTitle : undefined;
+
+  if (eventType === 'custom-title' && claudeRenamedTitle?.trim()) {
+    candidates.customTitle = claudeRenamedTitle;
+  }
+  if (eventType === 'ai-title' && aiTitle?.trim()) {
+    candidates.aiTitle = aiTitle;
+  }
+  if (eventType === 'last-prompt' && lastPrompt?.trim()) {
+    candidates.lastPrompt = lastPrompt;
+  }
+}
 
 /**
  * Plain text of one `role: user` transcript turn, or undefined when it carries
@@ -320,88 +401,85 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
     filePath: string,
     sessionId: string
   ): Promise<TitleCandidates> {
-    const candidates: TitleCandidates = {};
-
+    // Дочитываем только то, что дописано с прошлого раза. Стенограмма
+    // работающего чата меняется каждые несколько секунд, и сверка вызывается
+    // на каждое изменение; полный проход по 89-мегабайтной стенограмме — это
+    // 1,5 с процессора (замер 14.09.26), и всё это время сервер отвечал
+    // остальным запросам с опозданием. Файлы только дописываются, поэтому
+    // найденное раньше остаётся верным; начало заново — только если файл
+    // подменили или укоротили.
+    let fileStat: Stats;
     try {
-      // Streamed line by line, and forwards, on purpose. Transcripts here reach
-      // 71 MB (1.6 GB across one owner's project directory), so reading one into
-      // a string and splitting it into an array of lines needs hundreds of MB
-      // for a single chat - enough to hit the Node heap limit and take the whole
-      // server down mid-scan. Reading forwards keeps the *latest* occurrence of
-      // each event, which is what a backwards scan was looking for anyway, and
-      // costs one line of memory at a time.
-      const lineReader = readline.createInterface({
-        input: createReadStream(filePath),
-        crlfDelay: Infinity,
-      });
+      fileStat = await stat(filePath);
+    } catch {
+      return {};
+    }
 
-      try {
-        for await (const rawLine of lineReader) {
-          // Substring test before JSON.parse: title events are a fraction of a
-          // percent of the lines, and parsing every message of a 71 MB
-          // transcript to find them is both slow and pure garbage-collector
-          // pressure. The user-role test drops out of the filter as soon as the
-          // opening message is found, so it costs nothing for the rest of a
-          // long transcript.
-          const mayHoldTitle = rawLine.includes('"ai-title"')
-            || rawLine.includes('"last-prompt"')
-            || rawLine.includes('"custom-title"');
-          const mayOpenChat = candidates.firstUserText === undefined
-            && (rawLine.includes('"role":"user"') || rawLine.includes('"role": "user"'));
-          if (!mayHoldTitle && !mayOpenChat) {
-            continue;
-          }
+    const cached = titleScanCache.get(filePath);
+    const canResume = cached !== undefined
+      && cached.sessionId === sessionId
+      && cached.ino === fileStat.ino
+      && fileStat.size >= cached.offset;
+    const state: TitleScanState = canResume
+      ? { ...cached, candidates: { ...cached.candidates } }
+      : { sessionId, ino: fileStat.ino, offset: 0, candidates: {} };
 
-          const line = rawLine.trim();
-          if (!line) {
-            continue;
-          }
+    if (canResume && fileStat.size === cached.offset) {
+      return { ...cached.candidates };
+    }
 
-          let parsed: unknown;
-          try {
-            parsed = JSON.parse(line);
-          } catch {
-            continue;
-          }
+    const { candidates } = state;
+    const handleLine = (lineBytes: Buffer, into: TitleCandidates) => {
+      // Проверка по байтам до разбора и даже до перевода в строку: строк с
+      // названием доля процента, а остальные десятки мегабайт не должны
+      // превращаться ни в строки, ни в объекты.
+      const mayHoldTitle = lineBytes.includes('"ai-title"')
+        || lineBytes.includes('"last-prompt"')
+        || lineBytes.includes('"custom-title"');
+      const mayOpenChat = into.firstUserText === undefined
+        && (lineBytes.includes('"role":"user"') || lineBytes.includes('"role": "user"'));
+      if (!mayHoldTitle && !mayOpenChat) {
+        return;
+      }
+      applyTitleEvent(lineBytes.toString('utf8'), sessionId, into);
+    };
 
-          const data = parsed as Record<string, unknown>;
-          const eventType = typeof data.type === 'string' ? data.type : undefined;
-          const eventSessionId = typeof data.sessionId === 'string' ? data.sessionId : undefined;
-          if (eventSessionId !== sessionId) {
-            continue;
-          }
-
-          if (candidates.firstUserText === undefined && eventType === 'user') {
-            // Tool results are also written as role:user turns, and carry no
-            // text block - those are skipped, so this lands on the first thing
-            // the person actually typed.
-            const opening = extractUserMessageText(data);
-            if (opening) {
-              candidates.firstUserText = opening;
-            }
-          }
-
-          const aiTitle = typeof data.aiTitle === 'string' ? data.aiTitle : undefined;
-          const lastPrompt = typeof data.lastPrompt === 'string' ? data.lastPrompt : undefined;
-          const claudeRenamedTitle = typeof data.customTitle === 'string' ? data.customTitle : undefined;
-
-          if (eventType === 'custom-title' && claudeRenamedTitle?.trim()) {
-            candidates.customTitle = claudeRenamedTitle;
-          }
-          if (eventType === 'ai-title' && aiTitle?.trim()) {
-            candidates.aiTitle = aiTitle;
-          }
-          if (eventType === 'last-prompt' && lastPrompt?.trim()) {
-            candidates.lastPrompt = lastPrompt;
-          }
+    let tail: TitleCandidates | null = null;
+    try {
+      const input = createReadStream(filePath, { start: state.offset });
+      const pending: Buffer[] = [];
+      let offset = state.offset;
+      for await (const chunk of input as AsyncIterable<Buffer>) {
+        let from = 0;
+        let newline = chunk.indexOf(0x0a, from);
+        while (newline !== -1) {
+          const piece = chunk.subarray(from, newline);
+          const lineBytes = pending.length > 0 ? Buffer.concat([...pending, piece]) : piece;
+          pending.length = 0;
+          handleLine(lineBytes, candidates);
+          offset += lineBytes.length + 1;
+          from = newline + 1;
+          newline = chunk.indexOf(0x0a, from);
         }
-      } finally {
-        lineReader.close();
+        if (from < chunk.length) {
+          pending.push(chunk.subarray(from));
+        }
+      }
+      // Граница «прочитано» — по последнему переводу строки: строку, которую
+      // CLI дописывает прямо сейчас, в следующий раз прочитаем целиком. Для
+      // ответа её всё же учитываем — у последней строки файла может не быть
+      // перевода строки.
+      state.offset = offset;
+      if (pending.length > 0) {
+        tail = { ...candidates };
+        handleLine(Buffer.concat(pending), tail);
       }
     } catch {
       // Ignore missing/unreadable files so sync can continue.
+      return candidates;
     }
 
-    return candidates;
+    rememberTitleScan(filePath, state);
+    return tail ?? { ...candidates };
   }
 }
