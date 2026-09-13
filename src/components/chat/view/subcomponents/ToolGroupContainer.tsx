@@ -40,13 +40,28 @@ function parseToolInput(toolInput: unknown): unknown {
   }
 }
 
-function getToolInputPreview(message: ChatMessage): string {
+/**
+ * Что показать в свёрнутой строке вызова.
+ *
+ * Сначала — описание «что делаю», которое ИИ пишет к каждому вызову, и только
+ * без него — сама команда или путь. Егор 13.09.26 на строки «Bash / cd … python3
+ * - <<'PY' …» и «Agent / Parameters»: «это не информативно… чтобы лишней воды
+ * вообще не было, только нужное». Сама команда видна при раскрытии строки.
+ */
+function getToolInputPreview(message: ChatMessage): { text: string; isDescription: boolean } {
   const config = getToolConfig(message.toolName || 'UnknownTool').input;
   const parsedInput = parseToolInput(message.toolInput);
+  const description = parsedInput && typeof parsedInput === 'object'
+    && typeof (parsedInput as { description?: unknown }).description === 'string'
+    ? String((parsedInput as { description: string }).description).trim()
+    : '';
+  if (description) {
+    return { text: description, isDescription: true };
+  }
   const title = typeof config.title === 'function' ? config.title(parsedInput) : config.title;
   const value = config.getValue?.(parsedInput);
 
-  return String(value || title || message.displayText || message.content || '').trim();
+  return { text: String(value || title || message.displayText || message.content || '').trim(), isDescription: false };
 }
 
 function getToolGroupIcon(icon: string | undefined, toolName: string): string {
@@ -77,20 +92,22 @@ export default function ToolGroupContainer({
   const iconClass = config.colorScheme?.icon || 'text-muted-foreground';
   const icon = getToolGroupIcon(config.icon, group.toolName);
 
-  const preview = useMemo(() => {
-    const visiblePreviews = group.messages
-      .slice(0, 2)
-      .map(getToolInputPreview)
-      .filter(Boolean);
+  const { preview, previewIsDescription } = useMemo(() => {
+    const previews = group.messages.slice(0, 2).map(getToolInputPreview).filter((item) => item.text);
+    const visiblePreviews = previews.map((item) => item.text);
+    const isDescription = previews.length > 0 && previews.every((item) => item.isDescription);
 
     const extraCount = group.messages.length - visiblePreviews.length;
     const previewText = visiblePreviews.join(', ');
 
     if (!previewText) {
-      return extraCount > 0 ? `+${extraCount} more` : '';
+      return { preview: extraCount > 0 ? `+${extraCount}` : '', previewIsDescription: false };
     }
 
-    return extraCount > 0 ? `${previewText}, +${extraCount} more` : previewText;
+    return {
+      preview: extraCount > 0 ? `${previewText}, +${extraCount}` : previewText,
+      previewIsDescription: isDescription,
+    };
   }, [group.messages]);
 
   return (
@@ -118,7 +135,7 @@ export default function ToolGroupContainer({
         {preview && (
           <>
             <span className="text-[10px] text-muted-foreground/40">/</span>
-            <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">{preview}</span>
+            <span className={`min-w-0 truncate text-xs ${previewIsDescription ? 'text-foreground/85' : 'font-mono text-muted-foreground'}`}>{preview}</span>
           </>
         )}
       </button>

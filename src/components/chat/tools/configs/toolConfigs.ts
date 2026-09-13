@@ -584,8 +584,13 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
 /**
  * Get configuration for a tool, with fallback to default
  */
+// Инструмент суб-агента в новых версиях называется Agent, а не Task. Без этой
+// строки он падал в запасной вид и показывался в ленте как «Agent / Parameters» —
+// без единого слова о том, что агент делает.
+const TOOL_NAME_ALIASES: Record<string, string> = { Agent: 'Task' };
+
 export function getToolConfig(toolName: string): ToolDisplayConfig {
-  return TOOL_CONFIGS[toolName] || TOOL_CONFIGS.Default;
+  return TOOL_CONFIGS[toolName] || TOOL_CONFIGS[TOOL_NAME_ALIASES[toolName] ?? ''] || TOOL_CONFIGS.Default;
 }
 
 /**

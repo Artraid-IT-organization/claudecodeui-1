@@ -33,7 +33,11 @@ type UiPreferencesAction =
 
 const DEFAULTS: UiPreferences = {
   showRawParameters: false,
-  showThinking: true,
+  // Размышления в ленте по умолчанию скрыты. Егор 13.09.26 на строки
+  // «Думал несколько секунд» подряд между каждой командой: «это не
+  // информативно… чтобы лишней воды вообще не было, только нужное». Что ИИ
+  // сейчас думает, показывает плашка над полем ввода. Включаются в настройках.
+  showThinking: false,
   sendByCtrlEnter: false,
   sidebarVisible: true,
   voiceEnabled: true,
@@ -75,10 +79,41 @@ const readLegacyPreference = (key: UiPreferenceKey, fallback: boolean): boolean 
   }
 };
 
+/**
+ * Одноразовый перенос: скрыть размышления и тем, у кого уже сохранено «показывать».
+ *
+ * Настройки хранятся одним набором, и любой, кто хоть раз менял любую из них,
+ * записал себе `showThinking: true` просто как значение по умолчанию — смена
+ * умолчания до него бы не дошла. Метка ставится один раз: если человек потом
+ * сам включит размышления в настройках, они останутся включёнными.
+ */
+const THINKING_HIDDEN_MIGRATION_KEY = 'uiPreferences.thinkingHiddenByDefault.v1';
+
+const applyThinkingHiddenMigration = (storageKey: string, prefs: UiPreferences): UiPreferences => {
+  try {
+    if (localStorage.getItem(THINKING_HIDDEN_MIGRATION_KEY)) {
+      return prefs;
+    }
+    localStorage.setItem(THINKING_HIDDEN_MIGRATION_KEY, '1');
+    if (!prefs.showThinking) {
+      return prefs;
+    }
+    const next = { ...prefs, showThinking: false };
+    localStorage.setItem(storageKey, JSON.stringify(next));
+    return next;
+  } catch {
+    return prefs;
+  }
+};
+
 const readInitialPreferences = (storageKey: string): UiPreferences => {
   if (typeof window === 'undefined') {
     return DEFAULTS;
   }
+  return applyThinkingHiddenMigration(storageKey, readStoredPreferences(storageKey));
+};
+
+const readStoredPreferences = (storageKey: string): UiPreferences => {
 
   try {
     const raw = localStorage.getItem(storageKey);
