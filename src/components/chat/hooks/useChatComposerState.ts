@@ -20,6 +20,11 @@ import {
   safeLocalStorage,
   writeQueuedMessage,
   type QueuedSendOptions,
+  adoptLegacyProjectDraft,
+  clearDraftInput,
+  draftScopeFor,
+  readDraftInput,
+  writeDraftInput,
 } from '../utils/chatStorage';
 import type {
   ChatAttachment,
@@ -264,12 +269,13 @@ export function useChatComposerState({
   setPendingPermissionRequests,
 }: UseChatComposerStateArgs) {
   const [input, setInput] = useState(() => {
-    if (typeof window !== 'undefined' && selectedProject) {
-      // Draft inputs are keyed by the DB projectId so per-project drafts
-      // survive display-name changes.
-      return safeLocalStorage.getItem(`draft_input_${selectedProject.projectId}`) || '';
+    if (typeof window === 'undefined') {
+      return '';
     }
-    return '';
+    // Черновик принадлежит чату, а не проекту — см. draftScopeFor в chatStorage.
+    const initialScope = draftScopeFor(selectedProject?.projectId, selectedSession?.id || currentSessionId || null);
+    adoptLegacyProjectDraft(selectedProject?.projectId, initialScope);
+    return readDraftInput(initialScope);
   });
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
   const [uploadingFiles, setUploadingFiles] = useState<Map<string, number>>(new Map());
@@ -297,6 +303,13 @@ export function useChatComposerState({
   const processingSessionsRef = useRef<SessionActivityMap | undefined>(processingSessions);
   sessionKeyRef.current = sessionKey;
   processingSessionsRef.current = processingSessions;
+  // Чей черновик сейчас в поле. `draftScopeRef` — какой чат открыт в эту
+  // минуту (нужен отправке, которая заканчивается после паузы на загрузку);
+  // `draftOwnerRef` — какому чату принадлежит текст, лежащий в `input`.
+  const draftScope = draftScopeFor(selectedProjectId, sessionKey);
+  const draftScopeRef = useRef(draftScope);
+  draftScopeRef.current = draftScope;
+  const draftOwnerRef = useRef<string | null>(draftScope);
 
   const [queuedDraft, setQueuedDraft] = useState<QueuedDraft | null>(() => {
     if (typeof window === 'undefined' || !sessionKey) {
@@ -743,6 +756,9 @@ export function useChatComposerState({
     ) => {
       event.preventDefault();
       const currentInput = queuedSubmission?.content ?? inputValueRef.current;
+      // Черновик какого чата отправляется: пока грузятся вложения, человек может
+      // открыть другой чат, и стирать надо текст исходного, а не того, что на экране.
+      const submitDraftScope = draftScopeRef.current;
       const currentAttachments = queuedSubmission?.attachments ?? attachedFiles;
       const previouslyUploadedAttachments = queuedSubmission?.uploadedAttachments ?? [];
       if (
@@ -836,8 +852,7 @@ export function useChatComposerState({
         if (textareaRef.current) {
           textareaRef.current.style.height = 'auto';
         }
-        // selectedProject is guaranteed by the guard at the top of handleSubmit.
-        safeLocalStorage.removeItem(`draft_input_${selectedProject.projectId}`);
+        clearDraftInput(submitDraftScope);
         return;
       }
 
@@ -997,19 +1012,24 @@ export function useChatComposerState({
         },
       });
 
-      setInput('');
-      inputValueRef.current = '';
+      clearDraftInput(submitDraftScope);
+      // Поле очищается, только если человек всё ещё в том чате, откуда
+      // отправил. Новый чат к этому моменту уже получил свой id — это тот же
+      // чат, поэтому сверяется и он.
+      const stillInSubmittedChat = draftScopeRef.current === submitDraftScope
+        || draftScopeRef.current === targetSessionId;
+      if (stillInSubmittedChat) {
+        setInput('');
+        inputValueRef.current = '';
+        setIsTextareaExpanded(false);
+        if (textareaRef.current) {
+          textareaRef.current.style.height = 'auto';
+        }
+      }
       resetCommandMenuState();
       setAttachedFiles([]);
       setUploadingFiles(new Map());
       setFileErrors(new Map());
-      setIsTextareaExpanded(false);
-
-      if (textareaRef.current) {
-        textareaRef.current.style.height = 'auto';
-      }
-
-      safeLocalStorage.removeItem(`draft_input_${selectedProject.projectId}`);
     },
     [
       selectedSession,
@@ -1110,28 +1130,30 @@ export function useChatComposerState({
     inputValueRef.current = input;
   }, [input]);
 
+  // Сохранение черновика стоит ВЫШЕ подмены. При переключении чата есть один
+  // кадр, где область уже новая, а в `input` ещё текст старого чата: сверка с
+  // владельцем пропускает этот кадр, иначе текст чата А записался бы в чат Б.
+  // Та же ловушка и то же решение, что у черновика «в очереди» ниже.
   useEffect(() => {
-    if (!selectedProjectId) {
+    if (!draftScope || draftOwnerRef.current !== draftScope) {
       return;
     }
-    const savedInput = safeLocalStorage.getItem(`draft_input_${selectedProjectId}`) || '';
-    setInput((previous) => {
-      const next = previous === savedInput ? previous : savedInput;
-      inputValueRef.current = next;
-      return next;
-    });
-  }, [selectedProjectId]);
+    writeDraftInput(draftScope, input);
+  }, [input, draftScope]);
 
+  // Открыли другой чат — в поле его собственный черновик, а не текст прошлого.
+  // Егор 13.09.26: «переключаясь на другой чат, панель должна быть без текста,
+  // а если возвращаюсь обратно — старый текст остаётся».
   useEffect(() => {
-    if (!selectedProjectId) {
+    if (draftOwnerRef.current === draftScope) {
       return;
     }
-    if (input !== '') {
-      safeLocalStorage.setItem(`draft_input_${selectedProjectId}`, input);
-    } else {
-      safeLocalStorage.removeItem(`draft_input_${selectedProjectId}`);
-    }
-  }, [input, selectedProjectId]);
+    draftOwnerRef.current = draftScope;
+    adoptLegacyProjectDraft(selectedProjectId, draftScope);
+    const saved = readDraftInput(draftScope);
+    inputValueRef.current = saved;
+    setInput(saved);
+  }, [draftScope, selectedProjectId]);
 
   // Persist the queued draft under its session's key. Must be defined BEFORE
   // the swap effect below: on a session switch there is one commit where

@@ -10,6 +10,7 @@ import {
   mergeOlderServerPage,
   planLatestPageBridge,
   resolveLatestPagePagination,
+  SESSION_MESSAGES_PAGE_SIZE,
 } from './sessionMessagePagination';
 
 function message(
@@ -97,13 +98,15 @@ test('tool-result totals walk bounded bridge chunks until a contiguous anchor', 
     offset: 20,
     limit: 1,
   });
+  // Размер порции берётся из кода: 11.09.26 его подняли с 20 до 60, а тест
+  // держал число 20 и покраснел, хотя поведение не менялось.
   assert.deepEqual(planLatestPageBridge(cached, latest, 100, 115, 1), {
     offset: 21,
-    limit: 20,
+    limit: SESSION_MESSAGES_PAGE_SIZE,
   });
   assert.deepEqual(planLatestPageBridge(cached, latest, 100, 115, 21), {
     offset: 41,
-    limit: 20,
+    limit: SESSION_MESSAGES_PAGE_SIZE,
   });
 
   const firstBridgeChunk = range(105, 105);

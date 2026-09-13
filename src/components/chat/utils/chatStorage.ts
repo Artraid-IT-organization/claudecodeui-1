@@ -103,6 +103,67 @@ export function clearQueuedMessage(sessionId: string): void {
   safeLocalStorage.removeItem(queuedMessageKey(sessionId));
 }
 
+/**
+ * Черновик в поле ввода принадлежит ЧАТУ, а не проекту.
+ *
+ * Раньше ключ был `draft_input_<projectId>`, и черновик подтягивался заново
+ * только при смене проекта. Почти все чаты Егора живут в одном проекте, поэтому
+ * текст, набранный в одном чате, ехал за ним в любой другой. Егор 13.09.26:
+ * «если я пишу для одного чата, то переключаясь на другой, панель должна быть
+ * без текста, а если возвращаюсь обратно — старый текст остаётся».
+ *
+ * Область черновика — id чата. У нового чата id появляется только при первой
+ * отправке, поэтому до неё черновик живёт в области `project:<projectId>` —
+ * то же правило, что выбрали авторы основного проекта для серверных черновиков.
+ * Префикс ключа прежний, чтобы очистка переполненного хранилища его находила.
+ */
+export function draftScopeFor(projectId: string | null | undefined, sessionId: string | null | undefined): string | null {
+  if (sessionId) return sessionId;
+  if (projectId) return `project:${projectId}`;
+  return null;
+}
+
+export const draftInputKey = (scope: string) => `draft_input_${scope}`;
+
+export function readDraftInput(scope: string | null): string {
+  if (!scope) return '';
+  return safeLocalStorage.getItem(draftInputKey(scope)) || '';
+}
+
+export function writeDraftInput(scope: string | null, text: string): void {
+  if (!scope) return;
+  if (text) {
+    safeLocalStorage.setItem(draftInputKey(scope), text);
+  } else {
+    safeLocalStorage.removeItem(draftInputKey(scope));
+  }
+}
+
+export function clearDraftInput(scope: string | null): void {
+  if (!scope) return;
+  safeLocalStorage.removeItem(draftInputKey(scope));
+}
+
+/**
+ * Один раз переносит черновик старого вида (по проекту) в открытый чат.
+ *
+ * Текст, который человек видел в поле до обновления, остаётся там, где он его
+ * видел, и не всплывает потом в случайном чате того же проекта. Свой черновик
+ * чата не перетирается. Старый ключ после переноса убирается — иначе он
+ * подтянулся бы ещё раз в следующий чат.
+ */
+export function adoptLegacyProjectDraft(projectId: string | null | undefined, scope: string | null): void {
+  if (!projectId || !scope) return;
+  const legacyKey = `draft_input_${projectId}`;
+  if (legacyKey === draftInputKey(scope)) return;
+  const legacy = safeLocalStorage.getItem(legacyKey);
+  if (legacy === null) return;
+  if (legacy && !readDraftInput(scope)) {
+    writeDraftInput(scope, legacy);
+  }
+  safeLocalStorage.removeItem(legacyKey);
+}
+
 export function getClaudeSettings(): ClaudeSettings {
   const raw = safeLocalStorage.getItem(CLAUDE_SETTINGS_KEY);
   if (!raw) {
