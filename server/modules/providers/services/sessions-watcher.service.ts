@@ -6,6 +6,7 @@ import chokidar, { type FSWatcher } from 'chokidar';
 
 import { projectsDb, sessionsDb } from '@/modules/database/index.js';
 import { chatGroupsDb } from '@/modules/database/repositories/chat-groups.js';
+import { isSurvivorRunning } from '@/modules/providers/list/claude/survivor-runs.js';
 import { sessionSynchronizerService } from '@/modules/providers/services/session-synchronizer.service.js';
 import { WS_OPEN_STATE, connectedClients } from '@/modules/websocket/index.js';
 import type { LLMProvider } from '@/shared/types.js';
@@ -168,6 +169,9 @@ async function buildSessionUpsertedEvent(updatedProviderSessionId: string): Prom
     kind: 'session_upserted',
     sessionId: row.session_id,
     provider: row.provider,
+    // Чат ведёт агент, переживший перезапуск сайта: живого потока нет, и
+    // открытая вкладка должна перечитать переписку, хотя чат «работает».
+    detachedRun: isSurvivorRunning(row.session_id),
     session: {
       id: row.session_id,
       summary: row.custom_name || '',

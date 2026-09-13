@@ -2,6 +2,7 @@ import path from 'node:path';
 
 import { projectsDb, sessionsDb } from '@/modules/database/index.js';
 import { chatGroupsDb } from '@/modules/database/repositories/chat-groups.js';
+import { isSurvivorRunning, listSurvivors } from '@/modules/providers/list/claude/survivor-runs.js';
 import { generateDisplayName } from '@/modules/projects/index.js';
 import { ChatSessionWriter } from '@/modules/websocket/services/chat-session-writer.service.js';
 import { connectedClients, WS_OPEN_STATE } from '@/modules/websocket/services/websocket-state.service.js';
@@ -234,6 +235,11 @@ export const chatRunRegistry = {
     if (existing && existing.status === 'running') {
       return null;
     }
+    // Агент прошлого сервера ещё дописывает этот чат: второй процесс на ту же
+    // переписку испортил бы её, поэтому новое сообщение ждёт.
+    if (isSurvivorRunning(input.appSessionId)) {
+      return null;
+    }
 
     const run: ChatRun = {
       appSessionId: input.appSessionId,
@@ -267,7 +273,7 @@ export const chatRunRegistry = {
   },
 
   isProcessing(appSessionId: string): boolean {
-    return runs.get(appSessionId)?.status === 'running';
+    return runs.get(appSessionId)?.status === 'running' || isSurvivorRunning(appSessionId);
   },
 
   listRunningRuns(): Array<{
@@ -276,7 +282,7 @@ export const chatRunRegistry = {
     startedAt: number;
     lastSeq: number;
   }> {
-    return Array.from(runs.values())
+    const live = Array.from(runs.values())
       .filter((run) => run.status === 'running')
       .map((run) => ({
         sessionId: run.appSessionId,
@@ -284,6 +290,8 @@ export const chatRunRegistry = {
         startedAt: run.startedAt,
         lastSeq: run.lastSeq,
       }));
+    const liveIds = new Set(live.map((run) => run.sessionId));
+    return [...live, ...listSurvivors().filter((run) => !liveIds.has(run.sessionId))] as typeof live;
   },
 
   /**

@@ -12,10 +12,13 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import cors from 'cors';
 
 import { installProcessGuards } from '@/shared/process-guards.js';
+import { adoptSurvivors, markShuttingDown } from '@/modules/providers/list/claude/survivor-runs.js';
+import { connectedClients, WS_OPEN_STATE } from '@/modules/websocket/services/websocket-state.service.js';
 import { AppError, findApplicationRoot, getClaudeJsonPath, getModuleDirectory, IS_PLATFORM, OPEN_REGISTRATION, terminalTextStyles } from '@/shared/utils.js';
 import {
     closeSessionsWatcher,
     initializeSessionsWatcher,
+    broadcastSessionUpserted,
     providerRuntimeService,
 } from '@/modules/providers/index.js';
 import { userDb, initializeDatabase, sessionsDb  } from '@/modules/database/index.js';
@@ -479,6 +482,28 @@ async function startServer() {
                 await initializeSessionsWatcher();
             }
 
+            // Чаты, пережившие перезапуск сайта: показывать их работу и
+            // сообщить вкладкам, когда агент закончит.
+            adoptSurvivors({
+                onTranscriptChange: (appSessionId) => {
+                    void broadcastSessionUpserted(appSessionId).catch(() => {});
+                },
+                onGone: (appSessionId) => {
+                    void broadcastSessionUpserted(appSessionId).catch(() => {});
+                    const idle = JSON.stringify({
+                        kind: 'chat_subscribed',
+                        sessionId: appSessionId,
+                        isProcessing: false,
+                        lastSeq: 0,
+                        pendingPermissions: [],
+                        timestamp: new Date().toISOString(),
+                    });
+                    connectedClients.forEach((client) => {
+                        if (client.readyState === WS_OPEN_STATE) client.send(idle);
+                    });
+                },
+            });
+
             // Start server-side plugin processes for enabled plugins
             startEnabledPluginServers().catch(err => {
                 console.error('[Plugins] Error during startup:', err.message);
@@ -488,6 +513,8 @@ async function startServer() {
         await closeSessionsWatcher();
         // Clean up plugin processes on shutdown
         const shutdownRuntimeServices = async () => {
+            // Первым делом: агенты не должны умереть вместе с сервером.
+            markShuttingDown();
             try {
                 await browserUseService.stopAllSessions();
             } catch (err) {

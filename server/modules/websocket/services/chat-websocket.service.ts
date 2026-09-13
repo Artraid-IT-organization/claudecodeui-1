@@ -5,6 +5,7 @@ import type { WebSocket } from 'ws';
 import { sessionsDb } from '@/modules/database/index.js';
 import { providerModelsService } from '@/modules/providers/index.js';
 import { chatRunRegistry } from '@/modules/websocket/services/chat-run-registry.service.js';
+import { isSurvivorRunning, stopSurvivor } from '@/modules/providers/list/claude/survivor-runs.js';
 import { connectedClients, WS_OPEN_STATE } from '@/modules/websocket/services/websocket-state.service.js';
 import {
   isImageAttachmentDescriptor,
@@ -298,6 +299,20 @@ async function handleChatAbort(
   }
 
   const run = chatRunRegistry.getRun(sessionId);
+  // Агент пережил перезапуск сайта: канала к нему у сервера нет, остановить
+  // можно только сигналом процессу.
+  if ((!run || run.status !== 'running') && isSurvivorRunning(sessionId)) {
+    stopSurvivor(sessionId);
+    sendJson(ws, {
+      kind: 'chat_subscribed',
+      sessionId,
+      isProcessing: false,
+      lastSeq: 0,
+      pendingPermissions: [],
+      timestamp: new Date().toISOString(),
+    });
+    return;
+  }
   if (!run || run.status !== 'running') {
     sendProtocolError(ws, 'NO_ACTIVE_RUN', `Session "${sessionId}" has no active run.`, sessionId);
     return;

@@ -34,6 +34,7 @@ import {
 } from '@/modules/notifications/index.js';
 import { createCompleteMessage, createNormalizedMessage, getClaudeConfigDir, getClaudeJsonPath } from '@/shared/utils.js';
 import { getRequestRuntimeContext } from '@/shared/request-context.js';
+import { noteSurvivorProviderSession, spawnSurvivableClaude } from '@/modules/providers/list/claude/survivor-runs.js';
 
 const activeSessions = new Map();
 const pendingToolApprovals = new Map();
@@ -890,6 +891,14 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       return { behavior: 'deny', message: decision.message ?? 'User denied tool use' };
     };
 
+    // Процесс агента запускаем сами: так он переживает перезапуск сайта
+    // (см. survivor-runs.js — там проба и причина).
+    sdkOptions.spawnClaudeCodeProcess = (spawnOptions) => spawnSurvivableClaude(spawnOptions, {
+      appSessionId: sessionId || null,
+      providerSessionId: providerSessionId || null,
+      configDir: sdkOptions.env?.CLAUDE_CONFIG_DIR || getClaudeConfigDir(),
+    });
+
     let heldPrompt = createHeldPromptStream(promptMessages);
     releasePromptStream = heldPrompt.release;
     try {
@@ -987,6 +996,7 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
 
         capturedSessionId = message.session_id;
         addSession(sessionKey(), queryInstance, ws, releasePromptStream);
+        noteSurvivorProviderSession(sessionId, capturedSessionId);
 
         // Set session ID on writer
         if (ws.setSessionId && typeof ws.setSessionId === 'function') {

@@ -30,6 +30,8 @@ type UseProjectsStateArgs = {
 type SessionUpsertedEvent = ServerEvent & {
   sessionId: string;
   providerSessionId?: string | null;
+  /** Чат ведёт агент, переживший перезапуск сайта — живого потока нет. */
+  detachedRun?: boolean;
   provider: LLMProvider;
   session: ProjectSession;
   project: {
@@ -717,7 +719,7 @@ export function useProjectsState({
       if (
         currentSelectedSession
         && upsert.sessionId === currentSelectedSession.id
-        && !activeSessionsRef.current.has(upsert.sessionId)
+        && (!activeSessionsRef.current.has(upsert.sessionId) || upsert.detachedRun === true)
       ) {
         setExternalMessageUpdate((prev) => prev + 1);
       } else {
