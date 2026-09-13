@@ -1,4 +1,4 @@
-import { Brain, Hourglass, PenLine, Users, WifiOff, Wrench, type LucideIcon } from 'lucide-react';
+import { BookOpen, Brain, Hourglass, PenLine, Rocket, Send, Users, WifiOff, Wrench, type LucideIcon } from 'lucide-react';
 
 /*
  * Значок и цвет фазы работы чата — одни и те же в плашке над полем ввода и во
@@ -13,6 +13,9 @@ export const PHASE_ICONS: Record<string, LucideIcon> = {
   agents: Users,
   waiting: Hourglass,
   reconnecting: WifiOff,
+  starting: Rocket,
+  requesting: Send,
+  reading: BookOpen,
 };
 
 export const PHASE_TONES: Record<string, string> = {
@@ -22,6 +25,9 @@ export const PHASE_TONES: Record<string, string> = {
   agents: 'text-sky-600 dark:text-sky-400',
   waiting: 'text-muted-foreground',
   reconnecting: 'text-amber-600 dark:text-amber-400',
+  starting: 'text-muted-foreground',
+  requesting: 'text-indigo-500 dark:text-indigo-400',
+  reading: 'text-sky-600 dark:text-sky-400',
 };
 
 /** Короткая подпись фазы для подсказки на вкладке. */
@@ -32,4 +38,7 @@ export const PHASE_SHORT_LABELS: Record<string, string> = {
   agents: 'Работают агенты',
   waiting: 'Ожидает модель',
   reconnecting: 'Связь восстанавливается',
+  starting: 'Запускаю чат',
+  requesting: 'Модель получила запрос',
+  reading: 'Модель читает результат',
 };

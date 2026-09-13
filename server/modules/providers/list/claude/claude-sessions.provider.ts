@@ -368,6 +368,14 @@ export class ClaudeSessionsProvider implements IProviderSessions {
       return [];
     }
 
+    // Процесс агента запущен, настройки и проверки пройдены — запрос ушёл
+    // модели. Замер 13.09.26: до этой отметки ~12 с запуска, после неё ещё ~4 с
+    // модель молчит до первого слова. Всё это время плашка писала одно и то же
+    // «Ожидает модель»; теперь эти два отрезка различимы.
+    if (raw.type === 'system' && raw.subtype === 'init') {
+      return [createNormalizedMessage({ kind: 'run_phase', text: 'requesting', sessionId, provider: PROVIDER })];
+    }
+
     /**
      * Live partial-message frames (`options.includePartialMessages: true` on
      * the SDK query) arrive as `SDKPartialAssistantMessage`:

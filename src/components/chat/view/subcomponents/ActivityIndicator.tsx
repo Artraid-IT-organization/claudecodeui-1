@@ -31,6 +31,9 @@ const PHASE_LABELS: Record<string, { key: string; fallback: string }> = {
   tool: { key: 'claudeStatus.phase.tool', fallback: 'Работает' },
   agents: { key: 'claudeStatus.phase.agents', fallback: 'Работают агенты' },
   waiting: { key: 'claudeStatus.phase.waiting', fallback: 'Ожидает модель' },
+  starting: { key: 'claudeStatus.phase.starting', fallback: 'Запускаю чат' },
+  requesting: { key: 'claudeStatus.phase.requesting', fallback: 'Модель получила запрос' },
+  reading: { key: 'claudeStatus.phase.reading', fallback: 'Модель читает результат' },
   // Обрыв связи — это состояние, а не приговор: ответ на сервере обычно
   // продолжает считаться, и подписка цепляется к нему заново.
   reconnecting: { key: 'claudeStatus.phase.reconnecting', fallback: 'Связь потеряна, восстанавливаем' },

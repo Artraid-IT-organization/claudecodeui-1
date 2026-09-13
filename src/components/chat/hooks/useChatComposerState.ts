@@ -838,7 +838,7 @@ export function useChatComposerState({
                 attachments: durableDraft.uploadedAttachments ?? [],
               },
             });
-            onSessionProcessing?.(queuedSessionKey, { statusText: null, canInterrupt: true });
+            onSessionProcessing?.(queuedSessionKey, { statusText: null, phase: 'starting', detail: null, canInterrupt: true });
           }
           return;
         }
@@ -996,6 +996,10 @@ export function useChatComposerState({
       // concrete at this point — no pending placeholder exists anymore.
       onSessionProcessing?.(targetSessionId, {
         statusText: null,
+        // Явный этап «запускаю»: подпись «ожидает» остаётся для чатов, про
+        // которые известно лишь «занят» (фоновые вкладки, после перезапуска).
+        phase: 'starting',
+        detail: null,
         canInterrupt: true,
       });
 

@@ -190,7 +190,9 @@ export type MessageKind =
   | 'permission_cancelled'
   | 'session_created'
   | 'interactive_prompt'
-  | 'task_notification';
+  | 'task_notification'
+  // Этап работы без содержания: «модель получила запрос» и т.п. (text — этап).
+  | 'run_phase';
 
 /**
  * Event kinds added by the chat gateway layer on top of provider message kinds.
