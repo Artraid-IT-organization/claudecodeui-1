@@ -1111,11 +1111,28 @@ export async function readFileTimestamps(
  * is stored line-by-line. The first value for each key wins, preserving the
  * earliest known label while avoiding repeated map overwrites.
  */
+const lookupMapCache = new Map<string, { mtimeMs: number; size: number; lookup: Map<string, string> }>();
+
 export async function buildLookupMap(
   filePath: string,
   keyField: string,
   valueField: string
 ): Promise<Map<string, string>> {
+  // history.jsonl разбирается на каждое изменение любой стенограммы, а сам
+  // меняется только когда человек пишет в терминале. Пока файл тот же —
+  // отдаём уже разобранное (копией: вызывающий вправе менять свою карту).
+  const cacheKey = `${filePath}\0${keyField}\0${valueField}`;
+  let fileStat: fs.Stats | null = null;
+  try {
+    fileStat = await fs.promises.stat(filePath);
+    const cached = lookupMapCache.get(cacheKey);
+    if (cached && cached.mtimeMs === fileStat.mtimeMs && cached.size === fileStat.size) {
+      return new Map(cached.lookup);
+    }
+  } catch {
+    // Нет файла — разбирать нечего, ниже вернётся пустая карта.
+  }
+
   const lookup = new Map<string, string>();
 
   try {
@@ -1135,6 +1152,9 @@ export async function buildLookupMap(
       if (typeof key === 'string' && typeof value === 'string' && !lookup.has(key)) {
         lookup.set(key, value);
       }
+    }
+    if (fileStat) {
+      lookupMapCache.set(cacheKey, { mtimeMs: fileStat.mtimeMs, size: fileStat.size, lookup: new Map(lookup) });
     }
   } catch {
     // Missing or unreadable lookup files should not block session sync.

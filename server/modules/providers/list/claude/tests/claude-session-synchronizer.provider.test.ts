@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
 import { closeConnection, initializeDatabase, sessionsDb } from '@/modules/database/index.js';
-import { ClaudeSessionSynchronizer } from '@/modules/providers/list/claude/claude-session-synchronizer.provider.js';
+import {
+  ClaudeSessionSynchronizer,
+  resetTitleScanCacheForTests,
+} from '@/modules/providers/list/claude/claude-session-synchronizer.provider.js';
 
 /**
  * Isolates both the sqlite session store and the fake `~/.claude` home the
@@ -312,3 +315,65 @@ test(
     });
   },
 );
+
+test(
+  'дописанное в стенограмму название подхватывается при дочитывании, найденное раньше не теряется',
+  { concurrency: false },
+  async () => {
+    await withIsolatedClaudeHome(async (claudeHome) => {
+      resetTitleScanCacheForTests();
+      const sessionId = 'sess-incremental-title';
+      await writeHistoryJsonl(claudeHome, []);
+      const filePath = await writeSessionTranscript(claudeHome, sessionId, {
+        firstMessageText: 'Открывающее сообщение чата',
+      });
+      const sync = new ClaudeSessionSynchronizer();
+
+      await sync.synchronizeFile(filePath);
+      assert.equal(sessionsDb.getSessionById(sessionId)?.custom_name, 'Открывающее сообщение чата');
+
+      // Строка без перевода строки — CLI ещё пишет её. Название из неё
+      // учитывается сразу, а прочитанной она не считается.
+      await appendFile(filePath, JSON.stringify({ type: 'ai-title', sessionId, aiTitle: 'Первое название' }));
+      await sync.synchronizeFile(filePath);
+      assert.equal(sessionsDb.getSessionById(sessionId)?.custom_name, 'Первое название');
+
+      await appendFile(filePath, '\n' + JSON.stringify({ type: 'last-prompt', sessionId, lastPrompt: 'продолжай' }) + '\n');
+      await sync.synchronizeFile(filePath);
+      assert.equal(sessionsDb.getSessionById(sessionId)?.custom_name, 'Первое название');
+
+      await appendFile(filePath, JSON.stringify({ type: 'custom-title', sessionId, customTitle: 'Переименован вручную' }) + '\n');
+      await sync.synchronizeFile(filePath);
+      const row = sessionsDb.getSessionById(sessionId);
+      assert.equal(row?.custom_name, 'Переименован вручную');
+      assert.equal(row?.title_source, 'custom');
+    });
+  },
+);
+
+test(
+  'подменённая (укороченная) стенограмма читается заново, а не с прежнего места',
+  { concurrency: false },
+  async () => {
+    await withIsolatedClaudeHome(async (claudeHome) => {
+      resetTitleScanCacheForTests();
+      const sessionId = 'sess-rewritten-transcript';
+      await writeHistoryJsonl(claudeHome, []);
+      const longTail = Array.from({ length: 50 }, (_, i) => JSON.stringify({ type: 'assistant', sessionId, n: i }));
+      const filePath = await writeSessionTranscript(claudeHome, sessionId, {
+        trailingLines: [JSON.stringify({ type: 'ai-title', sessionId, aiTitle: 'Старое название' }), ...longTail],
+      });
+      const sync = new ClaudeSessionSynchronizer();
+      await sync.synchronizeFile(filePath);
+      assert.equal(sessionsDb.getSessionById(sessionId)?.custom_name, 'Старое название');
+
+      await writeSessionTranscript(claudeHome, sessionId, {
+        firstMessageText: 'Новый короткий файл',
+        trailingLines: [JSON.stringify({ type: 'custom-title', sessionId, customTitle: 'Новое название' })],
+      });
+      await sync.synchronizeFile(filePath);
+      assert.equal(sessionsDb.getSessionById(sessionId)?.custom_name, 'Новое название');
+    });
+  },
+);
+
