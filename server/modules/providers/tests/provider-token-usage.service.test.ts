@@ -187,3 +187,29 @@ test('token usage reports SESSION_NOT_FOUND for an unknown app session id', asyn
     ),
   );
 });
+
+test('Claude: счётчик находится, даже если после него в стенограмме больше мегабайта других строк', async () => {
+  const tempDirectory = await mkdtemp(path.join(tmpdir(), 'provider-token-usage-claude-tail-'));
+  const sessionFilePath = path.join(tempDirectory, 'provider-session.jsonl');
+
+  try {
+    const filler = JSON.stringify({ type: 'user', message: { content: 'x'.repeat(2000) } });
+    await writeFile(sessionFilePath, [
+      JSON.stringify({ type: 'assistant', message: { usage: { input_tokens: 1, output_tokens: 1 } } }),
+      JSON.stringify({ type: 'assistant', message: { usage: { input_tokens: 700, output_tokens: 40 } } }),
+      ...Array.from({ length: 700 }, () => filler),
+    ].join('\n') + '\n');
+
+    const service = createProviderTokenUsageService({
+      getSessionById: () => createSessionRow({ jsonl_path: sessionFilePath }),
+      getClaudeContextWindow: () => '180000',
+    });
+
+    const usage = await service.getSessionTokenUsage('app-session');
+    assert.equal(usage.inputTokens, 700);
+    assert.equal(usage.outputTokens, 40);
+  } finally {
+    await rm(tempDirectory, { recursive: true, force: true });
+  }
+});
+
