@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { buildTranslationPrompt, parseTranslations, translateThoughts } from '../thought-translation.js';
+import { buildTranslationPrompt, isTitleStubOnly, parseTranslations, translateThoughts } from '../thought-translation.js';
+
+test('пустышкой считается только файл из одних заголовков', () => {
+  assert.equal(isTitleStubOnly('{"type":"ai-title","aiTitle":"Перевод","sessionId":"x"}\n'), true);
+  assert.equal(isTitleStubOnly('{"type":"ai-title","aiTitle":"a"}\n{"type":"user","message":{}}\n'), false);
+  assert.equal(isTitleStubOnly(''), false);
+  assert.equal(isTitleStubOnly('не json'), false);
+});
 
 test('ответ модели разбирается, в том числе в обёртке ```json', () => {
   assert.deepEqual(parseTranslations('["Проверяю вход", "Готово"]', 2), ['Проверяю вход', 'Готово']);
