@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Brain, Hourglass, PenLine, Users, WifiOff, Wrench, type LucideIcon } from 'lucide-react';
 
 import { Shimmer } from '../../../../shared/view/ui';
 import type { SessionActivity } from '../../../../hooks/useSessionProtection';
@@ -11,6 +12,30 @@ type ActivityIndicatorProps = {
 };
 
 const EXIT_ANIMATION_MS = 220;
+
+/*
+ * Значок и цвет фазы. Егор: «всегда в первую очередь понимать, думает ли чат».
+ * Одинаковая серая надпись мелким шрифтом этого не давала — фазу надо было
+ * читать. Теперь «думает» узнаётся по фиолетовому мозгу с первого взгляда,
+ * «пишет ответ» — по зелёному перу, работа инструмента — по гаечному ключу.
+ */
+const PHASE_ICONS: Record<string, LucideIcon> = {
+  thinking: Brain,
+  writing: PenLine,
+  tool: Wrench,
+  agents: Users,
+  waiting: Hourglass,
+  reconnecting: WifiOff,
+};
+
+const PHASE_TONES: Record<string, string> = {
+  thinking: 'text-violet-600 dark:text-violet-400',
+  writing: 'text-emerald-600 dark:text-emerald-400',
+  tool: 'text-sky-600 dark:text-sky-400',
+  agents: 'text-sky-600 dark:text-sky-400',
+  waiting: 'text-muted-foreground',
+  reconnecting: 'text-amber-600 dark:text-amber-400',
+};
 
 /**
  * Подписи фаз. Каждая соответствует событию, которое действительно пришло по
@@ -91,6 +116,9 @@ export default function ActivityIndicator({ activity, onAbort, isInputFocused = 
     phaseLabel = t(entry.key, { defaultValue: entry.fallback });
   }
   const label = (renderedActivity.statusText || phaseLabel).replace(/\.+$/, '');
+  const phaseKey = phase ?? 'waiting';
+  const PhaseIcon = PHASE_ICONS[phaseKey] ?? Hourglass;
+  const phaseTone = PHASE_TONES[phaseKey] ?? PHASE_TONES.waiting;
 
   const minutes = Math.floor(elapsedSeconds / 60);
   const seconds = elapsedSeconds % 60;
@@ -98,7 +126,7 @@ export default function ActivityIndicator({ activity, onAbort, isInputFocused = 
     ? t('claudeStatus.elapsed.seconds', { count: seconds, defaultValue: '{{count}}s' })
     : t('claudeStatus.elapsed.minutesSeconds', { minutes, seconds, defaultValue: '{{minutes}}m {{seconds}}s' });
   const tabSurfaceClassName = [
-    'chat-activity-tab inline-flex h-8 items-center rounded-b-none rounded-t-lg border border-b-0 bg-card px-3 text-xs transition-all duration-200',
+    'chat-activity-tab inline-flex h-10 items-center rounded-b-none rounded-t-lg border border-b-0 bg-card px-3.5 text-sm transition-all duration-200',
     isInputFocused
       ? 'border-primary/30 shadow-[0_-1px_2px_hsl(var(--foreground)/0.08),1px_0_2px_hsl(var(--foreground)/0.06),-1px_0_2px_hsl(var(--foreground)/0.06)]'
       : 'border-border/50 shadow-[0_-1px_1px_hsl(var(--foreground)/0.04),1px_0_1px_hsl(var(--foreground)/0.03),-1px_0_1px_hsl(var(--foreground)/0.03)]',
@@ -112,8 +140,10 @@ export default function ActivityIndicator({ activity, onAbort, isInputFocused = 
     >
       <div className="flex items-end justify-between gap-2">
         <div className={`${tabSurfaceClassName} gap-2`}>
-          <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-primary" aria-hidden />
-          <Shimmer className="font-medium">{`${label}…`}</Shimmer>
+          <PhaseIcon className={`h-4 w-4 shrink-0 animate-pulse ${phaseTone}`} aria-hidden />
+          <span className={`font-semibold ${phaseTone}`}>
+            <Shimmer>{`${label}…`}</Shimmer>
+          </span>
           <span className="tabular-nums text-muted-foreground/60">{elapsedLabel}</span>
         </div>
 

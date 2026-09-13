@@ -37,7 +37,7 @@ const DEFAULTS: UiPreferences = {
   // «Думал несколько секунд» подряд между каждой командой: «это не
   // информативно… чтобы лишней воды вообще не было, только нужное». Что ИИ
   // сейчас думает, показывает плашка над полем ввода. Включаются в настройках.
-  showThinking: false,
+  showThinking: true,
   sendByCtrlEnter: false,
   sidebarVisible: true,
   voiceEnabled: true,
@@ -80,25 +80,35 @@ const readLegacyPreference = (key: UiPreferenceKey, fallback: boolean): boolean 
 };
 
 /**
- * Одноразовый перенос: скрыть размышления и тем, у кого уже сохранено «показывать».
+ * Одноразовый перенос: снова ПОКАЗАТЬ размышления тем, у кого они скрыты.
+ *
+ * 13.09.26 размышления скрыли целиком — Егор жаловался на пустые строки «Думал
+ * несколько секунд». В тот же вечер он попросил обратное: «чтобы я видел
+ * размышления и всегда в первую очередь понимал, думает ли чат». Пустые блоки
+ * по-прежнему не рисуются (isEmptyThinking), видны только размышления с текстом.
+ *
+ * Прежний перенос (v1) скрывал размышления у всех; этот (v2) один раз включает их
+ * обратно. Если человек потом сам выключит их в настройках — выбор останется.
+ *
+ * Историческая справка о v1:
  *
  * Настройки хранятся одним набором, и любой, кто хоть раз менял любую из них,
  * записал себе `showThinking: true` просто как значение по умолчанию — смена
  * умолчания до него бы не дошла. Метка ставится один раз: если человек потом
  * сам включит размышления в настройках, они останутся включёнными.
  */
-const THINKING_HIDDEN_MIGRATION_KEY = 'uiPreferences.thinkingHiddenByDefault.v1';
+const THINKING_SHOWN_MIGRATION_KEY = 'uiPreferences.thinkingShownByDefault.v2';
 
-const applyThinkingHiddenMigration = (storageKey: string, prefs: UiPreferences): UiPreferences => {
+const applyThinkingShownMigration = (storageKey: string, prefs: UiPreferences): UiPreferences => {
   try {
-    if (localStorage.getItem(THINKING_HIDDEN_MIGRATION_KEY)) {
+    if (localStorage.getItem(THINKING_SHOWN_MIGRATION_KEY)) {
       return prefs;
     }
-    localStorage.setItem(THINKING_HIDDEN_MIGRATION_KEY, '1');
-    if (!prefs.showThinking) {
+    localStorage.setItem(THINKING_SHOWN_MIGRATION_KEY, '1');
+    if (prefs.showThinking) {
       return prefs;
     }
-    const next = { ...prefs, showThinking: false };
+    const next = { ...prefs, showThinking: true };
     localStorage.setItem(storageKey, JSON.stringify(next));
     return next;
   } catch {
@@ -110,7 +120,7 @@ const readInitialPreferences = (storageKey: string): UiPreferences => {
   if (typeof window === 'undefined') {
     return DEFAULTS;
   }
-  return applyThinkingHiddenMigration(storageKey, readStoredPreferences(storageKey));
+  return applyThinkingShownMigration(storageKey, readStoredPreferences(storageKey));
 };
 
 const readStoredPreferences = (storageKey: string): UiPreferences => {

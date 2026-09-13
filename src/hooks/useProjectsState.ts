@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { markDetachedRun } from '../utils/detachedRuns';
 import type { NavigateFunction } from 'react-router-dom';
 
 import { api } from '../utils/api';
@@ -715,6 +716,7 @@ export function useProjectsState({
       // The transcript of the currently viewed session changed on disk while
       // no run is active here (e.g. edited from another client or the CLI):
       // signal the chat view to reload its messages.
+      markDetachedRun(upsert.sessionId, upsert.detachedRun === true);
       const currentSelectedSession = selectedSessionRef.current;
       if (
         currentSelectedSession

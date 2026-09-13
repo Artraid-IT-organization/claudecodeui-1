@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { isDetachedRun } from '../../../utils/detachedRuns';
 import type { MutableRefObject } from 'react';
 
 import { authenticatedFetch } from '../../../utils/api';
@@ -873,8 +874,10 @@ export function useChatSessionState({
 
     const reloadExternalMessages = async () => {
       try {
-        // Skip store refresh during active streaming
-        if (!isProcessing) {
+        // Skip store refresh during active streaming — кроме чата, пережившего
+        // перезапуск сайта: живого потока у него нет, и без перечитывания его
+        // шаги появлялись бы разом только в конце.
+        if (!isProcessing || isDetachedRun(selectedSession.id)) {
           const shouldStickToBottom = isActiveRef.current && isNearBottom();
           await requestLatestMessages(selectedSession.id);
 
