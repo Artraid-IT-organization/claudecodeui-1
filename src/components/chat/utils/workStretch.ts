@@ -1,5 +1,5 @@
 import type { ChatMessage } from '../types/types';
-import { isEmptyThinking } from './toolGrouping';
+import { groupConsecutiveTools, isEmptyThinking, type MessageListItem } from './toolGrouping';
 
 /**
  * «Ход работы»: всё, что ИИ делал между сообщением человека и своим ответом,
@@ -96,4 +96,18 @@ export function describeWorkStretch(item: Pick<WorkStretchItem, 'keyThoughts' | 
     parts.push(`${item.actionCount} ${pluralRu(item.actionCount, 'действие', 'действия', 'действий')}`);
   }
   return parts.join(' · ');
+}
+
+/**
+ * Что показать внутри раскрытого «Хода работы»: ключевые мысли и шаги по порядку,
+ * подряд идущие одинаковые действия — одной строкой.
+ *
+ * Мысли передаются в склейку как ВИДИМЫЕ. Первая версия звала склейку с
+ * «размышления скрыты», и та пропускала мысли между действиями как невидимые:
+ * подпись обещала «19 мыслей», а раскрытая свёртка показывала одни действия
+ * (снимок живой страницы 13.09.26).
+ */
+export function workStretchRows(stretch: Pick<WorkStretchItem, 'messages'>): MessageListItem[] {
+  const visible = stretch.messages.filter((message) => !message.isThinking || isKeyThought(message));
+  return groupConsecutiveTools(visible, true);
 }

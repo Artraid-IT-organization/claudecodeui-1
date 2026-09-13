@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type { ChatMessage } from '../types/types';
-import { describeWorkStretch, groupWorkStretches, isWorkStretchItem } from './workStretch';
+import { isToolGroupItem } from './toolGrouping';
+import { describeWorkStretch, groupWorkStretches, isWorkStretchItem, workStretchRows } from './workStretch';
 
 const at = (n: number) => `2026-09-13T10:00:${String(n).padStart(2, '0')}Z`;
 const user = (text: string, n = 0): ChatMessage => ({ type: 'user', content: text, timestamp: at(n) });
@@ -39,4 +40,15 @@ test('подпись строки по-русски и с правильными
   assert.equal(describeWorkStretch({ keyThoughts: [think(LONG)], actionCount: 1 }), 'Ход работы · 1 мысль · 1 действие');
   assert.equal(describeWorkStretch({ keyThoughts: [think(LONG), think(LONG), think(LONG)], actionCount: 12 }), 'Ход работы · 3 мысли · 12 действий');
   assert.equal(describeWorkStretch({ keyThoughts: [], actionCount: 5 }), 'Ход работы · 5 действий');
+});
+
+test('раскрытый ход работы показывает ключевые мысли между действиями', () => {
+  const items = groupWorkStretches([
+    user('почини', 1), tool('Bash', 2), think(LONG, 3), tool('Bash', 4), think('жду', 5), tool('Bash', 6), reply('Готово.', 7),
+  ]);
+  const stretch = items[1] as Extract<(typeof items)[number], { _isStretch: true }>;
+  const rows = workStretchRows(stretch);
+  const thoughts = rows.filter((row) => !isToolGroupItem(row) && row.isThinking);
+  assert.equal(thoughts.length, 1, 'ключевая мысль должна остаться видимой');
+  assert.equal(rows.length, 3, 'действие · мысль · два действия подряд одной строкой');
 });

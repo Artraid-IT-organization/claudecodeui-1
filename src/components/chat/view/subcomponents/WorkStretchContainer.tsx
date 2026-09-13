@@ -3,8 +3,8 @@ import { ChevronRight } from 'lucide-react';
 
 import type { ChatMessage, ClaudePermissionSuggestion, PermissionGrantResult, Provider } from '../../types/types';
 import type { Project } from '../../../../types/app';
-import { groupConsecutiveTools, isToolGroupItem } from '../../utils/toolGrouping';
-import { describeWorkStretch, isKeyThought, type WorkStretchItem } from '../../utils/workStretch';
+import { isToolGroupItem } from '../../utils/toolGrouping';
+import { describeWorkStretch, workStretchRows, type WorkStretchItem } from '../../utils/workStretch';
 import { Markdown } from './Markdown';
 
 import MessageComponent from './MessageComponent';
@@ -53,13 +53,7 @@ export default function WorkStretchContainer({
   const [isExpanded, setIsExpanded] = useState(false);
   const label = describeWorkStretch(stretch);
 
-  const rows = useMemo(() => {
-    if (!isExpanded) return [];
-    // Внутри — только ключевые мысли и действия; пустые и служебные мысли
-    // отбрасываются, подряд идущие одинаковые действия склеиваются в одну строку.
-    const visible = stretch.messages.filter((message) => !message.isThinking || isKeyThought(message));
-    return groupConsecutiveTools(visible, false);
-  }, [isExpanded, stretch.messages]);
+  const rows = useMemo(() => (isExpanded ? workStretchRows(stretch) : []), [isExpanded, stretch]);
 
   return (
     <div className="chat-message tool px-3 sm:px-0" data-message-timestamp={stretch.timestamp || undefined}>
