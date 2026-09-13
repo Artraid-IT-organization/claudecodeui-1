@@ -159,3 +159,12 @@ test('claude: начало блока размышления сразу даёт
   assert.equal(thinkingStart[0].kind, 'thinking_delta');
   assert.equal(thinkingStart[0].content, '');
 });
+
+test('claude: готовность агента (system init) даёт этап «модель получила запрос»', () => {
+  const provider = new ClaudeSessionsProvider();
+  const result = provider.normalizeMessage({ type: 'system', subtype: 'init', session_id: SESSION_ID }, SESSION_ID);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].kind, 'run_phase');
+  assert.equal(result[0].text, 'requesting');
+});
+

@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import type { ActivityPhase } from '../../../hooks/useSessionProtection';
 import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
 
 import type { ServerEvent } from '../../../contexts/WebSocketContext';
@@ -328,10 +329,19 @@ export function useChatRealtimeHandlers({
         return;
       }
 
+      // Этап работы без содержания — только подпись плашки, в ленту не идёт.
+      if (msg.kind === 'run_phase') {
+        if (sid && typeof msg.text === 'string') {
+          onSessionProcessing?.(sid, { phase: msg.text as ActivityPhase, detail: null, canInterrupt: true });
+        }
+        return;
+      }
+
       // --- All other messages: route to store ---
       const shouldPersist =
         msg.kind !== 'complete'
         && msg.kind !== 'status'
+        && msg.kind !== 'run_phase'
         && msg.kind !== 'permission_request'
         && msg.kind !== 'permission_cancelled';
 
@@ -364,12 +374,12 @@ export function useChatRealtimeHandlers({
             onSessionProcessing?.(sid, { phase: 'agents', detail: String(running.size), canInterrupt: true });
           } else {
             activeAgentsRef.current.delete(sid);
-            onSessionProcessing?.(sid, { phase: 'waiting', detail: null, canInterrupt: true });
+            onSessionProcessing?.(sid, { phase: 'reading', detail: null, canInterrupt: true });
           }
         } else if (!running || running.size === 0) {
           // Инструмент отработал, ответа модели ещё нет — это честное
           // «ждём», а не «думает».
-          onSessionProcessing?.(sid, { phase: 'waiting', detail: null, canInterrupt: true });
+          onSessionProcessing?.(sid, { phase: 'reading', detail: null, canInterrupt: true });
         }
       }
 
