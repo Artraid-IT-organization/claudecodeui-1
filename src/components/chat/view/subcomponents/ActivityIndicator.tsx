@@ -141,9 +141,16 @@ export default function ActivityIndicator({ activity, onAbort, isInputFocused = 
       <div className="flex items-end justify-between gap-2">
         <div className={`${tabSurfaceClassName} gap-2`}>
           <PhaseIcon className={`h-4 w-4 shrink-0 animate-pulse ${phaseTone}`} aria-hidden />
-          <span className={`font-semibold ${phaseTone}`}>
-            <Shimmer>{`${label}…`}</Shimmer>
-          </span>
+          {/*
+            Мерцание рисует текст своей серой заливкой и перебивает цвет фазы —
+            на живом снимке «Думает» выходило серым. Поэтому цветные фазы идут
+            цветным текстом с мягкой пульсацией, мерцает только «ожидает».
+          */}
+          {phaseKey === 'waiting' ? (
+            <Shimmer className="font-semibold">{`${label}…`}</Shimmer>
+          ) : (
+            <span className={`animate-pulse font-semibold ${phaseTone}`}>{`${label}…`}</span>
+          )}
           <span className="tabular-nums text-muted-foreground/60">{elapsedLabel}</span>
         </div>
 

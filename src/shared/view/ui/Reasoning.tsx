@@ -164,11 +164,12 @@ export const ReasoningTrigger = React.memo<ReasoningTriggerProps>(
       >
         {children ?? (
           <>
-            <BrainIcon className="h-4 w-4" />
+            {/* shrink-0: превью мысли в заголовке длинное и сжимало значок до точки. */}
+            <BrainIcon className="h-4 w-4 shrink-0" />
             {getThinkingMessage(isStreaming, duration)}
             <ChevronDownIcon
               className={cn(
-                'h-4 w-4 transition-transform',
+                'h-4 w-4 shrink-0 transition-transform',
                 isOpen ? 'rotate-180' : 'rotate-0'
               )}
             />
