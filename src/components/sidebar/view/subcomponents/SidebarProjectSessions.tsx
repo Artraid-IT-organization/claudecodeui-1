@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Plus, Sparkles } from 'lucide-react';
+import { MessageSquareText, Plus, SearchX, Sparkles } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
 import { Button } from '../../../../shared/view/ui';
@@ -9,7 +9,41 @@ import type { Project, ProjectSession, LLMProvider } from '../../../../types/app
 import type { SessionWithProvider } from '../../types/types';
 import { getSessionTime, groupByRecency } from '../../utils/utils';
 
+import { useSessionMessageSearch } from '../../../command-palette/sources/useSessionMessageSearch';
+
 import SidebarSessionItem from './SidebarSessionItem';
+
+/*
+ * Поиск по чатам в списке слева.
+ *
+ * Раньше строка поиска сверху фильтровала только ПАПКИ по имени, а в режиме
+ * одной папки (у Егора он и включён) не делала вообще ничего: набираешь
+ * «созидатели» — список не меняется. Теперь поиск идёт по названиям чатов, а
+ * ниже подгружаются чаты, где искомое встречается в самой переписке.
+ *
+ * Названия бывают и по-русски, и латиницей (папка «sozidateli-bot»), а Егор
+ * пишет голосом по-русски, поэтому сравнение идёт ещё и в транслите.
+ */
+const TRANSLIT: Record<string, string> = {
+  а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i', й: 'y',
+  к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f',
+  х: 'h', ц: 'ts', ч: 'ch', ш: 'sh', щ: 'sch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya',
+};
+
+function normalizeForSearch(value: string): string {
+  return value.toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim();
+}
+
+function toLatin(value: string): string {
+  return [...value].map((ch) => TRANSLIT[ch] ?? ch).join('');
+}
+
+function sessionTitleMatches(title: string, query: string): boolean {
+  const q = normalizeForSearch(query);
+  if (!q) return true;
+  const t = normalizeForSearch(title);
+  return t.includes(q) || toLatin(t).includes(toLatin(q));
+}
 
 // Mirrors MIN_UNGROUPED_SESSIONS_TO_OFFER on the server - below this there is
 // nothing meaningful to cluster, so the button stays hidden instead of
@@ -96,6 +130,8 @@ type SidebarProjectSessionsProps = {
   ) => void;
   onLoadMoreSessions: (projectId: string) => void;
   onNewSession: (project: Project) => void;
+  /** Текст из строки поиска над списком. Пусто — показывать всё. */
+  searchQuery?: string;
   t: TFunction;
 };
 
@@ -140,12 +176,29 @@ export default function SidebarProjectSessions({
   onDeleteSession,
   onLoadMoreSessions,
   onNewSession,
+  searchQuery = '',
   t,
 }: SidebarProjectSessionsProps) {
   const [isOrganizing, setIsOrganizing] = useState(false);
   const [organizeStatus, setOrganizeStatus] = useState<string | null>(null);
 
-  const { groups, ungrouped } = useMemo(() => bucketSessionsByGroup(sessions), [sessions]);
+  const trimmedQuery = searchQuery.trim();
+  const isSearching = trimmedQuery.length > 0;
+  const visibleSessions = useMemo(
+    () => (isSearching
+      ? sessions.filter((session) => sessionTitleMatches(String(session.summary || session.name || session.title || ''), trimmedQuery))
+      : sessions),
+    [isSearching, sessions, trimmedQuery],
+  );
+  // По тексту переписки ищет сервер; из его ответа убираем то, что уже
+  // нашлось по названию, чтобы один чат не стоял в списке дважды.
+  const messageMatches = useSessionMessageSearch(project.projectId, trimmedQuery, isExpanded && isSearching);
+  const extraMessageMatches = useMemo(() => {
+    const shown = new Set(visibleSessions.map((session) => session.id));
+    return messageMatches.filter((match) => !shown.has(match.sessionId));
+  }, [messageMatches, visibleSessions]);
+
+  const { groups, ungrouped } = useMemo(() => bucketSessionsByGroup(visibleSessions), [visibleSessions]);
   const ungroupedCount = ungrouped.length;
 
   // Чаты без темы раскладываются по дням, а то, над чем Клод работает прямо
@@ -167,8 +220,8 @@ export default function SidebarProjectSessions({
     return null;
   }
 
-  const hasSessions = sessions.length > 0;
-  const canOfferAutoGroup = ungroupedCount >= MIN_UNGROUPED_SESSIONS_FOR_AUTO_GROUP;
+  const hasSessions = visibleSessions.length > 0;
+  const canOfferAutoGroup = !isSearching && ungroupedCount >= MIN_UNGROUPED_SESSIONS_FOR_AUTO_GROUP;
 
   const handleOrganizeByTopic = async () => {
     if (isOrganizing) {
@@ -265,6 +318,15 @@ export default function SidebarProjectSessions({
 
       {!initialSessionsLoaded ? (
         <SessionListSkeleton />
+      ) : !hasSessions && isSearching ? (
+        extraMessageMatches.length === 0 ? (
+          <div className="flex items-start gap-2 px-3 py-2 text-left">
+            <SearchX className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-muted-foreground" />
+            <p className="text-xs text-muted-foreground">
+              В названиях чатов «{trimmedQuery}» нет. Ищу в тексте переписки…
+            </p>
+          </div>
+        ) : null
       ) : !hasSessions ? (
         <div className="px-3 py-2 text-left">
           <p className="text-xs text-muted-foreground">{t('sessions.noSessions')}</p>
@@ -305,7 +367,7 @@ export default function SidebarProjectSessions({
             </div>
           ))}
 
-          {hasMoreSessions && (
+          {hasMoreSessions && !isSearching && (
             <Button
               variant="ghost"
               size="sm"
@@ -317,6 +379,36 @@ export default function SidebarProjectSessions({
             </Button>
           )}
         </>
+      )}
+
+      {isSearching && extraMessageMatches.length > 0 && (
+        <div className="space-y-1 pb-1">
+          <div className="flex items-center gap-1.5 px-2 pt-2">
+            <MessageSquareText className="h-3 w-3 flex-shrink-0 text-muted-foreground/70" aria-hidden />
+            <p className="truncate text-[10px] font-medium uppercase tracking-wide text-muted-foreground/80">
+              Найдено в переписке
+            </p>
+            <span className="flex-shrink-0 text-[10px] tabular-nums text-muted-foreground/50">
+              {extraMessageMatches.length}
+            </span>
+          </div>
+          {extraMessageMatches.map((match) => (
+            <button
+              key={match.sessionId}
+              type="button"
+              className="block w-full rounded-md px-3 py-2 text-left transition-colors hover:bg-accent/60"
+              onClick={() => onSessionSelect(
+                { id: match.sessionId, summary: match.label, __provider: match.provider, __projectId: project.projectId },
+                project.projectId,
+              )}
+            >
+              <span className="block truncate text-sm text-foreground">{match.label}</span>
+              {match.snippet && (
+                <span className="mt-0.5 line-clamp-2 block text-xs text-muted-foreground">{match.snippet}</span>
+              )}
+            </button>
+          ))}
+        </div>
       )}
     </div>
   );
