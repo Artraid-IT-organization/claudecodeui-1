@@ -222,7 +222,7 @@ test('replayEvents returns only events after the requested seq', async () => {
   });
 });
 
-test('attachConnection reroutes the live stream to a new socket', async () => {
+test('attachConnection adds a socket: the earlier tab keeps receiving the live stream', async () => {
   await withIsolatedDatabase(() => {
     sessionsDb.createAppSession('app-run-5', 'opencode', '/workspace/demo');
     const firstConnection = new FakeConnection();
@@ -241,7 +241,9 @@ test('attachConnection reroutes the live stream to a new socket', async () => {
     assert.equal(chatRunRegistry.attachConnection('app-run-5', secondConnection), true);
     run.writer.send({ kind: 'stream_delta', provider: 'opencode', sessionId: 'o', content: 'after' });
 
-    assert.deepEqual(firstConnection.frames.map((frame) => frame.content), ['before']);
+    // Новая подписка не вытесняет прежнюю вкладку (телефон не глохнет, когда
+    // чат открыли на компьютере) — поток уходит в обе.
+    assert.deepEqual(firstConnection.frames.map((frame) => frame.content), ['before', 'after']);
     assert.deepEqual(secondConnection.frames.map((frame) => frame.content), ['after']);
   });
 });
