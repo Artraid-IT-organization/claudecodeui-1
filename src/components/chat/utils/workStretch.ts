@@ -21,6 +21,8 @@ export interface WorkStretchItem {
   messages: ChatMessage[];
   keyThoughts: ChatMessage[];
   actionCount: number;
+  /** Сколько действий завершилось ошибкой — в свёрнутой строке это видно сразу. */
+  errorCount: number;
   timestamp: ChatMessage['timestamp'];
 }
 
@@ -34,10 +36,18 @@ export function isWorkStretchItem(item: unknown): item is WorkStretchItem {
   return Boolean(item && typeof item === 'object' && (item as WorkStretchItem)._isStretch === true);
 }
 
+/**
+ * Вызовы, которые человек должен увидеть сам, а не искать в свёртке: план на
+ * утверждение и вопрос с вариантами ответа.
+ */
+const ALWAYS_VISIBLE_TOOLS = new Set(['ExitPlanMode', 'exit_plan_mode', 'AskUserQuestion']);
+
 function isWorkMessage(message: ChatMessage): boolean {
   if (message.isThinking) return true;
   // Запрос разрешения требует действия человека — он не прячется в свёртку.
-  if (message.isToolUse && !message.isInteractivePrompt) return true;
+  if (message.isToolUse && !message.isInteractivePrompt && !ALWAYS_VISIBLE_TOOLS.has(String(message.toolName ?? ''))) {
+    return true;
+  }
   return false;
 }
 
@@ -53,6 +63,7 @@ export function groupWorkStretches<T extends ChatMessage>(messages: T[]): Array<
   const flush = () => {
     if (run.length === 0) return;
     const actionCount = run.filter((message) => message.isToolUse).length;
+    const errorCount = run.filter((message) => message.isToolUse && message.toolResult?.isError).length;
     const keyThoughts = run.filter(isKeyThought);
     // Только пустые размышления — показывать нечего, ни строки, ни свёртки.
     if (actionCount > 0 || keyThoughts.length > 0) {
@@ -61,6 +72,7 @@ export function groupWorkStretches<T extends ChatMessage>(messages: T[]): Array<
         messages: run,
         keyThoughts,
         actionCount,
+        errorCount,
         timestamp: run[0].timestamp,
       });
     }
@@ -87,14 +99,16 @@ function pluralRu(count: number, one: string, few: string, many: string): string
   return many;
 }
 
-/** Подпись свёрнутой строки: «Ход работы · 3 мысли · 9 действий». */
-export function describeWorkStretch(item: Pick<WorkStretchItem, 'keyThoughts' | 'actionCount'>): string {
+/** Подпись свёрнутой строки: «Ход работы · 3 мысли · 9 действий · 1 ошибка». */
+export function describeWorkStretch(item: Pick<WorkStretchItem, 'keyThoughts' | 'actionCount'> & { errorCount?: number }): string {
   const parts = ['Ход работы'];
   const thoughts = item.keyThoughts.length;
   if (thoughts > 0) parts.push(`${thoughts} ${pluralRu(thoughts, 'мысль', 'мысли', 'мыслей')}`);
   if (item.actionCount > 0) {
     parts.push(`${item.actionCount} ${pluralRu(item.actionCount, 'действие', 'действия', 'действий')}`);
   }
+  const errors = item.errorCount ?? 0;
+  if (errors > 0) parts.push(`${errors} ${pluralRu(errors, 'ошибка', 'ошибки', 'ошибок')}`);
   return parts.join(' · ');
 }
 

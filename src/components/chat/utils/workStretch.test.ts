@@ -52,3 +52,17 @@ test('раскрытый ход работы показывает ключевы
   assert.equal(thoughts.length, 1, 'ключевая мысль должна остаться видимой');
   assert.equal(rows.length, 3, 'действие · мысль · два действия подряд одной строкой');
 });
+
+test('ошибки действий видны в свёрнутой строке', () => {
+  const failed: ChatMessage = { ...tool('Bash', 3), toolResult: { content: 'boom', isError: true } as ChatMessage['toolResult'] };
+  const items = groupWorkStretches([user('a', 1), tool('Read', 2), failed, reply('Не вышло.', 4)]);
+  const stretch = items[1] as Extract<(typeof items)[number], { _isStretch: true }>;
+  assert.equal(stretch.errorCount, 1);
+  assert.equal(describeWorkStretch(stretch), 'Ход работы · 2 действия · 1 ошибка');
+});
+
+test('план на утверждение и вопрос с вариантами не прячутся в свёртку', () => {
+  const items = groupWorkStretches([user('a', 1), tool('Read', 2), tool('ExitPlanMode', 3), tool('Bash', 4), tool('AskUserQuestion', 5)]);
+  const visibleTools = items.filter((item) => !isWorkStretchItem(item) && item.isToolUse).map((item) => (item as ChatMessage).toolName);
+  assert.deepEqual(visibleTools, ['ExitPlanMode', 'AskUserQuestion']);
+});

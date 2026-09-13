@@ -266,7 +266,10 @@ async function handleChatSend(
 
   const runtimeOptions: AnyRecord = {
     ...clientOptions,
-    appendSystemPrompt: [presetSystemPrompt, THINKING_LANGUAGE_INSTRUCTION].filter(Boolean).join('\n\n'),
+    // Указание о размышлениях — только модели Claude: остальные провайдеры
+    // приписку сейчас не читают, а если начнут, она им не про то.
+    appendSystemPrompt: [presetSystemPrompt, provider === 'claude' ? THINKING_LANGUAGE_INSTRUCTION : '']
+      .filter(Boolean).join('\n\n') || undefined,
     // Attachments are re-validated server-side: only direct children of the
     // global upload store may reach provider runtimes or their file tools.
     attachments: uniqueAttachments,
