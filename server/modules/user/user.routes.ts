@@ -48,7 +48,7 @@ export function createUserRouter(service: ReturnType<typeof createUserService>):
 
   router.get('/usage-limits', async (req, res, next) => {
     try {
-      res.json(await service.getUsageLimits());
+      res.json(await service.getUsageLimits(readUserId(req)));
     } catch (error) {
       next(error);
     }

@@ -5,6 +5,8 @@ import { readFile } from 'node:fs/promises';
 import { AppError, getClaudeConfigDir, getClaudeJsonPath, isPlatformOwnerWebUser } from '@/shared/utils.js';
 import { getLiveLimits } from '@/modules/providers/index.js';
 import { getWebUserClaudeConfigDir } from '@/shared/web-user-paths.js';
+import { resolveWebUserRuntimeContext } from '@/shared/web-user-runtime.js';
+import { getOfficialUsage } from '@/modules/user/official-usage.js';
 
 /** Как окна из потока называются в кэше CLI. */
 const LIVE_WINDOW_BY_KIND: Record<string, string> = {
@@ -133,7 +135,19 @@ export function createUserService(dependencies: UserDependencies) {
      * проценты — неправда. Решает клиент, что с этим показать; молча выдавать
      * протухшее число нельзя.
      */
-    async getUsageLimits() {
+    async getUsageLimits(userId?: number) {
+      // Главный источник — тот же, что у `/usage` в Claude Code, и по входу
+      // именно этого пользователя: у Аси свои проценты, у Егора свои.
+      // Разбор кэша ниже остаётся запасным путём на случай, если запрос не
+      // удался и удачного значения ещё не было.
+      const accountDir = resolveWebUserRuntimeContext(
+        typeof userId === 'number' && Number.isFinite(userId) ? userId : null,
+      ).claudeConfigDir ?? getClaudeConfigDir();
+      const official = await getOfficialUsage(accountDir);
+      if (official) {
+        return { success: true, fetchedAtMs: official.fetchedAtMs, limits: official.limits };
+      }
+
       // CLI держит кэш расхода в ДОМАШНЕМ ~/.claude.json, а не в файле внутри
       // каталога аккаунта: там лежат только настройки. Поэтому смотрим оба —
       // сначала файл аккаунта, потом домашний, и берём тот, где кэш вообще

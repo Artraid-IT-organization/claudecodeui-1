@@ -10,7 +10,6 @@ import type { ConversationSearchResults, SearchProgress } from '../../hooks/useS
 import type { ArchivedProjectListItem, ArchivedSessionListItem, RecentConversationListItem, SidebarSearchMode } from '../../types/types';
 import LLMProviderLogo from '../../../llm-provider-logo/LLMProviderLogo';
 import { formatCompactAge, getAllSessions } from '../../utils/utils';
-import { getSessionTitle } from '../../../../utils/pageTitle';
 
 import SidebarFooter from './SidebarFooter';
 import SidebarHeader from './SidebarHeader';
@@ -299,26 +298,9 @@ export default function SidebarContent({
         t={t}
       />
 
-      {(selectedProject || singleStarredProject) && (
-        <div className="flex-shrink-0 border-b border-border/60 px-3 py-2">
-          {selectedProject && (
-            <div className="mb-1.5 min-w-0">
-              <p
-                className="truncate text-xs font-medium leading-tight text-foreground"
-                title={selectedSession ? getSessionTitle(selectedSession) : selectedProject.displayName}
-              >
-                {selectedSession ? getSessionTitle(selectedSession) : selectedProject.displayName}
-              </p>
-              {selectedSession && (
-                <p className="truncate text-[10px] leading-tight text-muted-foreground/70">
-                  {selectedProject.displayName}
-                </p>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-
+      {/* Строки «название чата / папка» над списком больше нет: Егор 13.09.26
+          обвёл её на снимке — «надо убрать совсем». Открытый чат и так
+          подсвечен в списке ниже. */}
       <SidebarUsageLimits />
 
       <ScrollArea className="flex-1 overflow-y-auto overscroll-contain md:px-1.5 md:py-2">

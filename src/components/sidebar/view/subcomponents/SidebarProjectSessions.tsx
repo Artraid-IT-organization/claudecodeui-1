@@ -1,9 +1,8 @@
-import { useMemo, useState } from 'react';
-import { MessageSquareText, Plus, SearchX, Sparkles } from 'lucide-react';
+import { useMemo } from 'react';
+import { MessageSquareText, Plus, SearchX } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
 import { Button } from '../../../../shared/view/ui';
-import { api } from '../../../../utils/api';
 import type { SessionActivityMap } from '../../../../hooks/useSessionProtection';
 import type { Project, ProjectSession, LLMProvider } from '../../../../types/app';
 import type { SessionWithProvider } from '../../types/types';
@@ -44,11 +43,6 @@ function sessionTitleMatches(title: string, query: string): boolean {
   const t = normalizeForSearch(title);
   return t.includes(q) || toLatin(t).includes(toLatin(q));
 }
-
-// Mirrors MIN_UNGROUPED_SESSIONS_TO_OFFER on the server - below this there is
-// nothing meaningful to cluster, so the button stays hidden instead of
-// inviting a click that can only report "not enough sessions".
-const MIN_UNGROUPED_SESSIONS_FOR_AUTO_GROUP = 3;
 
 type SessionGroupBucket = {
   groupId: string;
@@ -179,9 +173,6 @@ export default function SidebarProjectSessions({
   searchQuery = '',
   t,
 }: SidebarProjectSessionsProps) {
-  const [isOrganizing, setIsOrganizing] = useState(false);
-  const [organizeStatus, setOrganizeStatus] = useState<string | null>(null);
-
   const trimmedQuery = searchQuery.trim();
   const isSearching = trimmedQuery.length > 0;
   const visibleSessions = useMemo(
@@ -199,7 +190,6 @@ export default function SidebarProjectSessions({
   }, [messageMatches, visibleSessions]);
 
   const { groups, ungrouped } = useMemo(() => bucketSessionsByGroup(visibleSessions), [visibleSessions]);
-  const ungroupedCount = ungrouped.length;
 
   // Чаты без темы раскладываются по дням, а то, над чем Клод работает прямо
   // сейчас, поднимается наверх отдельной группой. Плоский список из полусотни
@@ -221,31 +211,6 @@ export default function SidebarProjectSessions({
   }
 
   const hasSessions = visibleSessions.length > 0;
-  const canOfferAutoGroup = !isSearching && ungroupedCount >= MIN_UNGROUPED_SESSIONS_FOR_AUTO_GROUP;
-
-  const handleOrganizeByTopic = async () => {
-    if (isOrganizing) {
-      return;
-    }
-    setIsOrganizing(true);
-    setOrganizeStatus(null);
-    try {
-      const response = await api.organizeProjectSessions(project.projectId);
-      const data = await response.json();
-      const result = data?.data ?? data;
-      const groupedCount = Number(result?.groupedCount ?? 0);
-      setOrganizeStatus(
-        groupedCount > 0
-          ? t('sessions.organizedByTopic', '{{count}} sessions grouped', { count: groupedCount })
-          : t('sessions.noTopicsFound', 'No clear topics found'),
-      );
-    } catch {
-      setOrganizeStatus(t('sessions.organizeFailed', 'Could not organize sessions'));
-    } finally {
-      setIsOrganizing(false);
-    }
-  };
-
   const renderSession = (session: SessionWithProvider) => (
     <SidebarSessionItem
       key={session.id}
@@ -293,29 +258,9 @@ export default function SidebarProjectSessions({
         {t('sessions.newSession')}
       </Button>
 
-      {canOfferAutoGroup && (
-        // Отступ такой же, как у кнопки «Новый сеанс» и у строк чатов ниже
-        // (12 точек): раньше здесь было 4, и кнопка выпирала за общий край.
-        <div className="px-3">
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-7 w-full justify-start gap-2 text-xs text-muted-foreground hover:text-foreground"
-            onClick={handleOrganizeByTopic}
-            disabled={isOrganizing}
-            title={t('sessions.organizeByTopicHint', 'Group sessions by topic using AI')}
-          >
-            <Sparkles className={`h-3 w-3 ${isOrganizing ? 'animate-pulse' : ''}`} />
-            {isOrganizing
-              ? t('sessions.organizing', 'Organizing…')
-              : t('sessions.organizeByTopic', 'Organize by topic')}
-          </Button>
-          {organizeStatus && (
-            <p className="mt-1 px-1 text-[10px] text-muted-foreground/80">{organizeStatus}</p>
-          )}
-        </div>
-      )}
-
+      {/* Кнопки «Сгруппировать по темам» больше нет: Егор 13.09.26 обвёл её
+          на снимке — «надо убрать совсем». Уже созданные темы по-прежнему
+          показываются заголовками групп. */}
       {!initialSessionsLoaded ? (
         <SessionListSkeleton />
       ) : !hasSessions && isSearching ? (
