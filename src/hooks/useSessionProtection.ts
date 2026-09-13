@@ -26,7 +26,12 @@ export type ActivityPhase =
   | 'tool'
   | 'agents'
   | 'waiting'
-  | 'reconnecting';
+  | 'reconnecting'
+  // Честные этапы вместо одного «ожидает» (замер 13.09.26: 63% времени работы
+  // плашка писала «Ожидает модель»):
+  | 'starting' // сообщение отправлено, агент запускается
+  | 'requesting' // агент готов, запрос у модели, первого слова ещё нет
+  | 'reading'; // команда отработала, модель читает её результат
 
 export interface SessionActivity {
   /** Provider-supplied status line; null renders the phase label instead. */
