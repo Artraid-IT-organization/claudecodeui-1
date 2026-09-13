@@ -106,6 +106,11 @@ const isShareableRead = (options) => {
 };
 
 // Utility function for authenticated API calls
+/**
+ * @param {string} url
+ * @param {RequestInit} [options]
+ * @returns {Promise<Response>}
+ */
 export const authenticatedFetch = (url, options = {}) => {
   if (isShareableRead(options)) {
     const key = `${getStoredAuthToken() || ''} ${url}`;
@@ -122,6 +127,11 @@ export const authenticatedFetch = (url, options = {}) => {
   return sendAuthenticatedFetch(url, options);
 };
 
+/**
+ * @param {string} url
+ * @param {RequestInit} [options]
+ * @returns {Promise<Response>}
+ */
 const sendAuthenticatedFetch = (url, options = {}) => {
   const token = getStoredAuthToken();
 
