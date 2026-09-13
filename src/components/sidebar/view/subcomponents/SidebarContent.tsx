@@ -627,6 +627,7 @@ export default function SidebarContent({
               onDeleteSession={projectListProps.onDeleteSession}
               onLoadMoreSessions={projectListProps.onLoadMoreSessions}
               onNewSession={projectListProps.onNewSession}
+              searchQuery={searchFilter}
               t={t}
             />
           </div>
