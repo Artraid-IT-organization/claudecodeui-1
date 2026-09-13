@@ -32,8 +32,8 @@ const PHASE_LABELS: Record<string, { key: string; fallback: string }> = {
   agents: { key: 'claudeStatus.phase.agents', fallback: 'Работают агенты' },
   waiting: { key: 'claudeStatus.phase.waiting', fallback: 'Ожидает модель' },
   starting: { key: 'claudeStatus.phase.starting', fallback: 'Запускаю чат' },
-  requesting: { key: 'claudeStatus.phase.requesting', fallback: 'Модель получила запрос' },
-  reading: { key: 'claudeStatus.phase.reading', fallback: 'Модель читает результат' },
+  requesting: { key: 'claudeStatus.phase.requesting', fallback: 'Запрос отправлен' },
+  reading: { key: 'claudeStatus.phase.reading', fallback: 'Читает результат' },
   // Обрыв связи — это состояние, а не приговор: ответ на сервере обычно
   // продолжает считаться, и подписка цепляется к нему заново.
   reconnecting: { key: 'claudeStatus.phase.reconnecting', fallback: 'Связь потеряна, восстанавливаем' },
@@ -131,7 +131,7 @@ export default function ActivityIndicator({ activity, onAbort, isInputFocused = 
           {phaseKey === 'waiting' ? (
             <Shimmer className="font-semibold">{`${label}…`}</Shimmer>
           ) : (
-            <span className={`animate-pulse font-semibold ${phaseTone}`}>{`${label}…`}</span>
+            <span className={`animate-pulse whitespace-nowrap font-semibold ${phaseTone}`}>{`${label}…`}</span>
           )}
           <span className="tabular-nums text-muted-foreground/60">{elapsedLabel}</span>
         </div>
