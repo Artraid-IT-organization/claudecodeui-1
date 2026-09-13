@@ -369,3 +369,26 @@ test('createEntry performs filesystem mutation only through the injected adapter
   assert.equal(result.path, targetPath);
   assert.deepEqual(writtenFiles, [{ filePath: targetPath, content: '' }]);
 });
+
+test('listProjectFiles помнит, что папка не влезла в предел, и не обходит её повторно', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  let openedDirectories = 0;
+  const fileSystem = createFakeFileSystem({
+    access: async () => undefined,
+    openDirectory: createDirectoryReader((directoryPath) => {
+      openedDirectories += 1;
+      return directoryPath === projectRoot
+        ? Array.from({ length: 10_001 }, (_, index) => createDirectoryEntry(`file-${index}.txt`, false))
+        : [];
+    }),
+    lstat: async () => createStats(false, 0o644),
+  });
+  const service = createFileTreeService(createDependencies(fileSystem, projectRoot));
+  const isTooLarge = (error: unknown) => error instanceof AppError && error.code === 'FILE_TREE_TOO_LARGE';
+
+  await assert.rejects(service.listProjectFiles('project-1'), isTooLarge);
+  const openedAfterFirstCall = openedDirectories;
+  await assert.rejects(service.listProjectFiles('project-1'), isTooLarge);
+  assert.equal(openedDirectories, openedAfterFirstCall, 'второй запрос не должен обходить папки');
+});
+

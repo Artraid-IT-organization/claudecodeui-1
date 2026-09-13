@@ -179,6 +179,37 @@ function readClaudeTokenUsage(fileContent: string, configuredContextWindow: stri
   };
 }
 
+/**
+ * Расход токенов — это последняя строка ответа модели со счётчиком, а она почти
+ * всегда в самом конце стенограммы. Раньше файл читался целиком: 89 МБ текста в
+ * память и 1,3 с на каждое открытие чата (замер 14.09.26). Теперь читаем с конца
+ * кусками, увеличивая кусок, пока не найдём счётчик или не дойдём до начала.
+ * Первая строка куска может быть обрывком — разбор её просто пропустит.
+ */
+const TOKEN_USAGE_TAIL_START_BYTES = 256 * 1024;
+
+async function readClaudeTokenUsageFromTail(
+  filePath: string,
+  configuredContextWindow: string | undefined,
+): Promise<TokenUsageResult> {
+  const handle = await fsp.open(filePath, 'r');
+  try {
+    const { size } = await handle.stat();
+    let windowBytes = Math.min(TOKEN_USAGE_TAIL_START_BYTES, size);
+    for (;;) {
+      const buffer = Buffer.alloc(windowBytes);
+      const { bytesRead } = await handle.read(buffer, 0, windowBytes, size - windowBytes);
+      const result = readClaudeTokenUsage(buffer.subarray(0, bytesRead).toString('utf8'), configuredContextWindow);
+      if (result.used > 0 || windowBytes >= size) {
+        return result;
+      }
+      windowBytes = Math.min(windowBytes * 4, size);
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
 function readOpenCodeTokenUsage(databasePath: string, providerSessionId: string): TokenUsageResult {
   const database = new Database(databasePath, { readonly: true, fileMustExist: true });
   try {
@@ -345,8 +376,7 @@ export function createProviderTokenUsageService(
         });
       }
 
-      const fileContent = await dependencies.readTextFile(sessionFilePath);
-      return readClaudeTokenUsage(fileContent, dependencies.getClaudeContextWindow());
+      return readClaudeTokenUsageFromTail(sessionFilePath, dependencies.getClaudeContextWindow());
     },
   };
 }

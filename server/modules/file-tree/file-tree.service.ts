@@ -180,6 +180,13 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
     : 1;
   const { acquire, release } = createConcurrencyLimiter(concurrencyLimit);
 
+  // Папка, которая не влезла в предел, почти наверняка не влезет и через минуту
+  // (домашний каталог — десятки тысяч файлов). Без памяти об этом каждое
+  // открытие чата заново обходило её до предела и получало тот же отказ:
+  // 1–1,6 с работы диска и процессора впустую (замер 14.09.26).
+  const TOO_LARGE_REMEMBER_MS = 10 * 60 * 1000;
+  const tooLargeTrees = new Map<string, { at: number; error: AppError }>();
+
   async function resolveProjectRoot(projectId: string): Promise<string> {
     const projectRoot = await dependencies.projects.getProjectPathById(projectId);
     if (!projectRoot) {
@@ -453,6 +460,11 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
 
     async listProjectFiles(projectId, options) {
       const projectRoot = await resolveProjectRoot(projectId);
+      const tooLargeKey = `${projectRoot}\n${options?.respectGitignore ? 'gitignore' : 'all'}`;
+      const rememberedTooLarge = tooLargeTrees.get(tooLargeKey);
+      if (rememberedTooLarge && Date.now() - rememberedTooLarge.at < TOO_LARGE_REMEMBER_MS) {
+        throw rememberedTooLarge.error;
+      }
       try {
         await fileSystem.access(projectRoot);
       } catch {
@@ -471,7 +483,14 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
         }
       }
 
-      return buildFileTree(projectRoot, 10, 0, includeEntry);
+      try {
+        return await buildFileTree(projectRoot, 10, 0, includeEntry);
+      } catch (error) {
+        if (error instanceof AppError && error.code === 'FILE_TREE_TOO_LARGE') {
+          tooLargeTrees.set(tooLargeKey, { at: Date.now(), error });
+        }
+        throw error;
+      }
     },
 
     async createEntry(input) {
