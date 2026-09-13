@@ -460,6 +460,7 @@ function AppContentInner() {
           activeTerminalId={activeTerminalId}
           onSelectTerminal={focusTerminal}
           onCloseTerminal={closeTerminal}
+          activities={processingSessions}
         />
         <MainContent
           projects={projects}

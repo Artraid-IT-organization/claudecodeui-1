@@ -5,6 +5,8 @@ import { cn } from '../../lib/utils';
 import LLMProviderLogo from '../llm-provider-logo/LLMProviderLogo';
 import type { OpenSessionTab } from '../../hooks/useOpenSessionTabs';
 import type { TerminalTab } from '../../hooks/useTerminalTabs';
+import type { SessionActivityMap } from '../../hooks/useSessionProtection';
+import { PHASE_ICONS, PHASE_SHORT_LABELS, PHASE_TONES } from '../chat/utils/activityPhaseStyle';
 
 type SessionTabsBarProps = {
   tabs: OpenSessionTab[];
@@ -16,6 +18,12 @@ type SessionTabsBarProps = {
   activeTerminalId?: string | null;
   onSelectTerminal?: (id: string) => void;
   onCloseTerminal?: (id: string) => void;
+  /**
+   * Чем сейчас занят каждый чат. Вкладка работающего чата показывает значок
+   * фазы вместо значка Claude — видно, какой из открытых чатов думает, не
+   * переключаясь на него.
+   */
+  activities?: SessionActivityMap;
 };
 
 /**
@@ -33,6 +41,7 @@ export default function SessionTabsBar({
   activeTerminalId = null,
   onSelectTerminal,
   onCloseTerminal,
+  activities,
 }: SessionTabsBarProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -63,6 +72,10 @@ export default function SessionTabsBar({
     >
       {tabs.map((tab) => {
         const isActive = activeTerminalId === null && tab.sessionId === activeSessionId;
+        const activity = activities?.get(tab.sessionId) ?? null;
+        const phaseKey = activity ? (activity.phase ?? 'waiting') : null;
+        const PhaseIcon = phaseKey ? PHASE_ICONS[phaseKey] : null;
+        const phaseLabel = phaseKey ? PHASE_SHORT_LABELS[phaseKey] ?? 'Работает' : null;
 
         return (
           <div
@@ -70,7 +83,8 @@ export default function SessionTabsBar({
             role="tab"
             aria-selected={isActive}
             tabIndex={isActive ? 0 : -1}
-            title={tab.title}
+            title={phaseLabel ? `${tab.title} — ${phaseLabel}…` : tab.title}
+            data-phase={phaseKey ?? 'idle'}
             onClick={() => onSelect(tab.sessionId)}
             onKeyDown={(event) => {
               if (event.key === 'Enter' || event.key === ' ') {
@@ -85,7 +99,14 @@ export default function SessionTabsBar({
                 : 'text-muted-foreground hover:bg-accent/40 hover:text-foreground',
             )}
           >
-            <LLMProviderLogo provider={tab.provider} className="h-3.5 w-3.5 flex-shrink-0" />
+            {PhaseIcon && phaseKey ? (
+              <PhaseIcon
+                className={cn('h-3.5 w-3.5 flex-shrink-0 animate-pulse', PHASE_TONES[phaseKey])}
+                aria-label={phaseLabel ?? undefined}
+              />
+            ) : (
+              <LLMProviderLogo provider={tab.provider} className="h-3.5 w-3.5 flex-shrink-0" />
+            )}
             <span className="min-w-0 flex-1 truncate">{tab.title}</span>
             <button
               type="button"

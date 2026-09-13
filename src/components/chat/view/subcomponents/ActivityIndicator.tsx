@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Brain, Hourglass, PenLine, Users, WifiOff, Wrench, type LucideIcon } from 'lucide-react';
+import { Hourglass } from 'lucide-react';
 
 import { Shimmer } from '../../../../shared/view/ui';
 import type { SessionActivity } from '../../../../hooks/useSessionProtection';
+import { PHASE_ICONS, PHASE_TONES } from '../../utils/activityPhaseStyle';
 
 type ActivityIndicatorProps = {
   activity: SessionActivity | null;
@@ -13,29 +14,7 @@ type ActivityIndicatorProps = {
 
 const EXIT_ANIMATION_MS = 220;
 
-/*
- * Значок и цвет фазы. Егор: «всегда в первую очередь понимать, думает ли чат».
- * Одинаковая серая надпись мелким шрифтом этого не давала — фазу надо было
- * читать. Теперь «думает» узнаётся по фиолетовому мозгу с первого взгляда,
- * «пишет ответ» — по зелёному перу, работа инструмента — по гаечному ключу.
- */
-const PHASE_ICONS: Record<string, LucideIcon> = {
-  thinking: Brain,
-  writing: PenLine,
-  tool: Wrench,
-  agents: Users,
-  waiting: Hourglass,
-  reconnecting: WifiOff,
-};
-
-const PHASE_TONES: Record<string, string> = {
-  thinking: 'text-violet-600 dark:text-violet-400',
-  writing: 'text-emerald-600 dark:text-emerald-400',
-  tool: 'text-sky-600 dark:text-sky-400',
-  agents: 'text-sky-600 dark:text-sky-400',
-  waiting: 'text-muted-foreground',
-  reconnecting: 'text-amber-600 dark:text-amber-400',
-};
+// Значки и цвета фаз — общие с вкладками чатов (utils/activityPhaseStyle.ts).
 
 /**
  * Подписи фаз. Каждая соответствует событию, которое действительно пришло по
