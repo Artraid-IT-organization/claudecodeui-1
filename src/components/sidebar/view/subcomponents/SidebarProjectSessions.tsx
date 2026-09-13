@@ -192,7 +192,7 @@ export default function SidebarProjectSessions({
   );
   // По тексту переписки ищет сервер; из его ответа убираем то, что уже
   // нашлось по названию, чтобы один чат не стоял в списке дважды.
-  const messageMatches = useSessionMessageSearch(project.projectId, trimmedQuery, isExpanded && isSearching);
+  const messageMatches = useSessionMessageSearch(project.projectId, trimmedQuery, isExpanded && isSearching, true);
   const extraMessageMatches = useMemo(() => {
     const shown = new Set(visibleSessions.map((session) => session.id));
     return messageMatches.filter((match) => !shown.has(match.sessionId));
@@ -386,7 +386,7 @@ export default function SidebarProjectSessions({
           <div className="flex items-center gap-1.5 px-2 pt-2">
             <MessageSquareText className="h-3 w-3 flex-shrink-0 text-muted-foreground/70" aria-hidden />
             <p className="truncate text-[10px] font-medium uppercase tracking-wide text-muted-foreground/80">
-              Найдено в переписке
+              Найдено в названиях и переписке
             </p>
             <span className="flex-shrink-0 text-[10px] tabular-nums text-muted-foreground/50">
               {extraMessageMatches.length}

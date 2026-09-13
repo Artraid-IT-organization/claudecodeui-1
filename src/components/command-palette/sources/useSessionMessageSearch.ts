@@ -28,6 +28,9 @@ export function useSessionMessageSearch(
   projectId: string | undefined,
   query: string,
   enabled: boolean,
+  // Список слева просит ещё и совпадения по названиям среди ВСЕХ чатов папки:
+  // сам он видит только загруженную первую страницу (20 чатов).
+  includeTitles = false,
 ) {
   const [items, setItems] = useState<SessionMessageMatch[]>([]);
   const seqRef = useRef(0);
@@ -45,6 +48,9 @@ export function useSessionMessageSearch(
     esRef.current?.close();
     esRef.current = null;
     seqRef.current++;
+    // Новый запрос — старые результаты сразу убрать, иначе под «sunschool»
+    // висели находки прошлого слова, пока не придёт новый ответ.
+    setItems([]);
 
     const handle = setTimeout(() => {
       const seq = ++seqRef.current;
@@ -52,6 +58,24 @@ export function useSessionMessageSearch(
       const es = new EventSource(url);
       esRef.current = es;
       const accumulated: SessionMessageMatch[] = [];
+
+      if (includeTitles) {
+        es.addEventListener('title-results', (evt) => {
+          if (seq !== seqRef.current) return;
+          try {
+            const data = JSON.parse((evt as MessageEvent).data) as {
+              titleResults: Array<{ sessionId: string; provider: LLMProvider; projectId: string | null; sessionTitle: string }>;
+            };
+            for (const r of data.titleResults) {
+              if (r.projectId !== projectId || accumulated.some((i) => i.sessionId === r.sessionId)) continue;
+              accumulated.unshift({ sessionId: r.sessionId, label: r.sessionTitle, snippet: '', provider: r.provider });
+            }
+            setItems([...accumulated]);
+          } catch {
+            // ignore malformed
+          }
+        });
+      }
 
       es.addEventListener('result', (evt) => {
         if (seq !== seqRef.current) {
@@ -63,6 +87,7 @@ export function useSessionMessageSearch(
           const pr = data.projectResult;
           if (pr.projectId !== projectId) return;
           for (const s of pr.sessions) {
+            if (accumulated.some((i) => i.sessionId === s.sessionId)) continue;
             accumulated.push({
               sessionId: s.sessionId,
               label: s.sessionSummary || s.sessionId,
@@ -88,7 +113,7 @@ export function useSessionMessageSearch(
     return () => {
       clearTimeout(handle);
     };
-  }, [projectId, query, enabled]);
+  }, [projectId, query, enabled, includeTitles]);
 
   useEffect(() => {
     return () => {
