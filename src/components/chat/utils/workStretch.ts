@@ -27,10 +27,29 @@ export interface WorkStretchItem {
 }
 
 /**
- * Короче этого размышление считается служебным («сейчас проверю», «жду сборку»)
- * и в «ключевые» не попадает — оно не несёт того, что человеку нужно знать.
+ * Сколько мыслей показывать в раскрытом «Ходе работы» — последние, то есть к
+ * чему модель пришла перед ответом.
  */
-export const KEY_THOUGHT_MIN_CHARS = 80;
+export const KEY_THOUGHTS_LIMIT = 3;
+
+/**
+ * Мысль, которую стоит показать человеку: написана по-русски.
+ *
+ * Первая версия отбирала мысли по длине (от 80 символов), и на живой странице
+ * раскрытая свёртка стала стеной из 22 длинных английских абзацев вроде «I've
+ * created a branch feat/honest-phases…». Пересказ размышлений почти всегда
+ * длинный, так что длина ничего не отсеивала. Егор просил «описывай их на
+ * русском… только то, что мне нужно знать». Модели теперь при запуске велено
+ * размышлять по-русски и только о важном — такие мысли и показываются, а
+ * внутренняя английская кухня остаётся за кадром.
+ */
+export function isReadableThought(message: ChatMessage): boolean {
+  if (!message.isThinking || isEmptyThinking(message)) return false;
+  const letters = String(message.content ?? '').match(/\p{L}/gu) ?? [];
+  if (letters.length < 20) return false;
+  const cyrillic = letters.filter((ch) => /[\u0400-\u04FF]/.test(ch)).length;
+  return cyrillic / letters.length >= 0.5;
+}
 
 export function isWorkStretchItem(item: unknown): item is WorkStretchItem {
   return Boolean(item && typeof item === 'object' && (item as WorkStretchItem)._isStretch === true);
@@ -51,9 +70,9 @@ function isWorkMessage(message: ChatMessage): boolean {
   return false;
 }
 
-export function isKeyThought(message: ChatMessage): boolean {
-  if (!message.isThinking || isEmptyThinking(message)) return false;
-  return String(message.content ?? '').replace(/\s+/g, ' ').trim().length >= KEY_THOUGHT_MIN_CHARS;
+/** Ключевые мысли хода работы: русские, не больше последних KEY_THOUGHTS_LIMIT. */
+export function selectKeyThoughts(messages: ChatMessage[]): ChatMessage[] {
+  return messages.filter(isReadableThought).slice(-KEY_THOUGHTS_LIMIT);
 }
 
 export function groupWorkStretches<T extends ChatMessage>(messages: T[]): Array<T | WorkStretchItem> {
@@ -64,7 +83,7 @@ export function groupWorkStretches<T extends ChatMessage>(messages: T[]): Array<
     if (run.length === 0) return;
     const actionCount = run.filter((message) => message.isToolUse).length;
     const errorCount = run.filter((message) => message.isToolUse && message.toolResult?.isError).length;
-    const keyThoughts = run.filter(isKeyThought);
+    const keyThoughts = selectKeyThoughts(run);
     // Только пустые размышления — показывать нечего, ни строки, ни свёртки.
     if (actionCount > 0 || keyThoughts.length > 0) {
       items.push({
@@ -121,7 +140,8 @@ export function describeWorkStretch(item: Pick<WorkStretchItem, 'keyThoughts' | 
  * подпись обещала «19 мыслей», а раскрытая свёртка показывала одни действия
  * (снимок живой страницы 13.09.26).
  */
-export function workStretchRows(stretch: Pick<WorkStretchItem, 'messages'>): MessageListItem[] {
-  const visible = stretch.messages.filter((message) => !message.isThinking || isKeyThought(message));
+export function workStretchRows(stretch: Pick<WorkStretchItem, 'messages' | 'keyThoughts'>): MessageListItem[] {
+  const keep = new Set(stretch.keyThoughts);
+  const visible = stretch.messages.filter((message) => !message.isThinking || keep.has(message));
   return groupConsecutiveTools(visible, true);
 }

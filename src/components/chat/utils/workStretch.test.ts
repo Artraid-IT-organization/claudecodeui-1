@@ -66,3 +66,25 @@ test('план на утверждение и вопрос с вариантам
   const visibleTools = items.filter((item) => !isWorkStretchItem(item) && item.isToolUse).map((item) => (item as ChatMessage).toolName);
   assert.deepEqual(visibleTools, ['ExitPlanMode', 'AskUserQuestion']);
 });
+
+const EN = "I've created a branch from the clean head and I'm starting to build a private list of how message types are handled.";
+
+test('английская внутренняя кухня в ключевые мысли не попадает', () => {
+  const items = groupWorkStretches([user('a', 1), think(EN, 2), tool('Bash', 3), think(LONG, 4), reply('Готово.', 5)]);
+  const stretch = items[1] as Extract<(typeof items)[number], { _isStretch: true }>;
+  assert.equal(stretch.keyThoughts.length, 1);
+  assert.equal(stretch.keyThoughts[0].content, LONG);
+  assert.equal(describeWorkStretch(stretch), 'Ход работы · 1 мысль · 1 действие');
+});
+
+test('показываются не больше трёх последних русских мыслей', () => {
+  const msgs = [user('a', 1)];
+  for (let i = 0; i < 6; i += 1) { msgs.push(think(`${LONG} Шаг ${i}.`, 2 + i)); msgs.push(tool('Bash', 20 + i)); }
+  msgs.push(reply('Готово.', 40));
+  const items = groupWorkStretches(msgs);
+  const stretch = items[1] as Extract<(typeof items)[number], { _isStretch: true }>;
+  assert.equal(stretch.keyThoughts.length, 3);
+  assert.match(String(stretch.keyThoughts[2].content), /Шаг 5/);
+  const shown = workStretchRows(stretch).filter((row) => !isToolGroupItem(row) && row.isThinking);
+  assert.equal(shown.length, 3);
+});
