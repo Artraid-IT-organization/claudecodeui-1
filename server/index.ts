@@ -489,7 +489,13 @@ async function startServer() {
                     void broadcastSessionUpserted(appSessionId).catch(() => {});
                 },
                 onGone: (appSessionId) => {
-                    void broadcastSessionUpserted(appSessionId).catch(() => {});
+                    // Порядок важен: страница не перечитывает переписку, пока
+                    // считает чат работающим. Сначала «чат свободен», потом
+                    // «перечитай» — иначе последний ответ агента не появлялся
+                    // в открытой вкладке (живой тест 13.09.26).
+                    setTimeout(() => {
+                        void broadcastSessionUpserted(appSessionId).catch(() => {});
+                    }, 1500);
                     const idle = JSON.stringify({
                         kind: 'chat_subscribed',
                         sessionId: appSessionId,
