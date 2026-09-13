@@ -496,12 +496,17 @@ async function startServer() {
                     setTimeout(() => {
                         void broadcastSessionUpserted(appSessionId).catch(() => {});
                     }, 1500);
+                    // Именно «работа завершена», а не «чат свободен»: вкладка
+                    // отбрасывает «свободен», если после своей подписки успела
+                    // отметить чат работающим (защита от устаревших ответов), и
+                    // надпись «работает» висела бы до повторного открытия чата.
                     const idle = JSON.stringify({
-                        kind: 'chat_subscribed',
+                        kind: 'complete',
                         sessionId: appSessionId,
-                        isProcessing: false,
-                        lastSeq: 0,
-                        pendingPermissions: [],
+                        actualSessionId: appSessionId,
+                        provider: 'claude',
+                        exitCode: 0,
+                        success: true,
                         timestamp: new Date().toISOString(),
                     });
                     connectedClients.forEach((client) => {
