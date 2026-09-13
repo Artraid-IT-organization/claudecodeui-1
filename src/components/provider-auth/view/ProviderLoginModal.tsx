@@ -1,8 +1,14 @@
+import { lazy, Suspense } from 'react';
 import { X } from 'lucide-react';
 
-import StandaloneShell from '../../standalone-shell/view/StandaloneShell';
 import { IS_PLATFORM } from '../../../shared/utils';
 import type { LLMProvider } from '../../../types/app';
+
+// Терминал (xterm) — одна из самых тяжёлых частей страницы, а это окно
+// открывают раз в месяц. Обычный импорт тянул его в стартовую загрузку через
+// ProtectedRoute → Onboarding → это окно (замер 14.09.26), и каждый заход на
+// сайт с телефона разбирал терминал, который никто не открывал.
+const StandaloneShell = lazy(() => import('../../standalone-shell/view/StandaloneShell'));
 
 /**
  * For empty shell instances where no project is provided,
@@ -104,7 +110,9 @@ export default function ProviderLoginModal({
         </div>
 
         <div className="flex-1 overflow-hidden">
-          <StandaloneShell project={DEFAULT_PROJECT_FOR_EMPTY_SHELL} command={command} onComplete={handleComplete} minimal={true} />
+          <Suspense fallback={null}>
+            <StandaloneShell project={DEFAULT_PROJECT_FOR_EMPTY_SHELL} command={command} onComplete={handleComplete} minimal={true} />
+          </Suspense>
         </div>
       </div>
     </div>

@@ -8,14 +8,25 @@ import { readVoiceConfig, VOICE_CONFIG_SYNC_EVENT } from '../../../hooks/useVoic
 const STORAGE_KEY = 'uiPreferences';
 const SYNC_EVENT = 'ui-preferences:sync';
 let healthRequest: Promise<boolean> | null = null;
+// Хук стоит в поле ввода и в кнопке озвучки у КАЖДОГО сообщения. Раньше повтор
+// отсекался только пока запрос в полёте, и открытие чата слало проверку голоса
+// снова и снова. Готовый ответ держим минуту: настройка голоса на сервере
+// меняется раз в жизни, а неудачу не запоминаем, чтобы кнопка ожила сама.
+const HEALTH_CACHE_MS = 60_000;
+let healthResult: { value: boolean; at: number } | null = null;
 
 function checkVoiceHealth(): Promise<boolean> {
+  if (healthResult && Date.now() - healthResult.at < HEALTH_CACHE_MS) {
+    return Promise.resolve(healthResult.value);
+  }
   if (healthRequest) return healthRequest;
   const request = authenticatedFetch('/api/voice/health')
     .then(async (response) => {
       if (!response.ok) throw new Error(`Voice health check failed (${response.status})`);
       const data = await response.json();
-      return data?.configured === true;
+      const value = data?.configured === true;
+      healthResult = { value, at: Date.now() };
+      return value;
     })
     .finally(() => {
       healthRequest = null;
