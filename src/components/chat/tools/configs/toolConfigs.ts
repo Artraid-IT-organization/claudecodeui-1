@@ -589,6 +589,18 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
 // без единого слова о том, что агент делает.
 const TOOL_NAME_ALIASES: Record<string, string> = { Agent: 'Task' };
 
+/**
+ * Вызов суб-агента — под старым именем Task или новым Agent.
+ *
+ * Имя сравнивалось жёстко с 'Task' в трёх местах: карточка агента с ходом его
+ * работы, счётчик «Работают агенты: N» на плашке и категория строки. Когда
+ * инструмент переименовали в Agent, всё это молча отвалилось — строка стала
+ * «Agent / Parameters», а плашка писала «Работает: Agent».
+ */
+export function isSubagentToolName(toolName: unknown): boolean {
+  return toolName === 'Task' || toolName === 'Agent';
+}
+
 export function getToolConfig(toolName: string): ToolDisplayConfig {
   return TOOL_CONFIGS[toolName] || TOOL_CONFIGS[TOOL_NAME_ALIASES[toolName] ?? ''] || TOOL_CONFIGS.Default;
 }

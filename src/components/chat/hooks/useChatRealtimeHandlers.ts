@@ -9,6 +9,7 @@ import type { PendingPermissionRequest } from '../types/types';
 import type { ProjectSession, LLMProvider } from '../../../types/app';
 import type { SessionStore, NormalizedMessage } from '../../../stores/useSessionStore';
 import { noteRun } from '../utils/liveRunCursor';
+import { isSubagentToolName } from '../tools/configs/toolConfigs';
 
 const isActionablePermissionRequest = (request: { toolName?: unknown } | null | undefined): boolean => {
   return request?.toolName !== 'ExitPlanMode' && request?.toolName !== 'exit_plan_mode';
@@ -342,7 +343,7 @@ export function useChatRealtimeHandlers({
       if (sid && msg.kind === 'tool_use') {
         const toolName = typeof msg.toolName === 'string' ? msg.toolName : '';
         const toolId = typeof msg.toolId === 'string' ? msg.toolId : '';
-        if (toolName === 'Task' && toolId) {
+        if (isSubagentToolName(toolName) && toolId) {
           const running = activeAgentsRef.current.get(sid) ?? new Set<string>();
           running.add(toolId);
           activeAgentsRef.current.set(sid, running);
