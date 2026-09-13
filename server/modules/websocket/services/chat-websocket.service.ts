@@ -32,6 +32,21 @@ import { getImageAssetsDirForUser, readRequestUserId, resolveWebUserRuntimeConte
  */
 const MAX_CONCURRENT_RUNS_PER_USER = 3;
 
+/**
+ * Как модель ведёт размышления, которые человек видит в ленте.
+ *
+ * Размышления приходят пересказом, и язык и подробность пересказа идут за самой
+ * мыслью: без указания модель думала по-английски и мелко («I need to wait for
+ * both background tasks…»). Егор 13.09.26: «оставь описание только ключевых
+ * размышлений и свёрнуто, описывай их на русском. Должно быть только то, что
+ * мне нужно знать». Приписка добавляется к любому пресету, не заменяя его.
+ */
+const THINKING_LANGUAGE_INSTRUCTION = [
+  'Размышления (thinking) веди на русском языке и коротко.',
+  'В них — только то, что человеку важно знать: что понял о задаче, какое решение принял и почему, что проверил и что из этого вышло.',
+  'Не пересказывай команды и не описывай каждый мелкий шаг.',
+].join(' ');
+
 
 /**
  * Trust boundary for client-supplied image attachments: chat.send options come
@@ -251,7 +266,7 @@ async function handleChatSend(
 
   const runtimeOptions: AnyRecord = {
     ...clientOptions,
-    appendSystemPrompt: presetSystemPrompt || undefined,
+    appendSystemPrompt: [presetSystemPrompt, THINKING_LANGUAGE_INSTRUCTION].filter(Boolean).join('\n\n'),
     // Attachments are re-validated server-side: only direct children of the
     // global upload store may reach provider runtimes or their file tools.
     attachments: uniqueAttachments,

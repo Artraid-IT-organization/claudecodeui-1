@@ -11,11 +11,11 @@ import type {
   ProviderModelsDefinition,
 } from '../../../../types/app';
 import { getIntrinsicMessageKey } from '../../utils/messageKeys';
-import { groupConsecutiveTools, isToolGroupItem } from '../../utils/toolGrouping';
+import { groupWorkStretches, isWorkStretchItem } from '../../utils/workStretch';
 
 import MessageComponent from './MessageComponent';
 import ProviderSelectionEmptyState from './ProviderSelectionEmptyState';
-import ToolGroupContainer from './ToolGroupContainer';
+import WorkStretchContainer from './WorkStretchContainer';
 import ChatExportMenu from './ChatExportMenu';
 
 interface ChatMessagesPaneProps {
@@ -119,9 +119,13 @@ function ChatMessagesPane({
   selectedProject,
 }: ChatMessagesPaneProps) {
   const { t } = useTranslation('chat');
+  // Вся работа между сообщением и ответом — одной свёрнутой строкой «Ход работы»,
+  // как в Claude Code для VS Code; внутри — ключевые мысли и сделанные шаги.
+  // Егор 13.09.26: «должно быть только то, что мне нужно знать в размышлениях и
+  // то что он сделал, только нужные отчётности».
   const groupedVisibleMessages = useMemo(
-    () => groupConsecutiveTools(visibleMessages, Boolean(showThinking)),
-    [visibleMessages, showThinking],
+    () => groupWorkStretches(visibleMessages),
+    [visibleMessages],
   );
 
   // Stable, deterministic keys for the messages rendered this pass.
@@ -144,7 +148,7 @@ function ChatMessagesPane({
       keys.set(message, seen === 0 ? intrinsicKey : `${intrinsicKey}__${seen}`);
     };
     for (const item of groupedVisibleMessages) {
-      if (isToolGroupItem(item)) {
+      if (isWorkStretchItem(item)) {
         item.messages.forEach(assign);
       } else {
         assign(item);
@@ -246,22 +250,21 @@ function ChatMessagesPane({
             return groupedVisibleMessages.map((item, index) => {
               const rowClassName = index >= liveTailFrom ? 'chat-row chat-row--live' : 'chat-row';
 
-              if (isToolGroupItem(item)) {
-                const groupPrevMessage = prevMessage;
+              if (isWorkStretchItem(item)) {
+                const stretchPrevMessage = prevMessage;
                 prevMessage = item.messages[item.messages.length - 1] || prevMessage;
 
                 return (
-                  <div className={rowClassName} key={`tool-group-${getMessageKey(item.messages[0])}`}>
-                  <ToolGroupContainer
-                    group={item}
-                    prevMessage={groupPrevMessage}
+                  <div className={rowClassName} key={`work-stretch-${getMessageKey(item.messages[0])}`}>
+                  <WorkStretchContainer
+                    stretch={item}
+                    prevMessage={stretchPrevMessage}
                     createDiff={createDiff}
                     getMessageKey={getMessageKey}
                     onFileOpen={onFileOpen}
                     onShowSettings={onShowSettings}
                     onGrantToolPermission={onGrantToolPermission}
                     showRawParameters={showRawParameters}
-                    showThinking={showThinking}
                     selectedProject={selectedProject}
                     provider={provider}
                   />
