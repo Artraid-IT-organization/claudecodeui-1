@@ -59,7 +59,7 @@ function AppContentInner() {
   const { sessionId } = useParams<{ sessionId?: string }>();
   const { t } = useTranslation('common');
   const { isMobile } = useDeviceSettings({ trackPWA: false });
-  const { ws, sendMessage, subscribe } = useWebSocket();
+  const { ws, sendMessage, subscribe, isConnected } = useWebSocket();
 
   const {
     processingSessions,
@@ -179,6 +179,28 @@ function AppContentInner() {
     activeSession: selectedSession,
     navigate,
   });
+
+  // Фоновые вкладки тоже подписаны на живые события своих чатов.
+  //
+  // Окно чата подписывается только на ОТКРЫТЫЙ чат. После загрузки страницы
+  // (или открытия приложения) остальные вкладки знали лишь «чат занят» из
+  // списка работающих — и значок на вкладке навсегда оставался «ожидает», хотя
+  // модель думала (живой тест 13.09.26). Подписка на фоновые вкладки приносит
+  // их события — «думает», «пишет ответ», «работает» — и значок на вкладке
+  // становится правдой. Повторяется только при смене набора вкладок или связи,
+  // а не при каждом переименовании.
+  const backgroundTabIdsKey = openTabs
+    .map((tab) => tab.sessionId)
+    .filter((sessionId) => sessionId && sessionId !== activeSessionId)
+    .sort()
+    .join('|');
+  useEffect(() => {
+    if (!isConnected || !backgroundTabIdsKey) return;
+    sendMessage({
+      type: 'chat.subscribe',
+      sessions: backgroundTabIdsKey.split('|').map((sessionId) => ({ sessionId, lastSeq: 0, runStartedAt: null })),
+    });
+  }, [backgroundTabIdsKey, isConnected, sendMessage]);
 
   const handleSessionDeleteWithTabCleanup = useCallback(
     (deletedSessionId: string) => {
