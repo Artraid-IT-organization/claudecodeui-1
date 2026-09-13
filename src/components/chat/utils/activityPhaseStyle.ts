@@ -39,6 +39,6 @@ export const PHASE_SHORT_LABELS: Record<string, string> = {
   waiting: 'Ожидает модель',
   reconnecting: 'Связь восстанавливается',
   starting: 'Запускаю чат',
-  requesting: 'Модель получила запрос',
-  reading: 'Модель читает результат',
+  requesting: 'Запрос отправлен',
+  reading: 'Читает результат',
 };
