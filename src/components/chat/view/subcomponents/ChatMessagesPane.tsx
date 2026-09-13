@@ -50,6 +50,8 @@ interface ChatMessagesPaneProps {
   setInput: Dispatch<SetStateAction<string>>;
   isLoadingMoreMessages: boolean;
   hasMoreMessages: boolean;
+  /** Подгрузить порцию старых сообщений — нажатие на строку «Показано N из M». */
+  onLoadOlderMessages?: () => void;
   totalMessages: number;
   /** Дотянуть всю переписку — нужно меню выгрузки, чтобы сохранить её целиком. */
   loadAllMessages: () => void;
@@ -104,6 +106,7 @@ function ChatMessagesPane({
   setInput,
   isLoadingMoreMessages,
   hasMoreMessages,
+  onLoadOlderMessages,
   totalMessages,
   loadAllMessages,
   sessionMessagesCount,
@@ -230,14 +233,20 @@ function ChatMessagesPane({
 
           {/* Indicator showing there are more messages to load (hide when all loaded) */}
           {hasMoreMessages && !isLoadingMoreMessages && !allMessagesLoaded && (
-            <div className="border-b border-gray-200 py-2 text-center text-sm text-gray-500 dark:border-gray-700 dark:text-gray-400">
+            // Строка нажимается: запасной путь, если прокрутить вверх нечем
+            // или неудобно (Егор, 14.09.26: «прокрутка вверх не работает»).
+            <button
+              type="button"
+              onClick={onLoadOlderMessages}
+              className="block w-full border-b border-gray-200 py-2 text-center text-sm text-gray-500 hover:text-gray-700 dark:border-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+            >
               {totalMessages > 0 && (
                 <span>
                   {t('session.messages.showingOf', { shown: sessionMessagesCount, total: totalMessages })}{' '}
-                  <span className="text-xs">{t('session.messages.scrollToLoad')}</span>
+                  <span className="text-xs underline decoration-dotted underline-offset-2">{t('session.messages.scrollToLoad')}</span>
                 </span>
               )}
-            </div>
+            </button>
           )}
 
           {(() => {

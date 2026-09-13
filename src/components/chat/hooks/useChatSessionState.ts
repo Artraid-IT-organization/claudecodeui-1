@@ -27,6 +27,9 @@ import { knownRunStartedAt } from '../utils/liveRunCursor';
  * сообщений на прокрутку вверх.
  */
 const INITIAL_VISIBLE_MESSAGES = 2000;
+// Догрузка до заполнения экрана: не больше стольких порций подряд и с таким запасом высоты.
+const AUTO_FILL_MAX_ROUNDS = 8;
+const AUTO_FILL_SPARE_PX = 200;
 
 interface UseChatSessionStateArgs {
   isActive: boolean;
@@ -507,6 +510,40 @@ export function useChatSessionState({
     },
     [hasMoreMessages, isActive, isLoadingMoreMessages, selectedProject, selectedSession, sessionStore],
   );
+
+  // Догрузка, пока лента не заполнила экран.
+  //
+  // Старое подтягивается прокруткой вверх, но прокрутка бывает, только когда
+  // ленте есть куда ехать. Если последняя порция — сплошные действия, она
+  // сворачивается в один «Ход работы», лента короче экрана, и прокрутить вверх
+  // нечем: чат навсегда застревал на «Показано 43 из 1302» (Егор, 14.09.26).
+  // Поэтому после каждой отрисовки, пока содержимое не вылезло за экран с
+  // запасом, берём ещё порцию. Потолок кругов — чтобы чат из одних действий не
+  // вытянул всю историю разом; дальше остаётся нажатие на строку-счётчик.
+  const autoFillRoundsRef = useRef(0);
+  const autoFillSessionIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const sessionKey = selectedSession?.id ?? null;
+    if (autoFillSessionIdRef.current !== sessionKey) {
+      autoFillSessionIdRef.current = sessionKey;
+      autoFillRoundsRef.current = 0;
+    }
+    if (!isActive || !hasMoreMessages || isLoadingMoreMessages || isLoadingSessionMessages) return;
+    if (allMessagesLoadedRef.current || isLoadingMoreRef.current) return;
+    if (autoFillRoundsRef.current >= AUTO_FILL_MAX_ROUNDS) return;
+    const container = scrollContainerRef.current;
+    if (!container || container.scrollHeight > container.clientHeight + AUTO_FILL_SPARE_PX) return;
+    autoFillRoundsRef.current += 1;
+    void loadOlderMessages(container);
+  }, [chatMessages.length, hasMoreMessages, isActive, isLoadingMoreMessages, isLoadingSessionMessages, loadOlderMessages, selectedSession?.id]);
+
+  /** Подгрузить порцию старых сообщений по нажатию на строку-счётчик. */
+  const loadOlderMessagesNow = useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (container) {
+      void loadOlderMessages(container);
+    }
+  }, [loadOlderMessages]);
 
   // Recomputes `isUserScrolledUp` from the live DOM position. Called ONLY
   // from a genuine user input gesture (wheel/touchmove — see
@@ -1171,5 +1208,6 @@ export function useChatSessionState({
     handleScroll,
     handleUserScrollGesture,
     requestLatestMessages,
+    loadOlderMessagesNow,
   };
 }

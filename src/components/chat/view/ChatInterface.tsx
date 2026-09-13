@@ -146,6 +146,7 @@ function ChatInterface({
     scrollToBottomAndReset,
     handleUserScrollGesture,
     requestLatestMessages,
+    loadOlderMessagesNow,
   } = useChatSessionState({
     isActive,
     selectedProject,
@@ -506,6 +507,7 @@ function ChatInterface({
           setInput={setInput}
           isLoadingMoreMessages={isLoadingMoreMessages}
           hasMoreMessages={hasMoreMessages}
+          onLoadOlderMessages={loadOlderMessagesNow}
           totalMessages={totalMessages}
           loadAllMessages={loadAllMessages}
           sessionMessagesCount={chatMessages.length}
