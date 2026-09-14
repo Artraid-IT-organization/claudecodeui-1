@@ -49,6 +49,11 @@ interface UseChatSessionStateArgs {
   sessionStore: SessionStore;
 }
 
+/** Порция, прибавившая ленте меньше этого, считается невидимой. */
+const EMPTY_CHAIN_MIN_GROWTH_PX = 200;
+/** Столько невидимых порций подгружается подряд за одно движение. */
+const EMPTY_CHAIN_MAX_ROUNDS = 8;
+
 interface ScrollRestoreState {
   height: number;
   top: number;
@@ -200,6 +205,9 @@ export function useChatSessionState({
   const pendingScrollRestoreRef = useRef<ScrollRestoreState | null>(null);
   // Толчок для восстановления позиции после подгрузки ранних сообщений.
   const [scrollRestoreTick, setScrollRestoreTick] = useState(0);
+  // Сколько порций подряд подгружено без видимой прибавки в ленте.
+  const emptyChainRoundsRef = useRef(0);
+  const loadOlderMessagesRef = useRef<((container: HTMLDivElement) => Promise<boolean>) | null>(null);
   const pendingInitialScrollRef = useRef(true);
   const messagesOffsetRef = useRef(0);
   const scrollPositionRef = useRef({ height: 0, top: 0 });
@@ -547,6 +555,8 @@ export function useChatSessionState({
     void loadOlderMessages(container);
   }, [chatMessages.length, hasMoreMessages, isActive, isLoadingMoreMessages, isLoadingSessionMessages, loadOlderMessages, selectedSession?.id]);
 
+  loadOlderMessagesRef.current = loadOlderMessages;
+
   /** Подгрузить порцию старых сообщений по нажатию на строку-счётчик. */
   const loadOlderMessagesNow = useCallback(() => {
     const container = scrollContainerRef.current;
@@ -708,6 +718,21 @@ export function useChatSessionState({
         container.scrollTop = target;
       }
       pendingScrollRestoreRef.current = null;
+      // Порция из одних действий вливается в верхний свёрнутый «Ход работы»:
+      // новых видимых сообщений нет, лента не растёт, и кажется, что ничего не
+      // подгрузилось (покадровый замер 15.09.26: «1 действие» → «20 действий»,
+      // высота +0, в половине подгрузок). Тогда сразу берём следующую порцию,
+      // пока не появится видимое — не больше EMPTY_CHAIN_MAX_ROUNDS за раз.
+      if (container.scrollHeight - height < EMPTY_CHAIN_MIN_GROWTH_PX
+        && emptyChainRoundsRef.current < EMPTY_CHAIN_MAX_ROUNDS) {
+        emptyChainRoundsRef.current += 1;
+        window.requestAnimationFrame(() => {
+          const current = scrollContainerRef.current;
+          if (current) void loadOlderMessagesRef.current?.(current);
+        });
+      } else {
+        emptyChainRoundsRef.current = 0;
+      }
       // Порция встала на место и позиция восстановлена — можно грузить дальше.
       //
       // Раньше защёлка снималась ТОЛЬКО прокруткой вниз больше чем на 20
