@@ -55,6 +55,34 @@ export function isMostlyRussian(text: string): boolean {
   return cyrillic / letters.length >= 0.5;
 }
 
+/**
+ * Что делается сейчас — описание последнего действия («Проверяю, дошла ли
+ * правка до сайта»), которое ИИ пишет к каждому вызову.
+ *
+ * Показывается прямо в свёрнутой строке: Егор 14.09.26 «я не видел размышлений
+ * минут 15, я должен понимать, на каких ты этапах». Раскрывать свёртку ради
+ * этого не нужно, и перевод не требуется — описания и так по-русски.
+ */
+export function lastStepDescription(messages: ChatMessage[]): string | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message.isToolUse) continue;
+    let input: unknown = message.toolInput;
+    if (typeof input === 'string') {
+      try {
+        input = JSON.parse(input);
+      } catch {
+        continue;
+      }
+    }
+    const description = input && typeof input === 'object'
+      ? (input as { description?: unknown }).description
+      : undefined;
+    if (typeof description === 'string' && description.trim()) return description.trim();
+  }
+  return null;
+}
+
 export function isWorkStretchItem(item: unknown): item is WorkStretchItem {
   return Boolean(item && typeof item === 'object' && (item as WorkStretchItem)._isStretch === true);
 }

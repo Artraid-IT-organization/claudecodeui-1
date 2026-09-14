@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import type { ChatMessage } from '../types/types';
 import { isToolGroupItem } from './toolGrouping';
-import { describeWorkStretch, groupWorkStretches, isMostlyRussian, isWorkStretchItem, workStretchRows } from './workStretch';
+import { describeWorkStretch, groupWorkStretches, isMostlyRussian, isWorkStretchItem, lastStepDescription, workStretchRows } from './workStretch';
 
 const at = (n: number) => `2026-09-13T10:00:${String(n).padStart(2, '0')}Z`;
 const user = (text: string, n = 0): ChatMessage => ({ type: 'user', content: text, timestamp: at(n) });
@@ -81,4 +81,11 @@ test('потолка нет: долгая работа отдаёт на раз�
   assert.equal(shown.length, 12);
   assert.equal(isMostlyRussian(EN), false);
   assert.equal(isMostlyRussian(LONG), true);
+});
+
+test('текущий шаг — описание последнего действия, видно без раскрытия', () => {
+  const withDesc = (name: string, description: string, n: number): ChatMessage => ({ ...tool(name, n), toolInput: JSON.stringify({ command: 'x', description }) });
+  assert.equal(lastStepDescription([withDesc('Bash', 'Собираю сайт', 1), think(LONG, 2), withDesc('Bash', 'Проверяю, дошла ли правка', 3)]), 'Проверяю, дошла ли правка');
+  assert.equal(lastStepDescription([withDesc('Bash', 'Собираю сайт', 1), tool('Read', 2)]), 'Собираю сайт', 'действие без описания пропускается');
+  assert.equal(lastStepDescription([think(LONG, 1)]), null);
 });

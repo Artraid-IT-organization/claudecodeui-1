@@ -5,7 +5,7 @@ import type { ChatMessage, ClaudePermissionSuggestion, PermissionGrantResult, Pr
 import type { Project } from '../../../../types/app';
 import { api } from '../../../../utils/api';
 import { isToolGroupItem } from '../../utils/toolGrouping';
-import { describeWorkStretch, workStretchRows, type WorkStretchItem } from '../../utils/workStretch';
+import { describeWorkStretch, lastStepDescription, workStretchRows, type WorkStretchItem } from '../../utils/workStretch';
 import { Markdown } from './Markdown';
 
 import MessageComponent from './MessageComponent';
@@ -141,6 +141,7 @@ export default function WorkStretchContainer({
 
   const rows = isExpanded ? workStretchRows(stretch, digest.shown) : [];
   const hasThoughts = stretch.thoughts.length > 0;
+  const currentStep = lastStepDescription(stretch.messages);
 
   return (
     <div className="chat-message tool px-3 sm:px-0" data-message-timestamp={stretch.timestamp || undefined}>
@@ -154,7 +155,11 @@ export default function WorkStretchContainer({
           className={`h-3.5 w-3.5 flex-shrink-0 transition-transform ${isExpanded ? 'rotate-90' : ''}`}
           aria-hidden
         />
-        <span className="min-w-0">{label}</span>
+        <span className="flex-shrink-0">{label}</span>
+        {/* Текущий шаг прямо в свёрнутой строке — видно этап, не раскрывая. */}
+        {!isExpanded && currentStep && (
+          <span className="min-w-0 flex-1 truncate text-foreground/70">— {currentStep}</span>
+        )}
       </button>
 
       {isExpanded && (
