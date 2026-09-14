@@ -860,8 +860,15 @@ export function useSessionStore() {
             offset: slot.offset,
           });
           const olderMerge = mergeOlderServerPage(cachedMessages, data.messages);
+          // Сдвигом считается только РОСТ счёта: переписку дописали, пока
+          // грузили. Уменьшение — это сервер сменил оценку на точное число
+          // (первая страница читает хвост файла и оценивает 335, следующая
+          // дочитывает файл до начала и считает 78); отсчёт от конца при этом
+          // не сдвигается. Раньше любое расхождение отбрасывало порцию, а
+          // перечитанная первая страница снова давала 335 — ранние сообщения
+          // не подгружались ни нажатием, ни прокруткой (Егор, 14.09.26).
           const shiftedWhileFetching = (
-            data.total !== expectedTotal
+            data.total > expectedTotal
             || olderMerge.overlapLength > 0
             || !olderPagePrecedesCachedHistory(data.messages, cachedMessages)
           );
