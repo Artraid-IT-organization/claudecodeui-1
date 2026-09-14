@@ -64,13 +64,13 @@ test('история: длинный вывод действия обрезан,
     });
 
     const body = JSON.stringify(page.messages);
-    assert.ok(body.length < 400_000, `порция весит ${body.length} знаков — вывод действия не обрезан`);
+    assert.ok(body.length < 250_000, `порция весит ${body.length} знаков — вывод действия не обрезан`);
 
     const toolUse = page.messages.find((message) => message.kind === 'tool_use');
     assert.ok(toolUse?.toolResult, 'результат чтения приложен к вызову');
     const shown = String((toolUse.toolResult as { content: string }).content);
-    assert.ok(shown.length < 70_000, 'в вызове вывод обрезан');
-    assert.match(shown, /в истории показаны первые 64 тыс\. знаков из 300 тыс\./);
+    assert.ok(shown.length < 20_000, 'в вызове вывод обрезан');
+    assert.match(shown, /в истории показаны первые 16 тыс\. знаков из 300 тыс\./);
 
     const reply = page.messages.find((message) => message.kind === 'text' && message.role === 'assistant');
     assert.equal(reply?.content, LONG_REPLY, 'текст ответа не обрезается');
