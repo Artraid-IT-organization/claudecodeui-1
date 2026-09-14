@@ -15,11 +15,16 @@ import { groupConsecutiveTools, isEmptyThinking, type MessageListItem } from './
  * строками, а ответ модели — это и есть отчёт, он виден целиком. Здесь вся
  * работа между двумя «настоящими» сообщениями (текст человека, текст ответа,
  * ошибка, вопрос с кнопками) становится одним элементом.
+ *
+ * Какие из мыслей показать, решает не этот файл, а разбор по смыслу при
+ * раскрытии (WorkStretchContainer → /api/user/thought-digest): важные этапы
+ * видны все, сколько бы их ни было, рабочие мелочи — нет.
  */
 export interface WorkStretchItem {
   _isStretch: true;
   messages: ChatMessage[];
-  keyThoughts: ChatMessage[];
+  /** Все непустые мысли свёртки по порядку — кандидаты на показ. */
+  thoughts: ChatMessage[];
   actionCount: number;
   /** Сколько действий завершилось ошибкой — в свёрнутой строке это видно сразу. */
   errorCount: number;
@@ -27,22 +32,14 @@ export interface WorkStretchItem {
 }
 
 /**
- * Сколько мыслей показывать в раскрытом «Ходе работы» — последние, то есть к
- * чему модель пришла перед ответом.
- */
-export const KEY_THOUGHTS_LIMIT = 3;
-
-/**
- * Мысль, которую стоит показать человеку: не пустая и не служебная короткая
- * реплика («жду», «проверю»). Язык не важен.
+ * Мысль, которую есть смысл отдавать на разбор: не пустая и не служебная
+ * короткая реплика («жду», «проверю»). Язык не важен — модель размышляет
+ * по-английски, на русский переводит разбор.
  *
- * 13.09.26 здесь отбирались только русские мысли, а модели велели размышлять
- * по-русски. Замеры 14.09 показали, что указание не работает (1 русская проба
- * из 5), и Егор решил иначе: «пусть Claude размышляет на английском, он так
- * умнее, а результаты пусть показываются на русском». Поэтому отбираются мысли
- * на любом языке, а на русский их переводит показ (WorkStretchContainer через
- * /api/user/translate-thoughts). Стены из десятков абзацев не будет:
- * показываются только последние KEY_THOUGHTS_LIMIT.
+ * Потолка в три мысли больше нет. Егор 14.09.26: «если он думал несколько
+ * часов, пусть распишет каждый пункт, который важный, ценный — этап какой-то,
+ * research закончил, критику запустил. Это я хочу видеть. До этого он писал
+ * абсолютно всё, и это было лишним».
  */
 export function isReadableThought(message: ChatMessage): boolean {
   if (!message.isThinking || isEmptyThinking(message)) return false;
@@ -54,7 +51,7 @@ export function isReadableThought(message: ChatMessage): boolean {
 export function isMostlyRussian(text: string): boolean {
   const letters = text.match(/\p{L}/gu) ?? [];
   if (letters.length === 0) return true;
-  const cyrillic = letters.filter((ch) => /[\u0400-\u04FF]/.test(ch)).length;
+  const cyrillic = letters.filter((ch) => /[Ѐ-ӿ]/.test(ch)).length;
   return cyrillic / letters.length >= 0.5;
 }
 
@@ -77,11 +74,6 @@ function isWorkMessage(message: ChatMessage): boolean {
   return false;
 }
 
-/** Ключевые мысли хода работы: не больше последних KEY_THOUGHTS_LIMIT. */
-export function selectKeyThoughts(messages: ChatMessage[]): ChatMessage[] {
-  return messages.filter(isReadableThought).slice(-KEY_THOUGHTS_LIMIT);
-}
-
 export function groupWorkStretches<T extends ChatMessage>(messages: T[]): Array<T | WorkStretchItem> {
   const items: Array<T | WorkStretchItem> = [];
   let run: T[] = [];
@@ -90,13 +82,13 @@ export function groupWorkStretches<T extends ChatMessage>(messages: T[]): Array<
     if (run.length === 0) return;
     const actionCount = run.filter((message) => message.isToolUse).length;
     const errorCount = run.filter((message) => message.isToolUse && message.toolResult?.isError).length;
-    const keyThoughts = selectKeyThoughts(run);
+    const thoughts = run.filter(isReadableThought);
     // Только пустые размышления — показывать нечего, ни строки, ни свёртки.
-    if (actionCount > 0 || keyThoughts.length > 0) {
+    if (actionCount > 0 || thoughts.length > 0) {
       items.push({
         _isStretch: true,
         messages: run,
-        keyThoughts,
+        thoughts,
         actionCount,
         errorCount,
         timestamp: run[0].timestamp,
@@ -125,11 +117,25 @@ function pluralRu(count: number, one: string, few: string, many: string): string
   return many;
 }
 
-/** Подпись свёрнутой строки: «Ход работы · 3 мысли · 9 действий · 1 ошибка». */
-export function describeWorkStretch(item: Pick<WorkStretchItem, 'keyThoughts' | 'actionCount'> & { errorCount?: number }): string {
+/**
+ * Подпись свёрнутой строки: «Ход работы · 5 этапов · 9 действий · 1 ошибка».
+ *
+ * Число этапов известно только после разбора; до него строка честно говорит
+ * «размышления», а не число сырых мыслей, которых покажется меньше.
+ */
+export function describeWorkStretch(item: {
+  actionCount: number;
+  errorCount?: number;
+  /** Сколько важных этапов нашёл разбор; undefined — разбора ещё не было. */
+  stageCount?: number;
+  hasThoughts?: boolean;
+}): string {
   const parts = ['Ход работы'];
-  const thoughts = item.keyThoughts.length;
-  if (thoughts > 0) parts.push(`${thoughts} ${pluralRu(thoughts, 'мысль', 'мысли', 'мыслей')}`);
+  if (typeof item.stageCount === 'number') {
+    if (item.stageCount > 0) parts.push(`${item.stageCount} ${pluralRu(item.stageCount, 'этап', 'этапа', 'этапов')}`);
+  } else if (item.hasThoughts && item.actionCount === 0) {
+    parts.push('размышления');
+  }
   if (item.actionCount > 0) {
     parts.push(`${item.actionCount} ${pluralRu(item.actionCount, 'действие', 'действия', 'действий')}`);
   }
@@ -139,16 +145,18 @@ export function describeWorkStretch(item: Pick<WorkStretchItem, 'keyThoughts' | 
 }
 
 /**
- * Что показать внутри раскрытого «Хода работы»: ключевые мысли и шаги по порядку,
- * подряд идущие одинаковые действия — одной строкой.
+ * Что показать внутри раскрытого «Хода работы»: показываемые мысли и шаги по
+ * порядку, подряд идущие одинаковые действия — одной строкой.
  *
  * Мысли передаются в склейку как ВИДИМЫЕ. Первая версия звала склейку с
  * «размышления скрыты», и та пропускала мысли между действиями как невидимые:
  * подпись обещала «19 мыслей», а раскрытая свёртка показывала одни действия
  * (снимок живой страницы 13.09.26).
  */
-export function workStretchRows(stretch: Pick<WorkStretchItem, 'messages' | 'keyThoughts'>): MessageListItem[] {
-  const keep = new Set(stretch.keyThoughts);
-  const visible = stretch.messages.filter((message) => !message.isThinking || keep.has(message));
+export function workStretchRows(
+  stretch: Pick<WorkStretchItem, 'messages'>,
+  shownThoughts: ReadonlySet<ChatMessage>,
+): MessageListItem[] {
+  const visible = stretch.messages.filter((message) => !message.isThinking || shownThoughts.has(message));
   return groupConsecutiveTools(visible, true);
 }

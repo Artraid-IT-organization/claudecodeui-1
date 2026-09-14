@@ -254,7 +254,7 @@ async function handleChatSend(
     ...clientOptions,
     // Языка размышлений модели не задаём: Егор 14.09.26 — «пусть Claude
     // размышляет на английском, он так умнее». На русский ключевые мысли
-    // переводит показ «Хода работы» (/api/user/translate-thoughts).
+    // отбирает и переводит показ «Хода работы» (/api/user/thought-digest).
     appendSystemPrompt: presetSystemPrompt || undefined,
     // Attachments are re-validated server-side: only direct children of the
     // global upload store may reach provider runtimes or their file tools.

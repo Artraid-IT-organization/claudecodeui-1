@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { buildTranslationPrompt, isTitleStubOnly, parseTranslations, translateThoughts } from '../thought-translation.js';
+import { buildDigestPrompt, digestThoughts, isTitleStubOnly, parseDigest } from '../thought-translation.js';
 
 test('пустышкой считается только файл из одних заголовков', () => {
   assert.equal(isTitleStubOnly('{"type":"ai-title","aiTitle":"Перевод","sessionId":"x"}\n'), true);
@@ -10,25 +10,29 @@ test('пустышкой считается только файл из одни�
   assert.equal(isTitleStubOnly('не json'), false);
 });
 
-test('ответ модели разбирается, в том числе в обёртке ```json', () => {
-  assert.deepEqual(parseTranslations('["Проверяю вход", "Готово"]', 2), ['Проверяю вход', 'Готово']);
-  assert.deepEqual(parseTranslations('```json\n["Один"]\n```', 1), ['Один']);
+test('разбор ответа модели: этапы с русским текстом, мелочи без текста', () => {
+  assert.deepEqual(
+    parseDigest('[{"keep": true, "ru": "Исследование закончено: причина в кэше"}, {"keep": false}]', 2),
+    [{ keep: true, ru: 'Исследование закончено: причина в кэше' }, { keep: false, ru: null }],
+  );
+  assert.deepEqual(parseDigest('```json\n[{"keep": false, "ru": "лишнее"}]\n```', 1), [{ keep: false, ru: null }]);
 });
 
-test('не тот размер или пустые строки — не перевод', () => {
-  assert.equal(parseTranslations('["Один"]', 2), null);
-  assert.equal(parseTranslations('["", "Два"]', 2), null);
-  assert.equal(parseTranslations('Вот перевод: ...', 1), null);
+test('кривой ответ модели — не разбор', () => {
+  assert.equal(parseDigest('[{"keep": true}]', 1), null, 'этап без текста');
+  assert.equal(parseDigest('[{"keep": false}]', 2), null, 'не тот размер');
+  assert.equal(parseDigest('[{"ru": "без решения"}]', 1), null);
+  assert.equal(parseDigest('Вот разбор: ...', 1), null);
 });
 
-test('в запросе к модели — все фрагменты по порядку и просьба вернуть массив', () => {
-  const prompt = buildTranslationPrompt(['first thought', 'second thought']);
-  assert.match(prompt, /JSON-массивом из 2 строк/);
-  assert.ok(prompt.includes('["first thought","second thought"]'));
+test('в запросе к модели — все фрагменты по порядку, признаки этапа и формат ответа', () => {
+  const prompt = buildDigestPrompt(['research done', 'reading file']);
+  assert.ok(prompt.includes('["research done","reading file"]'));
+  assert.match(prompt, /JSON-массивом из 2 элементов/);
+  assert.match(prompt, /критика/);
 });
 
-test('русские мысли возвращаются без обращения к модели', async () => {
-  const text = 'Проверяю, дошла ли правка до сайта, и смотрю снимок.';
-  assert.deepEqual(await translateThoughts([text], null), [text]);
-  assert.deepEqual(await translateThoughts('не массив', null), []);
+test('пустой и неверный ввод модель не вызывает', async () => {
+  assert.deepEqual(await digestThoughts('не массив', null), []);
+  assert.deepEqual(await digestThoughts(['', '   '], null), [null, null]);
 });

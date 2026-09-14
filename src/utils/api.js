@@ -426,8 +426,8 @@ export const api = {
   // User endpoints
   user: {
     usageLimits: () => authenticatedFetch('/api/user/usage-limits'),
-    translateThoughts: (texts) =>
-      authenticatedFetch('/api/user/translate-thoughts', {
+    thoughtDigest: (texts) =>
+      authenticatedFetch('/api/user/thought-digest', {
         method: 'POST',
         body: JSON.stringify({ texts }),
       }),

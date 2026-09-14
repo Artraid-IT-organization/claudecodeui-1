@@ -1,22 +1,30 @@
 /**
- * Перевод ключевых мыслей «Хода работы» на русский.
+ * Разбор мыслей «Хода работы»: какие из них — важные этапы, и их русский текст.
  *
- * Егор 14.09.26: «пусть Claude размышляет на английском, он так умнее, а
- * результаты пусть показываются на русском». Указание «размышляй по-русски»
- * замеры отвергли (1 русская проба из 5) — значит, переводит показ.
+ * Как пришли к этому:
+ * - 13.09.26 Егор на ленту из всех размышлений подряд: «слишком много лишнего».
+ * - 14.09 ограничили показ тремя последними и перевели на русский (модель
+ *   размышляет по-английски — «он так умнее, а результаты пусть показываются
+ *   на русском»).
+ * - 14.09 Егор против потолка: «если он думал несколько часов, пусть распишет
+ *   каждый пункт, который важный, ценный — этап какой-то, research закончил,
+ *   критику запустил. Это я хочу видеть. До этого он писал абсолютно всё».
+ *
+ * Важность — вопрос смысла, длина её не ловит (отбор по длине 13.09 дал стену
+ * из 22 абзацев). Поэтому одна дешёвая модель за один проход решает «этап или
+ * рабочая мелочь» и переводит этапы на русский.
  *
  * Как устроено и почему так:
- * - Переводятся только мысли, которые человек раскрыл (не больше трёх за раз),
- *   и каждая — один раз: результат лежит в файле под хэшем текста. Повторное
- *   открытие того же «Хода работы» подписку не тратит.
- * - Модель — Haiku без размышлений и без инструментов: перевод короткого текста
- *   — работа для самой дешёвой ступени.
- * - Вызов идёт входом того, кто смотрит (его каталог настроек), без записи
- *   разговора на диск (`persistSession: false`) и без чтения настроек с диска
- *   (`settingSources: []`): иначе на каждый перевод срабатывали бы хуки и
- *   CLAUDE.md, а в списке чатов появлялись бы служебные разговоры.
- * - Не вышло (нет входа, таймаут, модель вернула не то) — возвращается `null`,
- *   и показ оставляет исходный текст: мысль не пропадает.
+ * - Разбираются только мысли свёртки, которую человек раскрыл; каждая — один
+ *   раз: итог лежит в файле под хэшем текста, повторное открытие подписку не
+ *   тратит.
+ * - Мысли идут пачками по порядку: модели нужен ход работы, чтобы отличить
+ *   этап от повтора.
+ * - Haiku без размышлений и инструментов, входом того, кто смотрит, без
+ *   записи разговора и без чтения настроек с диска (`settingSources: []`):
+ *   иначе на каждый вызов срабатывали бы хуки и CLAUDE.md.
+ * - Не вышло — `null` на месте мысли, и показ оставляет её как есть: мысль не
+ *   пропадает.
  */
 
 import { createHash } from 'node:crypto';
@@ -26,14 +34,24 @@ import path from 'node:path';
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
 
-export const MAX_THOUGHTS_PER_REQUEST = 3;
+/** Сколько мыслей принимается за один запрос; длинную работу клиент шлёт страницами. */
+export const MAX_THOUGHTS_PER_REQUEST = 60;
+/** Сколько мыслей уходит модели за один вызов. */
+const DIGEST_CHUNK_SIZE = 20;
 const MAX_THOUGHT_CHARS = 4000;
-const TRANSLATE_TIMEOUT_MS = 60 * 1000;
-const CACHE_DIR = path.join(os.homedir(), '.cloudcli', 'thought-translations');
+const DIGEST_TIMEOUT_MS = 120 * 1000;
+const CACHE_DIR = path.join(os.homedir(), '.cloudcli', 'thought-digests');
 /** Своя папка запуска: не общая /tmp, где лежат записи других разговоров. */
-const TRANSLATE_CWD = path.join(os.homedir(), '.cloudcli', 'thought-translate-cwd');
+const DIGEST_CWD = path.join(os.homedir(), '.cloudcli', 'thought-translate-cwd');
 /** Пустышка с заголовком весит сотню байт; всё крупнее — не трогаем. */
 const TITLE_STUB_MAX_BYTES = 4096;
+
+export type ThoughtDigest = {
+  /** Важный этап, который человеку стоит видеть. */
+  keep: boolean;
+  /** Русский текст этапа; для мелочи — null. */
+  ru: string | null;
+};
 
 /**
  * Файл разговора, в котором нет ничего, кроме служебного заголовка.
@@ -79,52 +97,66 @@ async function removeTitleStub(claudeConfigDir: string | null, sessionId: string
 }
 
 function cacheFileFor(text: string): string {
-  return path.join(CACHE_DIR, `${createHash('sha256').update(text).digest('hex')}.txt`);
+  return path.join(CACHE_DIR, `${createHash('sha256').update(text).digest('hex')}.json`);
 }
 
-function isMostlyRussian(text: string): boolean {
+export function isMostlyRussian(text: string): boolean {
   const letters = text.match(/\p{L}/gu) ?? [];
   if (letters.length === 0) return true;
   const cyrillic = letters.filter((ch) => /[Ѐ-ӿ]/.test(ch)).length;
   return cyrillic / letters.length >= 0.5;
 }
 
+function readDigest(value: unknown): ThoughtDigest | null {
+  if (!value || typeof value !== 'object') return null;
+  const { keep, ru } = value as { keep?: unknown; ru?: unknown };
+  if (typeof keep !== 'boolean') return null;
+  if (!keep) return { keep: false, ru: null };
+  if (typeof ru !== 'string' || !ru.trim()) return null;
+  return { keep: true, ru: ru.trim() };
+}
+
 /** Разбор ответа модели отдельно от вызова — чтобы проверять тестом. */
-export function parseTranslations(raw: string, expected: number): string[] | null {
+export function parseDigest(raw: string, expected: number): ThoughtDigest[] | null {
   const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
   try {
     const parsed = JSON.parse(cleaned) as unknown;
     if (!Array.isArray(parsed) || parsed.length !== expected) return null;
-    if (!parsed.every((item) => typeof item === 'string' && item.trim().length > 0)) return null;
-    return (parsed as string[]).map((item) => item.trim());
+    const items = parsed.map(readDigest);
+    return items.every(Boolean) ? (items as ThoughtDigest[]) : null;
   } catch {
     return null;
   }
 }
 
-export function buildTranslationPrompt(texts: string[]): string {
+export function buildDigestPrompt(texts: string[]): string {
   return [
-    'Переведи на русский язык каждый фрагмент из JSON-массива ниже. Это размышления ИИ-помощника во время работы.',
-    'Переводи точно и естественно, ничего не добавляй и не сокращай по смыслу.',
-    'Имена файлов, команды, код, названия программ и адреса оставляй как есть.',
-    `Ответь ТОЛЬКО JSON-массивом из ${texts.length} строк в том же порядке, без пояснений.`,
+    'Ниже по порядку — размышления ИИ-помощника во время одной работы. Человеку, который поручил работу, нужно видеть этапы, но не рабочие мелочи.',
+    '',
+    'Для КАЖДОГО фрагмента реши, важный ли это этап:',
+    '- ВАЖНО (keep: true): закончено исследование или разбор и есть вывод; найдена причина, ошибка или неожиданный факт; принято решение или изменён план и почему; запущена или получена проверка, критика, ревью, замер — и что вышло; подведён итог части работы; упёрлись в препятствие.',
+    '- НЕ ВАЖНО (keep: false): что сейчас прочитать, открыть или запустить без вывода; ожидание; пересказ команды; повтор уже сказанного; мелкие технические шаги.',
+    '',
+    'Для важных дай русский текст: точный перевод по смыслу, можно чуть короче, но без потери сути. Имена файлов, команды, код и названия программ оставляй как есть. Если фрагмент уже по-русски — верни его как есть.',
+    '',
+    `Ответь ТОЛЬКО JSON-массивом из ${texts.length} элементов в том же порядке: {"keep": true, "ru": "…"} или {"keep": false}. Без пояснений.`,
     '',
     JSON.stringify(texts),
   ].join('\n');
 }
 
-async function askModel(texts: string[], claudeConfigDir: string | null): Promise<string[] | null> {
+async function askModel(texts: string[], claudeConfigDir: string | null): Promise<ThoughtDigest[] | null> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (typeof value === 'string') env[key] = value;
   }
   if (claudeConfigDir) env.CLAUDE_CONFIG_DIR = claudeConfigDir;
-  await mkdir(TRANSLATE_CWD, { recursive: true }).catch(() => undefined);
+  await mkdir(DIGEST_CWD, { recursive: true }).catch(() => undefined);
 
   const instance = query({
-    prompt: buildTranslationPrompt(texts),
+    prompt: buildDigestPrompt(texts),
     options: {
-      cwd: TRANSLATE_CWD,
+      cwd: DIGEST_CWD,
       model: 'haiku',
       tools: [],
       maxTurns: 1,
@@ -143,7 +175,7 @@ async function askModel(texts: string[], claudeConfigDir: string | null): Promis
     } catch {
       // Цикл ниже просто закончится.
     }
-  }, TRANSLATE_TIMEOUT_MS);
+  }, DIGEST_TIMEOUT_MS);
   timer.unref?.();
 
   try {
@@ -167,54 +199,64 @@ async function askModel(texts: string[], claudeConfigDir: string | null): Promis
     }
   }
 
-  return parseTranslations(resultText, texts.length);
+  return parseDigest(resultText, texts.length);
 }
 
-/** Один и тот же набор мыслей из двух вкладок переводится одним вызовом. */
-const inFlight = new Map<string, Promise<string[] | null>>();
+/** Одна и та же пачка из двух вкладок разбирается одним вызовом. */
+const inFlight = new Map<string, Promise<ThoughtDigest[] | null>>();
+
+async function digestChunk(texts: string[], claudeConfigDir: string | null): Promise<ThoughtDigest[] | null> {
+  const key = `${claudeConfigDir ?? ''}\n${texts.join('\n \n')}`;
+  let pending = inFlight.get(key);
+  if (!pending) {
+    pending = askModel(texts, claudeConfigDir).finally(() => inFlight.delete(key));
+    inFlight.set(key, pending);
+  }
+  return pending;
+}
 
 /**
- * Переводы в том же порядке; `null` на месте мысли, которую перевести не
- * удалось. Русский текст возвращается как есть, без вызова модели.
+ * Итог разбора в том же порядке; `null` на месте мысли, которую разобрать не
+ * удалось.
  */
-export async function translateThoughts(
+export async function digestThoughts(
   rawTexts: unknown,
   claudeConfigDir: string | null,
-): Promise<Array<string | null>> {
+): Promise<Array<ThoughtDigest | null>> {
   const texts = (Array.isArray(rawTexts) ? rawTexts : [])
     .slice(0, MAX_THOUGHTS_PER_REQUEST)
     .map((item) => (typeof item === 'string' ? item.slice(0, MAX_THOUGHT_CHARS) : ''));
 
-  const results: Array<string | null> = texts.map((text) => (text.trim() && isMostlyRussian(text) ? text : null));
+  const results: Array<ThoughtDigest | null> = texts.map(() => null);
   const missing: number[] = [];
 
   await Promise.all(texts.map(async (text, index) => {
-    if (results[index] !== null || !text.trim()) return;
+    if (!text.trim()) return;
     try {
-      results[index] = (await readFile(cacheFileFor(text), 'utf-8')) || null;
+      results[index] = readDigest(JSON.parse(await readFile(cacheFileFor(text), 'utf-8')));
     } catch {
-      // Ещё не переводили.
+      // Ещё не разбирали.
     }
     if (results[index] === null) missing.push(index);
   }));
 
   if (missing.length === 0) return results;
-
   missing.sort((a, b) => a - b);
-  const batch = missing.map((index) => texts[index]);
-  const key = `${claudeConfigDir ?? ''}\n${batch.join('\n \n')}`;
-  let pending = inFlight.get(key);
-  if (!pending) {
-    pending = askModel(batch, claudeConfigDir).finally(() => inFlight.delete(key));
-    inFlight.set(key, pending);
-  }
-  const translated = await pending;
-  if (!translated) return results;
-
   await mkdir(CACHE_DIR, { recursive: true }).catch(() => undefined);
-  await Promise.all(missing.map(async (index, position) => {
-    results[index] = translated[position];
-    await writeFile(cacheFileFor(texts[index]), translated[position], 'utf-8').catch(() => undefined);
-  }));
+
+  for (let start = 0; start < missing.length; start += DIGEST_CHUNK_SIZE) {
+    const chunk = missing.slice(start, start + DIGEST_CHUNK_SIZE);
+    const digests = await digestChunk(chunk.map((index) => texts[index]), claudeConfigDir);
+    if (!digests) continue;
+    await Promise.all(chunk.map(async (index, position) => {
+      const digest = digests[position];
+      // Русскую мысль показываем своими словами автора, а не пересказом модели.
+      const final: ThoughtDigest = digest.keep && isMostlyRussian(texts[index])
+        ? { keep: true, ru: texts[index] }
+        : digest;
+      results[index] = final;
+      await writeFile(cacheFileFor(texts[index]), JSON.stringify(final), 'utf-8').catch(() => undefined);
+    }));
+  }
   return results;
 }

@@ -5,7 +5,7 @@ import type { ChatMessage, ClaudePermissionSuggestion, PermissionGrantResult, Pr
 import type { Project } from '../../../../types/app';
 import { api } from '../../../../utils/api';
 import { isToolGroupItem } from '../../utils/toolGrouping';
-import { describeWorkStretch, isMostlyRussian, workStretchRows, type WorkStretchItem } from '../../utils/workStretch';
+import { describeWorkStretch, workStretchRows, type WorkStretchItem } from '../../utils/workStretch';
 import { Markdown } from './Markdown';
 
 import MessageComponent from './MessageComponent';
@@ -30,77 +30,93 @@ interface WorkStretchContainerProps {
   provider: Provider | string;
 }
 
-/** Переводы на время жизни вкладки: повторное раскрытие не ходит на сервер. */
-const translatedThoughts = new Map<string, string>();
+type ThoughtDigest = { keep: boolean; ru: string | null };
+type DigestState = 'idle' | 'loading' | 'done' | 'failed';
 
-type TranslationState = 'idle' | 'loading' | 'done' | 'failed';
+/** Итоги разбора на время жизни вкладки: повторное раскрытие не ходит на сервер. */
+const digestByText = new Map<string, ThoughtDigest>();
+/** Столько мыслей уходит на сервер за один запрос (там же и потолок). */
+const DIGEST_PAGE_SIZE = 60;
 
 /**
- * Русский текст ключевых мыслей.
+ * Какие мысли — важные этапы, и их русский текст.
  *
- * Модель размышляет по-английски — так она сильнее (Егор 14.09.26: «пусть
- * Claude размышляет на английском… результаты пусть показываются на русском»).
- * Перевод запрашивается только при раскрытии «Хода работы» и только для
- * нерусских мыслей; сервер переводит каждую один раз. Не вышло — остаётся
- * исходный текст с пометкой: мысль не пропадает.
+ * Модель размышляет по-английски — так она сильнее. Показ отбирает этапы
+ * (закончено исследование, запущена критика, вывод, решение) и переводит их;
+ * рабочие мелочи не показывает. Потолка по числу нет: долгая работа — много
+ * этапов (Егор 14.09.26). Разбор запрашивается только при раскрытии. Не вышло
+ * — видны все мысли как есть с пометкой: ничего не пропадает.
  */
-function useRussianThoughts(thoughts: ChatMessage[], enabled: boolean) {
+function useThoughtDigest(thoughts: ChatMessage[], enabled: boolean) {
   const texts = useMemo(() => thoughts.map((message) => String(message.content ?? '')), [thoughts]);
-  const pending = useMemo(
-    () => texts.filter((text) => !isMostlyRussian(text) && !translatedThoughts.has(text)),
-    [texts],
-  );
-  const [state, setState] = useState<TranslationState>(pending.length > 0 ? 'idle' : 'done');
+  const [state, setState] = useState<DigestState>('idle');
+  const [, setVersion] = useState(0);
 
   useEffect(() => {
-    if (!enabled || pending.length === 0) return;
+    if (!enabled) return;
+    const missing = [...new Set(texts.filter((text) => !digestByText.has(text)))];
+    if (missing.length === 0) {
+      setState('done');
+      return;
+    }
     let cancelled = false;
     setState('loading');
     void (async () => {
-      try {
-        const response = await api.user.translateThoughts(pending);
-        const data = response.ok ? ((await response.json()) as { translations?: Array<string | null> }) : null;
-        const translations = data?.translations ?? [];
-        let allDone = translations.length === pending.length;
-        pending.forEach((text, index) => {
-          const translated = translations[index];
-          if (typeof translated === 'string' && translated.trim()) {
-            translatedThoughts.set(text, translated);
-          } else {
-            allDone = false;
-          }
-        });
-        if (!cancelled) setState(allDone ? 'done' : 'failed');
-      } catch {
-        if (!cancelled) setState('failed');
+      let failed = false;
+      for (let start = 0; start < missing.length; start += DIGEST_PAGE_SIZE) {
+        const page = missing.slice(start, start + DIGEST_PAGE_SIZE);
+        try {
+          const response = await api.user.thoughtDigest(page);
+          const data = response.ok ? ((await response.json()) as { items?: Array<ThoughtDigest | null> }) : null;
+          const items = data?.items ?? [];
+          page.forEach((text, index) => {
+            const item = items[index];
+            if (item && typeof item.keep === 'boolean') {
+              digestByText.set(text, { keep: item.keep, ru: typeof item.ru === 'string' ? item.ru : null });
+            } else {
+              failed = true;
+            }
+          });
+        } catch {
+          failed = true;
+        }
+        if (cancelled) return;
+        // Долгая работа разбирается страницами — этапы появляются по мере готовности.
+        setVersion((value) => value + 1);
       }
+      if (!cancelled) setState(failed ? 'failed' : 'done');
     })();
     return () => {
       cancelled = true;
     };
-  }, [enabled, pending]);
+  }, [enabled, texts]);
+
+  const known = thoughts.every((message) => digestByText.has(String(message.content ?? '')));
+  const shown = new Set<ChatMessage>();
+  for (const message of thoughts) {
+    const digest = digestByText.get(String(message.content ?? ''));
+    if (digest ? digest.keep : state === 'failed') shown.add(message);
+  }
 
   return {
     state,
-    textFor: (message: ChatMessage): { text: string; translated: boolean; original: boolean } => {
-      const source = String(message.content ?? '');
-      if (isMostlyRussian(source)) return { text: source, translated: false, original: false };
-      const translated = translatedThoughts.get(source);
-      return translated
-        ? { text: translated, translated: true, original: false }
-        : { text: source, translated: false, original: true };
+    shown,
+    stageCount: known ? shown.size : undefined,
+    textFor: (message: ChatMessage): string => {
+      const digest = digestByText.get(String(message.content ?? ''));
+      return digest?.keep && digest.ru ? digest.ru : String(message.content ?? '');
     },
   };
 }
 
 /**
- * Свёрнутая строка «Ход работы · 3 мысли · 9 действий» между сообщением человека
- * и ответом ИИ — как работа в Claude Code для VS Code и в приложении Claude.
+ * Свёрнутая строка «Ход работы · 5 этапов · 9 действий» между сообщением
+ * человека и ответом ИИ — как работа в Claude Code для VS Code и в приложении
+ * Claude.
  *
- * По нажатию раскрываются в порядке событий только ключевые размышления
- * (служебные короткие «проверю», «жду» не показываются) — по-русски, переводом —
- * и сделанные шаги одной строкой на действие, с их описанием. Ответ модели стоит
- * ниже целиком: это и есть отчёт.
+ * По нажатию раскрываются в порядке событий важные этапы размышлений — все, по
+ * -русски — и сделанные шаги одной строкой на действие, с их описанием. Ответ
+ * модели стоит ниже целиком: это и есть отчёт.
  */
 export default function WorkStretchContainer({
   stretch,
@@ -115,10 +131,16 @@ export default function WorkStretchContainer({
   provider,
 }: WorkStretchContainerProps) {
   const [isExpanded, setIsExpanded] = useState(false);
-  const label = describeWorkStretch(stretch);
+  const digest = useThoughtDigest(stretch.thoughts, isExpanded);
+  const label = describeWorkStretch({
+    actionCount: stretch.actionCount,
+    errorCount: stretch.errorCount,
+    stageCount: digest.stageCount,
+    hasThoughts: stretch.thoughts.length > 0,
+  });
 
-  const rows = useMemo(() => (isExpanded ? workStretchRows(stretch) : []), [isExpanded, stretch]);
-  const russian = useRussianThoughts(stretch.keyThoughts, isExpanded);
+  const rows = isExpanded ? workStretchRows(stretch, digest.shown) : [];
+  const hasThoughts = stretch.thoughts.length > 0;
 
   return (
     <div className="chat-message tool px-3 sm:px-0" data-message-timestamp={stretch.timestamp || undefined}>
@@ -137,6 +159,15 @@ export default function WorkStretchContainer({
 
       {isExpanded && (
         <div className="ml-2 mt-1 space-y-2 border-l border-border/60 pl-3">
+          {hasThoughts && digest.state === 'loading' && (
+            <p className="animate-pulse text-[12px] text-muted-foreground/70">Отбираю важные этапы размышлений…</p>
+          )}
+          {hasThoughts && digest.state === 'failed' && (
+            <p className="text-[11px] text-muted-foreground/60">Отобрать важное не удалось — мысли показаны как есть.</p>
+          )}
+          {rows.length === 0 && digest.state === 'done' && (
+            <p className="text-[12px] text-muted-foreground/70">Важных этапов в размышлениях нет.</p>
+          )}
           {rows.map((item, index) => {
             if (isToolGroupItem(item)) {
               return (
@@ -157,24 +188,13 @@ export default function WorkStretchContainer({
               );
             }
             if (item.isThinking) {
-              const shown = russian.textFor(item);
-              if (shown.original && russian.state === 'loading') {
-                return (
-                  <p key={getMessageKey(item)} className="animate-pulse text-[13px] leading-[1.55] text-muted-foreground/70">
-                    Перевожу мысль…
-                  </p>
-                );
-              }
               return (
                 <div
                   key={getMessageKey(item)}
                   className="prose prose-sm max-w-none text-[13px] leading-[1.55] text-muted-foreground dark:prose-invert"
-                  data-thought-translated={shown.translated || undefined}
+                  data-thought-stage
                 >
-                  <Markdown>{shown.text}</Markdown>
-                  {shown.original && russian.state === 'failed' && (
-                    <p className="mt-0.5 text-[11px] text-muted-foreground/60">Перевести не удалось — исходный текст.</p>
-                  )}
+                  <Markdown>{digest.textFor(item)}</Markdown>
                 </div>
               );
             }

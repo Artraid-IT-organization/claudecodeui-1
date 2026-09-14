@@ -46,11 +46,11 @@ export function createUserRouter(service: ReturnType<typeof createUserService>):
     }
   });
 
-  // Ключевые мысли «Хода работы» по-русски — переводом, входом того, кто смотрит.
-  router.post('/translate-thoughts', async (req, res, next) => {
+  // Важные этапы среди мыслей «Хода работы» по-русски, входом того, кто смотрит.
+  router.post('/thought-digest', async (req, res, next) => {
     try {
       const body = req.body as { texts?: unknown };
-      res.json(await service.translateThoughts(readUserId(req), body.texts));
+      res.json(await service.digestThoughts(readUserId(req), body.texts));
     } catch (error) {
       next(error);
     }

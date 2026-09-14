@@ -7,7 +7,7 @@ import { getLiveLimits } from '@/modules/providers/index.js';
 import { getWebUserClaudeConfigDir } from '@/shared/web-user-paths.js';
 import { resolveWebUserRuntimeContext } from '@/shared/web-user-runtime.js';
 import { getOfficialUsage } from '@/modules/user/official-usage.js';
-import { translateThoughts } from '@/modules/user/thought-translation.js';
+import { digestThoughts } from '@/modules/user/thought-translation.js';
 
 /** Как окна из потока называются в кэше CLI. */
 const LIVE_WINDOW_BY_KIND: Record<string, string> = {
@@ -114,10 +114,10 @@ export function createUserService(dependencies: UserDependencies) {
       };
     },
 
-    /** Ключевые мысли «Хода работы» по-русски — входом того, кто смотрит. */
-    async translateThoughts(userId: number, texts: unknown) {
+    /** Важные этапы среди мыслей «Хода работы» и их русский текст — входом того, кто смотрит. */
+    async digestThoughts(userId: number, texts: unknown) {
       const claudeConfigDir = resolveWebUserRuntimeContext(Number.isFinite(userId) ? userId : null).claudeConfigDir;
-      return { success: true, translations: await translateThoughts(texts, claudeConfigDir) };
+      return { success: true, items: await digestThoughts(texts, claudeConfigDir) };
     },
 
     /**

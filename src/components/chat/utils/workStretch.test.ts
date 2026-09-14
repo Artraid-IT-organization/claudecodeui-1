@@ -11,6 +11,8 @@ const reply = (text: string, n = 0): ChatMessage => ({ type: 'assistant', conten
 const think = (text: string, n = 0): ChatMessage => ({ type: 'assistant', isThinking: true, content: text, timestamp: at(n) });
 const tool = (name: string, n = 0): ChatMessage => ({ type: 'assistant', isToolUse: true, toolName: name, timestamp: at(n) });
 const LONG = 'Причина в том, что счётчик событий не сбрасывается между работами, поэтому вкладка теряет сигнал «думает».';
+const EN = "I've created a branch from the clean head and I'm starting to build a private list of how message types are handled.";
+type Stretch = Extract<ReturnType<typeof groupWorkStretches>[number], { _isStretch: true }>;
 
 test('вся работа между сообщением и ответом — один элемент', () => {
   const items = groupWorkStretches([
@@ -18,9 +20,9 @@ test('вся работа между сообщением и ответом — 
   ]);
   assert.equal(items.length, 3);
   assert.equal(isWorkStretchItem(items[1]), true);
-  const stretch = items[1] as Extract<(typeof items)[number], { _isStretch: true }>;
+  const stretch = items[1] as Stretch;
   assert.equal(stretch.actionCount, 3);
-  assert.equal(stretch.keyThoughts.length, 1, 'короткое «жду» — не ключевая мысль');
+  assert.equal(stretch.thoughts.length, 1, 'короткое «жду» даже на разбор не идёт');
   assert.equal(stretch.messages.length, 5);
 });
 
@@ -36,27 +38,29 @@ test('только пустые размышления не дают ни стр
   assert.equal(items.length, 2);
 });
 
-test('подпись строки по-русски и с правильными окончаниями', () => {
-  assert.equal(describeWorkStretch({ keyThoughts: [think(LONG)], actionCount: 1 }), 'Ход работы · 1 мысль · 1 действие');
-  assert.equal(describeWorkStretch({ keyThoughts: [think(LONG), think(LONG), think(LONG)], actionCount: 12 }), 'Ход работы · 3 мысли · 12 действий');
-  assert.equal(describeWorkStretch({ keyThoughts: [], actionCount: 5 }), 'Ход работы · 5 действий');
+test('подпись строки: этапы после разбора, до разбора — без выдуманного числа', () => {
+  assert.equal(describeWorkStretch({ stageCount: 1, actionCount: 1 }), 'Ход работы · 1 этап · 1 действие');
+  assert.equal(describeWorkStretch({ stageCount: 12, actionCount: 22 }), 'Ход работы · 12 этапов · 22 действия');
+  assert.equal(describeWorkStretch({ actionCount: 5, hasThoughts: true }), 'Ход работы · 5 действий');
+  assert.equal(describeWorkStretch({ actionCount: 0, hasThoughts: true }), 'Ход работы · размышления');
+  assert.equal(describeWorkStretch({ stageCount: 0, actionCount: 3 }), 'Ход работы · 3 действия');
 });
 
-test('раскрытый ход работы показывает ключевые мысли между действиями', () => {
+test('раскрытый ход работы показывает отобранные мысли между действиями', () => {
   const items = groupWorkStretches([
-    user('почини', 1), tool('Bash', 2), think(LONG, 3), tool('Bash', 4), think('жду', 5), tool('Bash', 6), reply('Готово.', 7),
+    user('почини', 1), tool('Bash', 2), think(LONG, 3), tool('Bash', 4), think(EN, 5), tool('Bash', 6), reply('Готово.', 7),
   ]);
-  const stretch = items[1] as Extract<(typeof items)[number], { _isStretch: true }>;
-  const rows = workStretchRows(stretch);
+  const stretch = items[1] as Stretch;
+  const rows = workStretchRows(stretch, new Set([stretch.thoughts[0]]));
   const thoughts = rows.filter((row) => !isToolGroupItem(row) && row.isThinking);
-  assert.equal(thoughts.length, 1, 'ключевая мысль должна остаться видимой');
+  assert.equal(thoughts.length, 1, 'показана только отобранная мысль');
   assert.equal(rows.length, 3, 'действие · мысль · два действия подряд одной строкой');
 });
 
 test('ошибки действий видны в свёрнутой строке', () => {
   const failed: ChatMessage = { ...tool('Bash', 3), toolResult: { content: 'boom', isError: true } as ChatMessage['toolResult'] };
   const items = groupWorkStretches([user('a', 1), tool('Read', 2), failed, reply('Не вышло.', 4)]);
-  const stretch = items[1] as Extract<(typeof items)[number], { _isStretch: true }>;
+  const stretch = items[1] as Stretch;
   assert.equal(stretch.errorCount, 1);
   assert.equal(describeWorkStretch(stretch), 'Ход работы · 2 действия · 1 ошибка');
 });
@@ -67,25 +71,14 @@ test('план на утверждение и вопрос с вариантам
   assert.deepEqual(visibleTools, ['ExitPlanMode', 'AskUserQuestion']);
 });
 
-const EN = "I've created a branch from the clean head and I'm starting to build a private list of how message types are handled.";
-
-test('английские мысли тоже ключевые — на русский их переводит показ', () => {
-  const items = groupWorkStretches([user('a', 1), think(EN, 2), tool('Bash', 3), think(LONG, 4), reply('Готово.', 5)]);
-  const stretch = items[1] as Extract<(typeof items)[number], { _isStretch: true }>;
-  assert.equal(stretch.keyThoughts.length, 2);
-  assert.equal(describeWorkStretch(stretch), 'Ход работы · 2 мысли · 1 действие');
+test('потолка нет: долгая работа отдаёт на разбор все мысли, на любом языке', () => {
+  const msgs = [user('a', 1)];
+  for (let i = 0; i < 12; i += 1) { msgs.push(think(`${i % 2 ? EN : LONG} Шаг ${i}.`, 2 + i)); msgs.push(tool('Bash', 20 + i)); }
+  msgs.push(reply('Готово.', 50));
+  const stretch = groupWorkStretches(msgs)[1] as Stretch;
+  assert.equal(stretch.thoughts.length, 12);
+  const shown = workStretchRows(stretch, new Set(stretch.thoughts)).filter((row) => !isToolGroupItem(row) && row.isThinking);
+  assert.equal(shown.length, 12);
   assert.equal(isMostlyRussian(EN), false);
   assert.equal(isMostlyRussian(LONG), true);
-});
-
-test('показываются не больше трёх последних мыслей', () => {
-  const msgs = [user('a', 1)];
-  for (let i = 0; i < 6; i += 1) { msgs.push(think(`${LONG} Шаг ${i}.`, 2 + i)); msgs.push(tool('Bash', 20 + i)); }
-  msgs.push(reply('Готово.', 40));
-  const items = groupWorkStretches(msgs);
-  const stretch = items[1] as Extract<(typeof items)[number], { _isStretch: true }>;
-  assert.equal(stretch.keyThoughts.length, 3);
-  assert.match(String(stretch.keyThoughts[2].content), /Шаг 5/);
-  const shown = workStretchRows(stretch).filter((row) => !isToolGroupItem(row) && row.isThinking);
-  assert.equal(shown.length, 3);
 });
