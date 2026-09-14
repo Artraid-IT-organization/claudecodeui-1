@@ -107,3 +107,29 @@ export function removeOptimisticUserEchoes(
     return false;
   });
 }
+
+/**
+ * Длинный живой ответ, который уже лежит на диске слово в слово — где угодно
+ * в загруженной части переписки, а не только «в том же ходе».
+ *
+ * Сверка по ходу считает ходы по сообщениям человека, а на диске бывают
+ * сообщения, которых нет в живом потоке (уведомления о фоновых задачах,
+ * вложения). Счёт съезжает, ход находится не тот, и живая копия остаётся:
+ * 14.09.26 у Егора ответ «Как я понял задачу. Нужен документ…» встал в ленту
+ * второй раз ниже, через «Ход работы» и другой ответ. Совпадение длинного
+ * текста целиком случайным не бывает, поэтому здесь ход не нужен.
+ */
+export function isLongReplyAlreadyOnServer(
+  message: NormalizedMessage,
+  serverMessages: NormalizedMessage[],
+): boolean {
+  const content = (message.content || '').trim();
+  if (content.length < 40) {
+    return false;
+  }
+  return serverMessages.some((serverMessage) => (
+    serverMessage.kind === 'text'
+    && serverMessage.role === 'assistant'
+    && (serverMessage.content || '').trim() === content
+  ));
+}

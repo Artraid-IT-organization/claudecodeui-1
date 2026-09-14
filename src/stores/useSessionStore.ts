@@ -12,7 +12,7 @@ import { useCallback, useMemo, useRef, useState } from 'react';
 import { authenticatedFetch } from '../utils/api';
 import type { LLMProvider } from '../types/app';
 
-import { removeOptimisticUserEchoes } from './sessionMessageReconciliation';
+import { isLongReplyAlreadyOnServer, removeOptimisticUserEchoes } from './sessionMessageReconciliation';
 import {
   buildSessionMessagesUrl,
   hasReachedCachedTailTimeBoundary,
@@ -507,6 +507,9 @@ function pruneRealtimeSupersededByServer(
 
     if (message.kind === 'text' && message.role === 'assistant') {
       if (isAssistantTextEchoedInSameTurnOnServer(message, serverMessages, realtimeMessages)) {
+        return false;
+      }
+      if (isLongReplyAlreadyOnServer(message, serverMessages)) {
         return false;
       }
       return true;
