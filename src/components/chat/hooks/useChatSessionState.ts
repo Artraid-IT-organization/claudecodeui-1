@@ -198,6 +198,8 @@ export function useChatSessionState({
   const allMessagesLoadedRef = useRef(false);
   const topLoadLockRef = useRef(false);
   const pendingScrollRestoreRef = useRef<ScrollRestoreState | null>(null);
+  // Толчок для восстановления позиции после подгрузки ранних сообщений.
+  const [scrollRestoreTick, setScrollRestoreTick] = useState(0);
   const pendingInitialScrollRef = useRef(true);
   const messagesOffsetRef = useRef(0);
   const scrollPositionRef = useRef({ height: 0, top: 0 });
@@ -461,16 +463,7 @@ export function useChatSessionState({
       if (!hasMoreMessages || !selectedSession || !selectedProject) return false;
 
       isLoadingMoreRef.current = true;
-      // Позиция передаётся на восстановление ДО запроса, а не после.
-      //
-      // Раньше она ставилась в очередь, когда ответ уже пришёл, а хранилище
-      // перерисовывало ленту чуть раньше — в ту отрисовку восстанавливать было
-      // нечего, и лента оставалась у самого верха, на только что подгруженных
-      // сообщениях (замер 15.09.26: в 2–3 подгрузках из 6–8 прокрутка 68 вместо
-      // прежнего места). Лента скакала, и тут же уходил запрос следующей порции
-      // — Егор: «очень плохо загружаются старые сообщения».
-      pendingScrollRestoreRef.current = captureScrollRestoreState(container);
-      let prepended = false;
+      const scrollRestoreState = captureScrollRestoreState(container);
 
       try {
         const result = await sessionStore.fetchMore(selectedSession.id, {
@@ -501,7 +494,15 @@ export function useChatSessionState({
           return false;
         }
 
-        prepended = true;
+        pendingScrollRestoreRef.current = scrollRestoreState;
+        // Восстановление должно сработать в ближайшей отрисовке, даже если
+        // число сообщений в ней уже не меняется: хранилище иногда дорисовывает
+        // порцию раньше, чем сюда вернулся ответ, и без этого толчка позиция
+        // оставалась у самого верха (замер 15.09.26: прокрутка 68 в 2–3
+        // подгрузках из 6–8 — лента скакала). Возврат идёт по сообщению,
+        // стоявшему первым на экране, поэтому место встаёт верно и тогда,
+        // когда новые сообщения уже нарисованы.
+        setScrollRestoreTick((tick) => tick + 1);
         setVisibleMessageCount((prev) => prev + SESSION_MESSAGES_PAGE_SIZE);
         if (!slot.hasMore) {
           allMessagesLoadedRef.current = true;
@@ -515,9 +516,6 @@ export function useChatSessionState({
         return true;
       } finally {
         isLoadingMoreRef.current = false;
-        // Ничего не добавилось — восстанавливать нечего, иначе позиция
-        // сработала бы невпопад при следующей отрисовке.
-        if (!prepended) pendingScrollRestoreRef.current = null;
       }
     },
     [hasMoreMessages, isActive, isLoadingMoreMessages, selectedProject, selectedSession, sessionStore],
@@ -725,7 +723,7 @@ export function useChatSessionState({
       markProgrammaticScroll(target);
       container.scrollTop = target;
     }
-  }, [chatMessages.length, isActive, isUserScrolledUp, markProgrammaticScroll]);
+  }, [chatMessages.length, isActive, isUserScrolledUp, markProgrammaticScroll, scrollRestoreTick]);
 
   // Reset scroll/pagination state on session change
   useEffect(() => {
