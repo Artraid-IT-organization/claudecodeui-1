@@ -26,6 +26,51 @@ const RAW_LINES_PER_MESSAGE = 3;
 /** Нижняя граница окна: у коротких страниц запас в три строки ничего не даёт. */
 const MIN_RAW_WINDOW_LINES = 200;
 
+/**
+ * Строка длиннее этого в вызове или результате действия приходит в историю
+ * обрезанной.
+ *
+ * Замер 15.09.26: одно чтение файла весило 1 МБ и ехало дважды (в вызове и в
+ * отдельном результате), порция из 60 сообщений — до 3,5 МБ. Телефон разбирал
+ * это при каждой подгрузке ранних сообщений, лента подвисала до 1,4 с. Лента
+ * показывает вывод действия свёрнутым, и 64 тыс. знаков хватает с запасом;
+ * живой поток ответа не обрезается.
+ */
+const HISTORY_TOOL_STRING_LIMIT = 64_000;
+
+function trimOversizedToolStrings(value: unknown, depth = 0): unknown {
+  if (typeof value === 'string') {
+    if (value.length <= HISTORY_TOOL_STRING_LIMIT) {
+      return value;
+    }
+    const shown = Math.round(HISTORY_TOOL_STRING_LIMIT / 1000);
+    const whole = Math.round(value.length / 1000);
+    return `${value.slice(0, HISTORY_TOOL_STRING_LIMIT)}\n\n… [в истории показаны первые ${shown} тыс. знаков из ${whole} тыс.]`;
+  }
+  if (value === null || typeof value !== 'object' || depth > 8) {
+    return value;
+  }
+  // Копируется только то, что изменилось: объекты из кэша стенограммы не трогаем.
+  if (Array.isArray(value)) {
+    let changed = false;
+    const next = value.map((item) => {
+      const trimmed = trimOversizedToolStrings(item, depth + 1);
+      if (trimmed !== item) changed = true;
+      return trimmed;
+    });
+    return changed ? next : value;
+  }
+  let next: AnyRecord | null = null;
+  for (const [key, item] of Object.entries(value as AnyRecord)) {
+    const trimmed = trimOversizedToolStrings(item, depth + 1);
+    if (trimmed !== item) {
+      next ??= { ...(value as AnyRecord) };
+      next[key] = trimmed;
+    }
+  }
+  return next ?? value;
+}
+
 type ClaudeToolResult = {
   content: unknown;
   isError: boolean;
@@ -39,6 +84,7 @@ type ClaudeHistoryResult =
     messages?: AnyRecord[];
     total?: number;
     hasMore?: boolean;
+    transcriptMissing?: boolean;
   };
 
 type ClaudeHistoryMessagesResult =
@@ -49,6 +95,7 @@ type ClaudeHistoryMessagesResult =
     hasMore: boolean;
     offset?: number;
     limit?: number | null;
+    transcriptMissing?: boolean;
   };
 
 async function parseAgentTools(filePath: string): Promise<AnyRecord[]> {
@@ -154,7 +201,7 @@ async function getSessionMessages(
     const jsonLPath = storedPath || await locateTranscript(providerSessionId);
 
     if (!jsonLPath) {
-      return { messages: [], total: 0, hasMore: false };
+      return { messages: [], total: 0, hasMore: false, transcriptMissing: true };
     }
     if (!storedPath) {
       try {
@@ -716,6 +763,8 @@ export class ClaudeSessionsProvider implements IProviderSessions {
   /**
    * Loads Claude JSONL history for a project/session and returns normalized
    * messages, preserving the existing pagination behavior from projects.js.
+   * Long strings inside tool calls/results are trimmed — see
+   * `trimOversizedToolStrings`.
    */
   async fetchHistory(
     sessionId: string,
@@ -801,7 +850,14 @@ export class ClaudeSessionsProvider implements IProviderSessions {
     }
     const normalizedOffset = Math.max(0, offset);
     const normalizedLimit = limit === null ? null : Math.max(0, limit);
-    const { page, hasMore } = sliceTailPage(normalized, normalizedLimit, normalizedOffset);
+    const { page: fullPage, hasMore } = sliceTailPage(normalized, normalizedLimit, normalizedOffset);
+    // Списки задач (TodoWrite/TodoRead) — разбираемый JSON: обрезка посередине
+    // превратила бы их в пустой список, поэтому их не режем.
+    const page = fullPage.map((msg) => (
+      (msg.kind === 'tool_use' && !String(msg.toolName ?? '').startsWith('Todo')) || msg.kind === 'tool_result'
+        ? trimOversizedToolStrings(msg) as NormalizedMessage
+        : msg
+    ));
 
     // Когда окно подрезано, в нём лежит не вся переписка, и счёт по нему —
     // заниженный. Берём большее из двух оценок: показать кнопку «показать
@@ -814,6 +870,7 @@ export class ClaudeSessionsProvider implements IProviderSessions {
       hasMore: hasMore || rawTruncated,
       offset: normalizedOffset,
       limit: normalizedLimit,
+      ...(!Array.isArray(result) && result.transcriptMissing ? { transcriptMissing: true } : {}),
     };
   }
 }

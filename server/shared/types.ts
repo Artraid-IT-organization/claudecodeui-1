@@ -370,6 +370,14 @@ export type FetchHistoryResult = {
   offset: number;
   limit: number | null;
   tokenUsage?: unknown;
+  /**
+   * True when the session row points at a provider transcript that does not
+   * exist on disk (the first turn died before the file was written). The UI
+   * explains that the history was not saved instead of showing the blank
+   * "new chat" state; the next message starts a fresh conversation under the
+   * same id (see claude-runtime.provider.js).
+   */
+  transcriptMissing?: boolean;
 };
 
 // ---------------------------

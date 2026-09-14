@@ -52,6 +52,13 @@ interface ChatMessagesPaneProps {
   hasMoreMessages: boolean;
   /** Подгрузить порцию старых сообщений — нажатие на строку «Показано N из M». */
   onLoadOlderMessages?: () => void;
+  /** Сторож у верха ленты: пока он ближе экрана к краю, грузится следующая порция. */
+  topSentinelRef?: (element: HTMLDivElement | null) => void;
+  /** Запрос истории упал — вместо «Продолжить разговор» ошибка с повтором. */
+  historyLoadError?: boolean;
+  onRetryHistoryLoad?: () => void;
+  /** Номер разговора есть, а переписка на диске не сохранилась. */
+  transcriptMissing?: boolean;
   totalMessages: number;
   /** Дотянуть всю переписку — нужно меню выгрузки, чтобы сохранить её целиком. */
   loadAllMessages: () => void;
@@ -107,6 +114,10 @@ function ChatMessagesPane({
   isLoadingMoreMessages,
   hasMoreMessages,
   onLoadOlderMessages,
+  topSentinelRef,
+  historyLoadError = false,
+  onRetryHistoryLoad,
+  transcriptMissing = false,
   totalMessages,
   loadAllMessages,
   sessionMessagesCount,
@@ -189,12 +200,33 @@ function ChatMessagesPane({
         </div>
       )}
       <div className="mx-auto w-full max-w-[54.25rem] space-y-3 px-4 sm:space-y-4">
-      {(isLoadingSessionMessages || isProcessing) && chatMessages.length === 0 ? (
+      {historyLoadError && chatMessages.length === 0 ? (
+        // Переписка не пришла (обрыв связи, перезапуск сайта). Раньше здесь
+        // вставал «Продолжить разговор» — как будто чат пуст (Егор, 15.09.26).
+        <div className="mt-8 text-center text-gray-500 dark:text-gray-400">
+          <p>{t('session.loading.failed')}</p>
+          <button
+            type="button"
+            onClick={onRetryHistoryLoad}
+            disabled={isLoadingSessionMessages}
+            className="mt-3 rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-60 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-800"
+          >
+            {isLoadingSessionMessages ? t('session.loading.retrying') : t('session.loading.retry')}
+          </button>
+        </div>
+      ) : (isLoadingSessionMessages || isProcessing) && chatMessages.length === 0 ? (
         <div className="mt-8 text-center text-gray-500 dark:text-gray-400">
           <div className="flex items-center justify-center space-x-2">
             <div className="h-4 w-4 animate-spin rounded-full border-b-2 border-gray-400" />
             <p>{t('session.loading.sessionMessages')}</p>
           </div>
+        </div>
+      ) : transcriptMissing && chatMessages.length === 0 ? (
+        // Первый ход чата оборвался до записи переписки (15.09.26, перезапуск
+        // сайта). Следующее сообщение начнёт разговор под тем же номером.
+        <div className="mt-8 px-6 text-center text-gray-500 dark:text-gray-400">
+          <p className="font-medium text-gray-700 dark:text-gray-200">{t('session.loading.transcriptMissingTitle')}</p>
+          <p className="mt-2 text-sm">{t('session.loading.transcriptMissingDescription')}</p>
         </div>
       ) : chatMessages.length === 0 ? (
         <ProviderSelectionEmptyState
@@ -221,6 +253,10 @@ function ChatMessagesPane({
         />
       ) : (
         <>
+          {hasMoreMessages && !allMessagesLoaded && (
+            <div ref={topSentinelRef} aria-hidden="true" className="h-px w-full" />
+          )}
+
           {/* Loading indicator for older messages (hide when load-all is active) */}
           {isLoadingMoreMessages && !isLoadingAllMessages && !allMessagesLoaded && (
             <div className="py-3 text-center text-gray-500 dark:text-gray-400">

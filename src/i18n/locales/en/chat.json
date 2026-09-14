@@ -179,7 +179,12 @@
     },
     "loading": {
       "olderMessages": "Loading older messages...",
-      "sessionMessages": "Loading session messages..."
+      "sessionMessages": "Loading session messages...",
+      "failed": "Couldn't load the conversation — retrying",
+      "retry": "Retry now",
+      "retrying": "Loading…",
+      "transcriptMissingTitle": "This chat's history wasn't saved",
+      "transcriptMissingDescription": "The first message never reached Claude — the site was restarting. Send it again and the chat will continue."
     },
     "messages": {
       "showingOf": "Showing {{shown}} of {{total}} messages",

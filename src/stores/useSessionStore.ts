@@ -132,6 +132,8 @@ export interface SessionSlot {
   hasMore: boolean;
   offset: number;
   tokenUsage: unknown;
+  /** Номер разговора есть, файла переписки на диске нет — первый ход оборвался. */
+  transcriptMissing: boolean;
 }
 
 const EMPTY: NormalizedMessage[] = [];
@@ -150,6 +152,7 @@ function createEmptySlot(): SessionSlot {
     hasMore: false,
     offset: 0,
     tokenUsage: null,
+    transcriptMissing: false,
     _historyMutationQueue: Promise.resolve(),
   };
 }
@@ -159,6 +162,7 @@ type SessionHistoryPage = {
   total: number;
   hasMore: boolean;
   tokenUsage?: unknown;
+  transcriptMissing?: boolean;
 };
 
 function enqueueHistoryMutation<T>(
@@ -190,6 +194,7 @@ async function requestSessionHistoryPage(
     messages,
     total: typeof data.total === 'number' ? data.total : messages.length,
     hasMore: Boolean(data.hasMore),
+    transcriptMissing: Boolean(data.transcriptMissing),
     ...(
       data && typeof data === 'object' && 'tokenUsage' in data
         ? { tokenUsage: data.tokenUsage }
@@ -810,6 +815,7 @@ export function useSessionStore() {
         slot.total = data.total;
         slot.hasMore = data.hasMore;
         slot.offset = (requestOptions.offset ?? 0) + data.messages.length;
+        slot.transcriptMissing = Boolean(data.transcriptMissing);
         slot.fetchedAt = Date.now();
         slot.status = 'idle';
         slot.realtimeMessages = pruneRealtimeSupersededByServer(

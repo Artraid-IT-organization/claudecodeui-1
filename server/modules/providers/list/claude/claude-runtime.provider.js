@@ -35,6 +35,7 @@ import {
 import { createCompleteMessage, createNormalizedMessage, getClaudeConfigDir, getClaudeJsonPath } from '@/shared/utils.js';
 import { getRequestRuntimeContext } from '@/shared/request-context.js';
 import { noteSurvivorProviderSession, spawnSurvivableClaude } from '@/modules/providers/list/claude/survivor-runs.js';
+import { hasTranscriptOnDisk } from '@/modules/providers/list/claude/transcript-presence.js';
 
 const activeSessions = new Map();
 const pendingToolApprovals = new Map();
@@ -779,6 +780,20 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       model: resolvedModel || options.model,
       effortModels,
     });
+
+    // Номер разговора записан, а переписки на диске нет: первый ход оборвался
+    // до записи файла. Продолжать нечего — движок отвечает «No conversation
+    // found», и чат навсегда показывает пустой экран, глотая сообщения.
+    // Начинаем разговор под тем же номером: адрес и название чата не меняются.
+    // Пока предыдущий ход этого чата жив, файл может просто ещё не появиться —
+    // тогда не трогаем: два процесса под одним номером испортили бы переписку.
+    if (sdkOptions.resume
+      && !activeSessions.has(sessionKey())
+      && !(await hasTranscriptOnDisk(sdkOptions.env?.CLAUDE_CONFIG_DIR, sdkOptions.resume))) {
+      console.warn(`[Claude SDK] переписки ${sdkOptions.resume} нет на диске — начинаю разговор под тем же номером`);
+      sdkOptions.sessionId = sdkOptions.resume;
+      delete sdkOptions.resume;
+    }
 
     const mcpServers = await loadMcpConfig(options.cwd, options.claudeConfigDir);
     if (mcpServers) {

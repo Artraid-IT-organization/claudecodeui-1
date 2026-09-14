@@ -147,6 +147,10 @@ function ChatInterface({
     handleUserScrollGesture,
     requestLatestMessages,
     loadOlderMessagesNow,
+    historyLoadError,
+    retryHistoryLoad,
+    transcriptMissing,
+    setTopSentinel,
   } = useChatSessionState({
     isActive,
     selectedProject,
@@ -508,6 +512,10 @@ function ChatInterface({
           isLoadingMoreMessages={isLoadingMoreMessages}
           hasMoreMessages={hasMoreMessages}
           onLoadOlderMessages={loadOlderMessagesNow}
+          topSentinelRef={setTopSentinel}
+          historyLoadError={historyLoadError}
+          onRetryHistoryLoad={retryHistoryLoad}
+          transcriptMissing={transcriptMissing}
           totalMessages={totalMessages}
           loadAllMessages={loadAllMessages}
           sessionMessagesCount={chatMessages.length}
