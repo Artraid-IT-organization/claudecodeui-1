@@ -179,3 +179,6 @@ Claude Code для VS Code: работа свёрнута, ответ модел
 - Теперь `--app-pan` = `clamp(offsetTop, 0, --keyboard-height)`: оболочка `top: pan`, `bottom: kb - pan`. Слушаем и `resize`, и `scroll` видимой области (через rAF). Без клавиатуры сдвиг ноль.
 - Проверка без iPhone: `~/tmp-ccui/keyboard/emulate.py <метка>` подменяет `window.visualViewport` и печатает экранные координаты оболочки и поля ввода при сдвиге 336/150/0.
 
+
+## Отступ под чёлку у оболочки (14.09.26)
+- Оболочка в `AppContent.tsx` задаёт `top` инлайном (сдвиг клавиатуры) — инлайн перекрывает `body.pwa-mode .fixed.inset-0 { top }`. Отступ под чёлку она берёт только из `--shell-top` (index.css: 0 в браузере, `--header-safe-area-top` в pwa-mode). Без этого вкладки чатов уходят под часы. Линия соседнего каталога ~/claudecodeui (без a75660ed) этой правки не содержит.

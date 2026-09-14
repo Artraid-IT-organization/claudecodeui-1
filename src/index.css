@@ -72,6 +72,8 @@
     --header-safe-area-top: env(safe-area-inset-top, 0px);
     --header-base-padding: 8px;
     --header-total-padding: calc(var(--header-safe-area-top) + var(--header-base-padding));
+    /* Верх оболочки приложения: 0 в браузере, отступ под чёлку — в режиме «с экрана Домой» (ниже). */
+    --shell-top: 0px;
   }
   
   /* Fallback for older iOS versions */
@@ -203,6 +205,15 @@
   }
 
   /* Adjust fixed inset positioning in PWA mode */
+  /*
+    Оболочка приложения задаёт верх инлайн-стилем (сдвиг клавиатуры, a75660ed),
+    а инлайн сильнее правила ниже: 14.09.26 вкладки чатов уехали под чёлку.
+    Поэтому отступ под чёлку она берёт из этой переменной.
+  */
+  body.pwa-mode {
+    --shell-top: var(--header-safe-area-top);
+  }
+
   body.pwa-mode .fixed.inset-0 {
     /*
       Ровно высота строки состояния — и ни точкой больше.
