@@ -24,7 +24,7 @@
     "backToMain": "Вернуться к основным чатам"
   },
   "app": {
-    "title": "CloudCLI",
+    "title": "Claude UI",
     "subtitle": "Интерфейс AI помощника для программирования"
   },
   "sessions": {

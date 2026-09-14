@@ -469,7 +469,7 @@
     },
     "managed": {
       "badge": "Управляется",
-      "hint": "Управляется приложением CloudCLI."
+      "hint": "Управляется приложением Claude UI."
     }
   },
   "pluginSettings": {
@@ -510,7 +510,7 @@
     "starterPluginLabel": "Пример дополнения",
     "sections": {
       "officialTitle": "Официальные дополнения",
-      "officialDescription": "Их ведёт команда CloudCLI, можно ставить сразу.",
+      "officialDescription": "Их ведёт команда Claude UI, можно ставить сразу.",
       "unofficialTitle": "Прочие дополнения",
       "unofficialDescription": "Сделаны сторонними авторами. Перед установкой посмотрите исходный код."
     },
@@ -533,7 +533,7 @@
       "install": "Установить"
     },
     "prismCloudCLI": {
-      "name": "PRISM CloudCLI",
+      "name": "PRISM Claude UI",
       "badge": "стороннее",
       "description": "Разбор сеансов Claude Code прямо в браузере: видно, на что уходит расход.",
       "install": "Установить"

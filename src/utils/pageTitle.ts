@@ -1,6 +1,6 @@
 import type { Project, ProjectSession } from '../types/app';
 
-const DEFAULT_PAGE_TITLE = 'CloudCLI UI';
+const DEFAULT_PAGE_TITLE = 'Claude UI';
 
 export const getSessionTitle = (session: ProjectSession): string => {
   if (session.__provider === 'cursor') {

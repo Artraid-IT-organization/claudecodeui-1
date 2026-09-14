@@ -37,7 +37,7 @@ export default function AboutTab() {
               className="text-base font-semibold text-foreground"
               style={{ fontFamily: CLOUDCLI_WORDMARK_FONT_FAMILY }}
             >
-              CloudCLI
+              Claude UI
             </span>
             <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
               v{currentVersion}
@@ -101,7 +101,7 @@ export default function AboutTab() {
       {/* Hosted CTA (OSS mode only) */}
       {!IS_PLATFORM && (
         <div className="rounded-xl border border-primary/10 bg-primary/5 p-4">
-          <h4 className="text-sm font-medium text-foreground">Try CloudCLI Hosted</h4>
+          <h4 className="text-sm font-medium text-foreground">Try Claude UI Hosted</h4>
           <p className="mt-1 text-xs text-muted-foreground">
             Team collaboration, shared MCP configs, settings sync across environments, and managed infrastructure.
           </p>
@@ -120,7 +120,7 @@ export default function AboutTab() {
       {/* Premium feature placeholders (OSS mode only) */}
       {!IS_PLATFORM && (
         <div className="space-y-4 border-t border-border/50 pt-6">
-          <h3 className="text-sm font-medium text-foreground">CloudCLI Pro Features</h3>
+          <h3 className="text-sm font-medium text-foreground">Claude UI Pro Features</h3>
           <PremiumFeatureCard
             icon={<Cloud className="h-5 w-5" />}
             title="Sync Settings"

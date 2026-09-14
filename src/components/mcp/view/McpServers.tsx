@@ -53,7 +53,7 @@ const getServerKey = (server: ProviderMcpServer): string => (
 );
 
 // Servers prefixed with `cloudcli-` are written and removed automatically by a
-// CloudCLI feature toggle (e.g. the Browser tab), not added by the user. They are
+// Claude UI feature toggle (e.g. the Browser tab), not added by the user. They are
 // shown read-only so users don't edit/delete them out of sync with the feature.
 const isManagedServer = (server: ProviderMcpServer): boolean => server.name.startsWith('cloudcli-');
 
@@ -91,7 +91,7 @@ function TeamMcpFeatureCard() {
             rel="noopener noreferrer"
             className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-primary transition-colors hover:underline"
           >
-            Available with CloudCLI Pro
+            Available with Claude UI Pro
             <ExternalLink className="h-3 w-3" />
           </a>
         </div>
@@ -242,7 +242,7 @@ export default function McpServers({ selectedProvider, currentProjects }: McpSer
                     {managed && (
                       <div className="text-xs text-muted-foreground">
                         {t('mcpServers.managed.hint', {
-                          defaultValue: 'Managed by CloudCLI.',
+                          defaultValue: 'Managed by Claude UI.',
                         })}
                       </div>
                     )}

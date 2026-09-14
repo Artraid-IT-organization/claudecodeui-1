@@ -24,7 +24,7 @@
     "backToMain": "Back to main project"
   },
   "app": {
-    "title": "CloudCLI",
+    "title": "Claude UI",
     "subtitle": "AI coding assistant interface"
   },
   "sessions": {
