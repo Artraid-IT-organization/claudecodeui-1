@@ -36,8 +36,11 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 
 /** Сколько мыслей принимается за один запрос; длинную работу клиент шлёт страницами. */
 export const MAX_THOUGHTS_PER_REQUEST = 60;
-/** Сколько мыслей уходит модели за один вызов. */
-const DIGEST_CHUNK_SIZE = 20;
+/**
+ * Сколько мыслей уходит модели за один вызов. На пачке из 20 Haiku вернула 17
+ * ответов (замер 14.09.26) — пачки меньше, ответы сверяются по номеру.
+ */
+const DIGEST_CHUNK_SIZE = 10;
 const MAX_THOUGHT_CHARS = 4000;
 const DIGEST_TIMEOUT_MS = 120 * 1000;
 const CACHE_DIR = path.join(os.homedir(), '.cloudcli', 'thought-digests');
@@ -116,36 +119,84 @@ function readDigest(value: unknown): ThoughtDigest | null {
   return { keep: true, ru: ru.trim() };
 }
 
-/** Разбор ответа модели отдельно от вызова — чтобы проверять тестом. */
-export function parseDigest(raw: string, expected: number): ThoughtDigest[] | null {
-  const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+function wordsOf(text: string): string[] {
+  return text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+}
+
+/**
+ * Ответ действительно про эту мысль: модель повторила её первые слова.
+ *
+ * Замер 14.09.26 на 40 настоящих мыслях: мысль «сборка идёт в фоне, нужно
+ * успеть до перезапуска; проверка не удалась — поле поиска не видно» получила
+ * перевод одной второй половины — начало потерялось. При путанице номеров
+ * (модель уже пропускала элементы) под мыслью оказался бы и вовсе чужой
+ * текст. Поэтому без совпадения первых слов ответ не принимается и мысль
+ * уходит на повторный разбор.
+ */
+export function echoMatches(source: string, echo: unknown): boolean {
+  if (typeof echo !== 'string') return false;
+  const expected = wordsOf(source).slice(0, 3);
+  const got = wordsOf(echo).slice(0, 3);
+  if (expected.length === 0 || got.length < Math.min(2, expected.length)) return false;
+  return got.every((word, index) => word === expected[index]);
+}
+
+/**
+ * Разбор ответа модели отдельно от вызова — чтобы проверять тестом.
+ *
+ * Ответы сверяются по номеру мысли, а не по порядку (модель иногда пропускает
+ * или склеивает элементы), и по первым словам исходника (защита от перевода
+ * без начала и от путаницы номеров). Не сошлось — `null` на месте мысли, её дошлют ещё раз; совсем не
+ * JSON — `null`.
+ */
+export function parseDigest(raw: string, texts: string[]): Array<ThoughtDigest | null> | null {
+  const start = raw.indexOf('[');
+  const end = raw.lastIndexOf(']');
+  if (start === -1 || end <= start) return null;
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(cleaned) as unknown;
-    if (!Array.isArray(parsed) || parsed.length !== expected) return null;
-    const items = parsed.map(readDigest);
-    return items.every(Boolean) ? (items as ThoughtDigest[]) : null;
+    parsed = JSON.parse(raw.slice(start, end + 1));
   } catch {
     return null;
   }
+  if (!Array.isArray(parsed)) return null;
+  const results: Array<ThoughtDigest | null> = texts.map(() => null);
+  for (const item of parsed) {
+    const { id, start: echo } = (item ?? {}) as { id?: unknown; start?: unknown };
+    if (typeof id !== 'number' || !Number.isInteger(id) || id < 0 || id >= texts.length) continue;
+    if (!echoMatches(texts[id], echo)) continue;
+    results[id] = readDigest(item);
+  }
+  return results;
 }
 
 export function buildDigestPrompt(texts: string[]): string {
   return [
-    'Ниже по порядку — размышления ИИ-помощника во время одной работы. Человеку, который поручил работу, нужно видеть этапы, но не рабочие мелочи.',
+    'Ниже по порядку — размышления ИИ-помощника во время одной работы, у каждого свой номер id. Человек, который поручил работу, хочет видеть этапы работы, но не рабочие мелочи.',
     '',
-    'Для КАЖДОГО фрагмента реши, важный ли это этап:',
-    '- ВАЖНО (keep: true): закончено исследование или разбор и есть вывод; найдена причина, ошибка или неожиданный факт; принято решение или изменён план и почему; запущена или получена проверка, критика, ревью, замер — и что вышло; подведён итог части работы; упёрлись в препятствие.',
-    '- НЕ ВАЖНО (keep: false): что сейчас прочитать, открыть или запустить без вывода; ожидание; пересказ команды; повтор уже сказанного; мелкие технические шаги.',
+    'Для КАЖДОГО фрагмента реши, важный ли это этап.',
+    'ВАЖНО (keep: true) — в фрагменте есть содержание, которое человеку стоит знать:',
+    '- закончено исследование, разбор или замер, и есть вывод;',
+    '- найдена причина, ошибка или неожиданный факт;',
+    '- принято решение или изменён план — и почему;',
+    '- запущена крупная проверка, критика, ревью или исследование — и что именно проверяется;',
+    '- получен итог проверки или критики;',
+    '- подведён итог части работы; упёрлись в препятствие.',
+    'НЕ ВАЖНО (keep: false):',
+    '- пустые реплики без содержания: «готово», «на этом закончил», «есть всё нужное, отвечаю», «можно двигаться дальше»;',
+    '- «сейчас прочитаю / посмотрю / запущу X» без причины и без итога; ожидание;',
+    '- пересказ команды, справки или синтаксиса; мелкая починка служебного скрипта;',
+    '- повтор того, что уже сказано в предыдущих фрагментах.',
     '',
-    'Для важных дай русский текст: точный перевод по смыслу, можно чуть короче, но без потери сути. Имена файлов, команды, код и названия программ оставляй как есть. Если фрагмент уже по-русски — верни его как есть.',
+    'Для важных дай русский текст: точный перевод по смыслу, можно чуть короче, без потери сути и без добавлений от себя. Имена файлов, команды, код и названия программ оставляй как есть; имя Egor пиши «Егор». Если фрагмент уже по-русски — верни его как есть.',
     '',
-    `Ответь ТОЛЬКО JSON-массивом из ${texts.length} элементов в том же порядке: {"keep": true, "ru": "…"} или {"keep": false}. Без пояснений.`,
+    'Ответь ТОЛЬКО JSON-массивом, по одному элементу на КАЖДЫЙ id, ничего не пропуская и не объединяя. В поле start — первые три слова ЭТОГО фрагмента дословно, на языке оригинала: {"id": 0, "start": "The build is", "keep": true, "ru": "…"} или {"id": 1, "start": "Сначала изучу код", "keep": false}. Без пояснений.',
     '',
-    JSON.stringify(texts),
+    JSON.stringify(texts.map((text, id) => ({ id, text }))),
   ].join('\n');
 }
 
-async function askModel(texts: string[], claudeConfigDir: string | null): Promise<ThoughtDigest[] | null> {
+async function askModel(texts: string[], claudeConfigDir: string | null): Promise<Array<ThoughtDigest | null> | null> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (typeof value === 'string') env[key] = value;
@@ -199,13 +250,13 @@ async function askModel(texts: string[], claudeConfigDir: string | null): Promis
     }
   }
 
-  return parseDigest(resultText, texts.length);
+  return parseDigest(resultText, texts);
 }
 
 /** Одна и та же пачка из двух вкладок разбирается одним вызовом. */
-const inFlight = new Map<string, Promise<ThoughtDigest[] | null>>();
+const inFlight = new Map<string, Promise<Array<ThoughtDigest | null> | null>>();
 
-async function digestChunk(texts: string[], claudeConfigDir: string | null): Promise<ThoughtDigest[] | null> {
+async function digestChunk(texts: string[], claudeConfigDir: string | null): Promise<Array<ThoughtDigest | null> | null> {
   const key = `${claudeConfigDir ?? ''}\n${texts.join('\n \n')}`;
   let pending = inFlight.get(key);
   if (!pending) {
@@ -244,19 +295,31 @@ export async function digestThoughts(
   missing.sort((a, b) => a - b);
   await mkdir(CACHE_DIR, { recursive: true }).catch(() => undefined);
 
-  for (let start = 0; start < missing.length; start += DIGEST_CHUNK_SIZE) {
-    const chunk = missing.slice(start, start + DIGEST_CHUNK_SIZE);
-    const digests = await digestChunk(chunk.map((index) => texts[index]), claudeConfigDir);
-    if (!digests) continue;
-    await Promise.all(chunk.map(async (index, position) => {
-      const digest = digests[position];
-      // Русскую мысль показываем своими словами автора, а не пересказом модели.
-      const final: ThoughtDigest = digest.keep && isMostlyRussian(texts[index])
-        ? { keep: true, ru: texts[index] }
-        : digest;
-      results[index] = final;
-      await writeFile(cacheFileFor(texts[index]), JSON.stringify(final), 'utf-8').catch(() => undefined);
-    }));
-  }
+  const save = async (index: number, digest: ThoughtDigest) => {
+    // Русскую мысль-этап показываем словами автора, а не пересказом модели.
+    const final: ThoughtDigest = digest.keep && isMostlyRussian(texts[index])
+      ? { keep: true, ru: texts[index] }
+      : digest;
+    results[index] = final;
+    await writeFile(cacheFileFor(texts[index]), JSON.stringify(final), 'utf-8').catch(() => undefined);
+  };
+
+  const runChunks = async (indices: number[]): Promise<number[]> => {
+    const unresolved: number[] = [];
+    for (let start = 0; start < indices.length; start += DIGEST_CHUNK_SIZE) {
+      const chunk = indices.slice(start, start + DIGEST_CHUNK_SIZE);
+      const digests = await digestChunk(chunk.map((index) => texts[index]), claudeConfigDir);
+      await Promise.all(chunk.map(async (index, position) => {
+        const digest = digests?.[position] ?? null;
+        if (digest) await save(index, digest);
+        else unresolved.push(index);
+      }));
+    }
+    return unresolved.sort((a, b) => a - b);
+  };
+
+  // Пропущенное моделью досылается ещё раз — отдельной, меньшей пачкой.
+  const leftover = await runChunks(missing);
+  if (leftover.length > 0) await runChunks(leftover);
   return results;
 }
