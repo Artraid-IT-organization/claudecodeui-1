@@ -374,7 +374,29 @@ function AppContentInner() {
       // раскладка остаётся рабочей.
       const ceiling = Math.round(window.innerHeight * 0.7);
       const kb = Math.min(raw, ceiling);
+
+      // Сдвиг страницы, который iOS делает сама. Когда появляется клавиатура,
+      // Safari «подтягивает» поле ввода: прокручивает видимую область вниз по
+      // странице (vv.offsetTop). Закреплённая оболочка при этом едет вверх
+      // вместе со всем экраном — а мы её ещё и поднимаем на высоту клавиатуры.
+      // Двойной подъём: при полном сдвиге поле ввода улетает к часам, при
+      // частичном висит посреди экрана с пустотой снизу и лентой под часами
+      // (оба снимка Егора 14.09.26; повторено подменой visualViewport).
+      // Поэтому оболочка опускается ровно на этот сдвиг: верх — у верхнего
+      // края видимой области, низ — у клавиатуры. Сдвиг не больше высоты
+      // клавиатуры: без клавиатуры он всегда ноль, и обычная прокрутка ленты
+      // оболочку не двигает.
+      const pan = Math.max(0, Math.min(vv.offsetTop, kb));
       document.documentElement.style.setProperty('--keyboard-height', `${kb}px`);
+      document.documentElement.style.setProperty('--app-pan', `${pan}px`);
+    };
+    let frame = 0;
+    const scheduleUpdate = () => {
+      if (frame) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = 0;
+        update();
+      });
     };
     // Run once on mount, not only on the next resize: if the browser's own
     // toolbars are already showing when the app loads (the normal state on a
@@ -388,6 +410,8 @@ function AppContentInner() {
 
 
     vv.addEventListener('resize', update);
+    // Сдвиг iOS меняется событием scroll видимой области, а не resize.
+    vv.addEventListener('scroll', scheduleUpdate);
     // Re-measure the device's own gap only at moments when a keyboard cannot
     // be the cause: a turned phone, and coming back to the app.
     const recalibrate = () => {
@@ -398,6 +422,8 @@ function AppContentInner() {
     document.addEventListener('visibilitychange', recalibrate);
     return () => {
       vv.removeEventListener('resize', update);
+      vv.removeEventListener('scroll', scheduleUpdate);
+      if (frame) window.cancelAnimationFrame(frame);
       window.removeEventListener('orientationchange', recalibrate);
       document.removeEventListener('visibilitychange', recalibrate);
     };
@@ -416,7 +442,10 @@ function AppContentInner() {
       // at any size. The keyboard offset stays on top of that for iOS, where
       // the keyboard overlays rather than shrinks the layout viewport.
       style={{
-        bottom: 'var(--keyboard-height, 0px)',
+        // Верх опускается на сдвиг, который делает iOS, низ — у клавиатуры
+        // с поправкой на тот же сдвиг (см. update выше).
+        top: 'var(--app-pan, 0px)',
+        bottom: 'calc(var(--keyboard-height, 0px) - var(--app-pan, 0px))',
         // Пол на всякий случай: даже при неверном замере оболочка остаётся
         // видимой, а не сжимается в полоску.
         maxHeight: 'max(240px, calc(100dvh - var(--keyboard-height, 0px)))',
