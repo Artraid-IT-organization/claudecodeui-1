@@ -461,7 +461,16 @@ export function useChatSessionState({
       if (!hasMoreMessages || !selectedSession || !selectedProject) return false;
 
       isLoadingMoreRef.current = true;
-      const scrollRestoreState = captureScrollRestoreState(container);
+      // Позиция передаётся на восстановление ДО запроса, а не после.
+      //
+      // Раньше она ставилась в очередь, когда ответ уже пришёл, а хранилище
+      // перерисовывало ленту чуть раньше — в ту отрисовку восстанавливать было
+      // нечего, и лента оставалась у самого верха, на только что подгруженных
+      // сообщениях (замер 15.09.26: в 2–3 подгрузках из 6–8 прокрутка 68 вместо
+      // прежнего места). Лента скакала, и тут же уходил запрос следующей порции
+      // — Егор: «очень плохо загружаются старые сообщения».
+      pendingScrollRestoreRef.current = captureScrollRestoreState(container);
+      let prepended = false;
 
       try {
         const result = await sessionStore.fetchMore(selectedSession.id, {
@@ -492,7 +501,7 @@ export function useChatSessionState({
           return false;
         }
 
-        pendingScrollRestoreRef.current = scrollRestoreState;
+        prepended = true;
         setVisibleMessageCount((prev) => prev + SESSION_MESSAGES_PAGE_SIZE);
         if (!slot.hasMore) {
           allMessagesLoadedRef.current = true;
@@ -506,6 +515,9 @@ export function useChatSessionState({
         return true;
       } finally {
         isLoadingMoreRef.current = false;
+        // Ничего не добавилось — восстанавливать нечего, иначе позиция
+        // сработала бы невпопад при следующей отрисовке.
+        if (!prepended) pendingScrollRestoreRef.current = null;
       }
     },
     [hasMoreMessages, isActive, isLoadingMoreMessages, selectedProject, selectedSession, sessionStore],
