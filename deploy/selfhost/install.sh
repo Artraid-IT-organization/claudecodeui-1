@@ -72,8 +72,9 @@ SUMMARY="$APP/install-summary.txt"
 as_user() { runuser -u "$RUN_USER" -- env HOME="$HOME_DIR" USER="$RUN_USER" bash -c "$1"; }
 
 mem_mb=$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo) / 1024 ))
-[ "$mem_mb" -ge 1800 ] || die "памяти ${mem_mb} МБ — сборке нужно не меньше 2 ГБ (лучше 4 ГБ)"
-[ "$mem_mb" -ge 3500 ] || say "ВНИМАНИЕ: памяти ${mem_mb} МБ. Работать будет, но Claude Code рекомендует от 4 ГБ"
+# Тариф «4 ГБ» система видит как ~3,8 ГБ. Меньше — сборка (куча 1,5 ГБ) вместе
+# с работающим Claude упирается в память и падает посреди ночного обновления.
+[ "$mem_mb" -ge 3400 ] || die "памяти ${mem_mb} МБ — нужен сервер от 4 ГБ: сборке нужно около 2 ГБ и Claude Code ещё столько же"
 free_gb=$(( $(df -Pk "$HOME_DIR" | awk 'NR==2 {print $4}') / 1024 / 1024 ))
 [ "$free_gb" -ge 5 ] || die "на диске свободно ${free_gb} ГБ, нужно хотя бы 5"
 

@@ -73,8 +73,8 @@ curl -4 -s https://api.ipify.org; echo
   сервера) — установить некуда. Объясни человеку: нужен свой сервер (VPS) на Ubuntu
   от 4 ГБ памяти с установленным Claude Code; дальше это же сообщение надо отправить
   Claude на сервере. Остановись.
-- **Не Ubuntu/Debian** или **памяти меньше 2 ГБ** — объясни, что сервер не подходит,
-  остановись.
+- **Не Ubuntu/Debian** или **памяти меньше 4 ГБ** (в `free -h` меньше ~3,4 ГБ) —
+  объясни, что сервер не подходит и нужен тариф от 4 ГБ, остановись.
 - **Пользователь службы (`--user`):**
   - ты работаешь от обычного пользователя — возьми его (`--user $(whoami)`);
     его вход в Claude и станет входом владельца в интерфейсе;
@@ -105,9 +105,10 @@ curl -4 -s https://api.ipify.org; echo
 ```bash
 rm -rf /tmp/claudecodeui-install
 git clone -q --depth 1 https://github.com/Seikatsuma/claudecodeui.git /tmp/claudecodeui-install
+umask 077   # в конце вывода — личная ссылка входа: лог только для себя
 sudo bash /tmp/claudecodeui-install/deploy/selfhost/install.sh \
   --user <USER> [--create-user] [--domain <DOMAIN>] [--owner-name <NAME>] [--email <EMAIL>] \
-  2>&1 | tee /tmp/claudecodeui-install.log
+  2>&1 | tee ~/claudecodeui-install.log
 ```
 
 Установщик сам: ставит пакеты, Node 22 и Claude Code, собирает и проверяет версию,
