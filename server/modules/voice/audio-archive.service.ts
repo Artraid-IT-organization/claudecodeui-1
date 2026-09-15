@@ -156,14 +156,16 @@ export function createAudioArchiveService(dependencies: AudioArchiveDependencies
       }
 
       const uploadPath = converted ? voicePath : recording.audioPath;
-      const bytes = await fs.readFile(uploadPath);
-      if (bytes.byteLength > TELEGRAM_MAX_UPLOAD_BYTES) {
+      // Размер — до чтения: отбракованный файл не должен занимать память.
+      const { size } = await fs.stat(uploadPath);
+      if (size > TELEGRAM_MAX_UPLOAD_BYTES) {
         dependencies.log.warn(
-          `[Voice] Recording of ${Math.round(bytes.byteLength / 1024 / 1024)} MB exceeds `
+          `[Voice] Recording of ${Math.round(size / 1024 / 1024)} MB exceeds `
           + "Telegram's 50 MB upload limit - kept on disk only.",
         );
         return;
       }
+      const bytes = await fs.readFile(uploadPath);
 
       const form = new FormData();
       form.append('chat_id', dependencies.chatId);
@@ -205,6 +207,8 @@ export function createAudioArchiveService(dependencies: AudioArchiveDependencies
       );
       try {
         await fs.mkdir(dependencies.archiveDir, { recursive: true, mode: 0o700 });
+        // mode у mkdir не действует на уже существующую папку — записи личные.
+        await fs.chmod(dependencies.archiveDir, 0o700);
         await fs.writeFile(audioPath, audio.bytes, { mode: 0o600 });
         return { audioPath, recordedAt, byteLength: audio.bytes.byteLength };
       } catch (error) {
