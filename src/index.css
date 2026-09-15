@@ -612,6 +612,9 @@
 @layer components {
   .chat-messages-pane {
     contain: layout style paint;
+    /* Место при сдвигах над экраном держит useScrollAnchor во всех браузерах;
+       встроенное удержание Chrome вернуло бы сдвиг второй раз. */
+    overflow-anchor: none;
   }
 
   .chat-composer-shell {
