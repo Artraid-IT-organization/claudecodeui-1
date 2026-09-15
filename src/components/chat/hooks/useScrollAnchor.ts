@@ -31,6 +31,12 @@ const ROW_SELECTOR = '.chat-row';
 const ROWS_WRAPPER_SELECTOR = '.chat-rows';
 /** Столько без событий прокрутки — движение (и инерция) закончилось. */
 const MOTION_IDLE_MS = 140;
+/**
+ * Палец лежит без движения дольше этого — движения нет. Страховка: при уходе
+ * приложения в фон посреди жеста iOS может не прислать touchend, и отложенный
+ * сдвиг висел бы вечно.
+ */
+const TOUCH_STALE_MS = 1000;
 
 interface Anchor {
   row: HTMLElement;
@@ -48,6 +54,9 @@ interface UseScrollAnchorArgs {
   onSettled?: () => void;
 }
 
+// Инвариант: `offsetTop` строк отсчитывается от самой панели прокрутки
+// (`.chat-messages-pane` — `relative`). Если сделать `.chat-rows` или
+// `.chat-row` позиционированными, опора молча начнёт врать.
 function pickAnchorRow(container: HTMLDivElement): HTMLElement | null {
   const rows = Array.from(container.querySelectorAll<HTMLElement>(ROW_SELECTOR));
   if (rows.length === 0) return null;
@@ -82,6 +91,7 @@ export function useScrollAnchor({
   const deferredRef = useRef(0);
   const lastHeightRef = useRef(-1);
   const touchingRef = useRef(false);
+  const lastTouchAtRef = useRef(0);
   const lastScrollAtRef = useRef(0);
   const flushTimerRef = useRef<number | null>(null);
   const enabledRef = useRef(enabled);
@@ -98,7 +108,7 @@ export function useScrollAnchor({
   }, []);
 
   const inMotion = useCallback((container: HTMLDivElement) => (
-    touchingRef.current
+    (touchingRef.current && performance.now() - lastTouchAtRef.current < TOUCH_STALE_MS)
     || performance.now() - lastScrollAtRef.current < MOTION_IDLE_MS
     // Упругий отскок у края (Safari): запись прокрутки в нём теряется.
     || container.scrollTop < 0
@@ -191,10 +201,20 @@ export function useScrollAnchor({
       lastScrollAtRef.current = performance.now();
       reconcile();
     };
-    const onTouchStart = () => { touchingRef.current = true; };
+    const onTouchStart = () => {
+      touchingRef.current = true;
+      lastTouchAtRef.current = performance.now();
+    };
+    const onTouchMove = () => { lastTouchAtRef.current = performance.now(); };
     const onTouchEnd = () => {
       touchingRef.current = false;
       if (deferredRef.current !== 0) scheduleFlush();
+    };
+    // Приложение ушло в фон посреди жеста — касание кончилось, отступ снимаем.
+    const onVisibilityChange = () => {
+      touchingRef.current = false;
+      lastScrollAtRef.current = 0;
+      if (deferredRef.current !== 0) flush();
     };
     const onScrollEnd = () => {
       if (deferredRef.current !== 0 && !touchingRef.current) {
@@ -205,7 +225,10 @@ export function useScrollAnchor({
 
     container.addEventListener('scroll', onScroll, { passive: true });
     container.addEventListener('touchstart', onTouchStart, { passive: true });
+    container.addEventListener('touchmove', onTouchMove, { passive: true });
     container.addEventListener('touchend', onTouchEnd, { passive: true });
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    window.addEventListener('pagehide', onVisibilityChange);
     container.addEventListener('touchcancel', onTouchEnd, { passive: true });
     container.addEventListener('scrollend', onScrollEnd);
 
@@ -219,7 +242,10 @@ export function useScrollAnchor({
     return () => {
       container.removeEventListener('scroll', onScroll);
       container.removeEventListener('touchstart', onTouchStart);
+      container.removeEventListener('touchmove', onTouchMove);
       container.removeEventListener('touchend', onTouchEnd);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      window.removeEventListener('pagehide', onVisibilityChange);
       container.removeEventListener('touchcancel', onTouchEnd);
       container.removeEventListener('scrollend', onScrollEnd);
       observer?.disconnect();

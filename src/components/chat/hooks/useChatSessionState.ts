@@ -734,11 +734,12 @@ export function useChatSessionState({
 
     const container = scrollContainerRef.current;
     if (becameActive) {
+      clearDeferredShift();
       const target = isUserScrolledUp ? scrollPositionRef.current.top : container.scrollHeight;
       markProgrammaticScroll(target);
       container.scrollTop = target;
     }
-  }, [isActive, isUserScrolledUp, markProgrammaticScroll]);
+  }, [clearDeferredShift, isActive, isUserScrolledUp, markProgrammaticScroll]);
 
   // После отрисовки порции ранних сообщений. Порция из одних действий вливается
   // в верхний свёрнутый «Ход работы»: лента почти не растёт, и кажется, что
