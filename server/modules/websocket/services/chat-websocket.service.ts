@@ -5,6 +5,11 @@ import type { WebSocket } from 'ws';
 import { sessionsDb } from '@/modules/database/index.js';
 import { providerModelsService } from '@/modules/providers/index.js';
 import { chatRunRegistry } from '@/modules/websocket/services/chat-run-registry.service.js';
+import {
+  hasAcceptedSend,
+  readClientMessageId,
+  rememberAcceptedSend,
+} from '@/modules/websocket/services/chat-send-ledger.service.js';
 import { isSurvivorRunning, stopSurvivor } from '@/modules/providers/list/claude/survivor-runs.js';
 import { connectedClients, WS_OPEN_STATE } from '@/modules/websocket/services/websocket-state.service.js';
 import {
@@ -114,13 +119,17 @@ function sendProtocolError(
   ws: WebSocket,
   code: string,
   error: string,
-  sessionId?: string
+  sessionId?: string,
+  clientMessageId?: string | null,
 ): void {
   sendJson(ws, {
     kind: 'protocol_error',
     code,
     error,
     sessionId: sessionId ?? null,
+    // Отказ по конкретному сообщению: телефон убирает его из очереди отправки
+    // и больше не досылает (src/contexts/chatOutbox.ts).
+    ...(clientMessageId ? { clientMessageId } : {}),
     timestamp: new Date().toISOString(),
   });
 }
@@ -141,9 +150,28 @@ async function handleChatSend(
   data: AnyRecord,
   dependencies: ChatWebSocketDependencies
 ): Promise<void> {
+  const clientMessageId = readClientMessageId(data);
   const sessionId = readRequiredSessionId(data);
   if (!sessionId) {
-    sendProtocolError(ws, 'SESSION_ID_REQUIRED', 'chat.send requires a sessionId.');
+    sendProtocolError(ws, 'SESSION_ID_REQUIRED', 'chat.send requires a sessionId.', undefined, clientMessageId);
+    return;
+  }
+
+  // Копия уже принятого сообщения: расписка до телефона не дошла, и он
+  // отправил его снова. Второй запуск не заводим — только расписываемся ещё
+  // раз и подключаем эту связь к идущей работе.
+  if (clientMessageId && hasAcceptedSend(sessionId, clientMessageId)) {
+    console.log(`[Chat] повтор уже принятого сообщения ${clientMessageId} (чат ${sessionId}) — второй запуск не завожу`);
+    if (chatRunRegistry.isProcessing(sessionId)) {
+      chatRunRegistry.attachConnection(sessionId, ws);
+    }
+    sendJson(ws, {
+      kind: 'chat_send_ack',
+      sessionId,
+      clientMessageId,
+      duplicate: true,
+      timestamp: new Date().toISOString(),
+    });
     return;
   }
 
@@ -153,14 +181,15 @@ async function handleChatSend(
       ws,
       'SESSION_NOT_FOUND',
       `Session "${sessionId}" was not found. Create it via POST /api/providers/sessions first.`,
-      sessionId
+      sessionId,
+      clientMessageId,
     );
     return;
   }
 
   const provider = session.provider as LLMProvider;
   if (!dependencies.runtime.hasRuntime(provider)) {
-    sendProtocolError(ws, 'UNSUPPORTED_PROVIDER', `Provider "${provider}" is not available.`, sessionId);
+    sendProtocolError(ws, 'UNSUPPORTED_PROVIDER', `Provider "${provider}" is not available.`, sessionId, clientMessageId);
     return;
   }
 
@@ -180,6 +209,7 @@ async function handleChatSend(
       'ANTHROPIC_API_KEY_REQUIRED',
       'Add your Anthropic API key in Settings to start chatting with Claude.',
       sessionId,
+      clientMessageId,
     );
     return;
   }
@@ -190,6 +220,7 @@ async function handleChatSend(
       'TOO_MANY_CONCURRENT_RUNS',
       `You already have ${MAX_CONCURRENT_RUNS_PER_USER} chats running at once. Wait for one to finish before starting another.`,
       sessionId,
+      clientMessageId,
     );
     return;
   }
@@ -207,9 +238,25 @@ async function handleChatSend(
       ws,
       'RUN_IN_PROGRESS',
       `Session "${sessionId}" already has a run in progress.`,
-      sessionId
+      sessionId,
+      clientMessageId,
     );
     return;
+  }
+
+  // Расписка в получении — сразу, до обращения к провайдеру, который может
+  // думать минуту. Пока её нет, телефон держит сообщение в очереди и
+  // досылает (src/contexts/chatOutbox.ts). Номер запоминается ДО расписки:
+  // если копия придёт после перезапуска сайта, её узнают по журналу.
+  if (clientMessageId) {
+    rememberAcceptedSend(sessionId, clientMessageId);
+    console.log(`[Chat] принято сообщение ${clientMessageId} (чат ${sessionId})`);
+    sendJson(ws, {
+      kind: 'chat_send_ack',
+      sessionId,
+      clientMessageId,
+      timestamp: new Date().toISOString(),
+    });
   }
 
   const clientOptions = (data.options ?? {}) as AnyRecord;
@@ -460,6 +507,7 @@ export function handleChatConnection(
   const userId = readRequestUserId(request);
 
   ws.on('message', async (rawMessage) => {
+    let clientMessageId: string | null = null;
     try {
       const parsed = parseIncomingJsonObject(rawMessage);
       if (!parsed) {
@@ -467,6 +515,7 @@ export function handleChatConnection(
       }
 
       const data = parsed as AnyRecord;
+      clientMessageId = readClientMessageId(data);
       const messageType = typeof data.type === 'string' ? data.type : '';
 
       switch (messageType) {
@@ -489,7 +538,7 @@ export function handleChatConnection(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.error('[ERROR] Chat WebSocket error:', message);
-      sendProtocolError(ws, 'INTERNAL_ERROR', message);
+      sendProtocolError(ws, 'INTERNAL_ERROR', message, undefined, clientMessageId);
     }
   });
 

@@ -4,12 +4,15 @@ import { useAuth } from '../components/auth/context/AuthContext';
 import { IS_PLATFORM } from '../shared/utils';
 import { expireAuthSession, isAuthTokenExpired } from '../utils/api';
 
+import { ChatOutbox, isChatSend, type OutboxEntry } from './chatOutbox';
+
 /**
  * One frame received from the chat websocket. The server guarantees every
  * frame carries a `kind` (provider message kinds plus gateway kinds such as
  * `chat_subscribed`, `session_upserted`, `loading_progress`,
  * `protocol_error`). The synthetic `websocket_reconnected` kind is injected
- * client-side when the socket re-opens after a drop.
+ * client-side when the socket re-opens after a drop, and `chat_send_failed`
+ * when a chat message never got the server's receipt (see chatOutbox.ts).
  */
 export type ServerEvent = {
   kind?: string;
@@ -47,6 +50,17 @@ type WebSocketContextType = {
 
 const WebSocketContext = createContext<WebSocketContextType | null>(null);
 
+/**
+ * Сколько ждать расписку сервера. Сервер расписывается сразу после приёма,
+ * до обращения к модели, — десятка секунд без неё значит, что связь
+ * «полумёртвая»: считается открытой, а данные не ходят (iPhone после фона).
+ */
+const ACK_TIMEOUT_MS = 10_000;
+/** Как часто проверять очередь, пока в ней что-то есть. */
+const OUTBOX_CHECK_MS = 3_000;
+/** Соединение, не открывшееся за это время, пересоздаётся. */
+const CONNECT_STALL_MS = 15_000;
+
 export const useWebSocket = () => {
   const context = useContext(WebSocketContext);
   if (!context) {
@@ -66,6 +80,16 @@ const buildWebSocketUrl = (token: string | null) => {
   return `${protocol}//${window.location.host}/ws?token=${encodeURIComponent(token)}`; // OSS mode: Use same host:port that served the page
 };
 
+const createOutbox = (): ChatOutbox => {
+  let storage: Storage | null = null;
+  try {
+    storage = window.localStorage;
+  } catch {
+    storage = null;
+  }
+  return new ChatOutbox(storage);
+};
+
 const useWebSocketProviderState = (): WebSocketContextType => {
   const wsRef = useRef<WebSocket | null>(null);
   const unmountedRef = useRef(false); // Track if component is unmounted
@@ -80,6 +104,14 @@ const useWebSocketProviderState = (): WebSocketContextType => {
   const [isConnected, setIsConnected] = useState(false);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const { isLoading: isAuthLoading, token, user } = useAuth();
+  // Очередь сообщений чата, ждущих расписки сервера (см. chatOutbox.ts).
+  const outboxRef = useRef<ChatOutbox | null>(null);
+  if (!outboxRef.current) {
+    outboxRef.current = createOutbox();
+  }
+  const outboxTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const connectStartedAtRef = useRef(0);
+  const connectRef = useRef<() => void>(() => {});
 
   const dispatch = useCallback((event: ServerEvent) => {
     for (const listener of listenersRef.current) {
@@ -92,6 +124,89 @@ const useWebSocketProviderState = (): WebSocketContextType => {
     setLatestMessage(event);
   }, []);
 
+  /** Отправка сообщения из очереди; `false` — сокет не принял данные. */
+  const transmit = useCallback((socket: WebSocket, entry: OutboxEntry): boolean => {
+    try {
+      socket.send(JSON.stringify(entry.message));
+      outboxRef.current?.markSent(entry.id);
+      return true;
+    } catch (error) {
+      console.warn('[outbox] сокет не принял сообщение:', error);
+      return false;
+    }
+  }, []);
+
+  /** Честный отказ по сообщениям, которые больше не досылаются. */
+  const reportGivenUp = useCallback(() => {
+    for (const entry of outboxRef.current?.takeGivenUp(ACK_TIMEOUT_MS) ?? []) {
+      console.warn('[outbox] сообщение так и не получило расписку сервера', entry.id);
+      dispatch({
+        kind: 'chat_send_failed',
+        sessionId: typeof entry.message.sessionId === 'string' ? entry.message.sessionId : undefined,
+        clientMessageId: entry.id,
+        content: entry.message.content,
+        timestamp: Date.now(),
+      });
+    }
+  }, [dispatch]);
+
+  /**
+   * Бросить текущее соединение и открыть новое, не дожидаясь `onclose`: у
+   * «полумёртвого» сокета на iPhone он может не прийти никогда.
+   */
+  const forceReconnect = useCallback((reason: string) => {
+    if (unmountedRef.current) return;
+    console.warn(`[outbox] пересоздаю соединение: ${reason}`);
+    const stale = wsRef.current;
+    if (stale) {
+      stale.onopen = null;
+      stale.onmessage = null;
+      stale.onclose = null;
+      stale.onerror = null;
+      try {
+        stale.close();
+      } catch {
+        // закрываем мёртвое — ошибка не важна
+      }
+    }
+    wsRef.current = null;
+    setIsConnected(false);
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+    connectRef.current();
+  }, []);
+
+  const scheduleOutboxCheck = useCallback(() => {
+    if (outboxTimerRef.current || unmountedRef.current) return;
+    outboxTimerRef.current = setTimeout(() => {
+      outboxTimerRef.current = null;
+      const outbox = outboxRef.current;
+      if (!outbox || outbox.size === 0 || unmountedRef.current) return;
+
+      reportGivenUp();
+      if (outbox.size === 0) return;
+
+      const socket = wsRef.current;
+      if (!socket) {
+        if (!reconnectTimeoutRef.current) connectRef.current();
+      } else if (socket.readyState === WebSocket.OPEN) {
+        if (outbox.overdue(ACK_TIMEOUT_MS).length > 0) {
+          forceReconnect('нет расписки сервера о получении сообщения');
+        }
+      } else if (socket.readyState === WebSocket.CONNECTING) {
+        if (Date.now() - connectStartedAtRef.current > CONNECT_STALL_MS) {
+          forceReconnect('соединение не устанавливается');
+        }
+      } else {
+        // CLOSING/CLOSED без onclose — так бывает у сокета, уснувшего в фоне.
+        forceReconnect('соединение закрыто без уведомления');
+      }
+      scheduleOutboxCheck();
+    }, OUTBOX_CHECK_MS);
+  }, [forceReconnect, reportGivenUp]);
+
   useEffect(() => {
     // The cleanup below sets unmountedRef = true. Without this reset, every
     // re-run of the effect (e.g. on token refresh) would short-circuit connect()
@@ -101,11 +216,20 @@ const useWebSocketProviderState = (): WebSocketContextType => {
       return undefined;
     }
     connect();
+    // Сообщения, не получившие расписку до перезагрузки страницы, дошлются.
+    if ((outboxRef.current?.size ?? 0) > 0) {
+      scheduleOutboxCheck();
+    }
 
     return () => {
       unmountedRef.current = true;
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+      if (outboxTimerRef.current) {
+        clearTimeout(outboxTimerRef.current);
+        outboxTimerRef.current = null;
       }
       const activeSocket = wsRef.current;
       if (activeSocket) {
@@ -134,6 +258,7 @@ const useWebSocketProviderState = (): WebSocketContextType => {
       // Store connecting sockets too, so a token refresh can close them before
       // their handshake completes with stale credentials.
       wsRef.current = websocket;
+      connectStartedAtRef.current = Date.now();
 
       websocket.onopen = () => {
         setIsConnected(true);
@@ -142,11 +267,30 @@ const useWebSocketProviderState = (): WebSocketContextType => {
           dispatch({ kind: 'websocket_reconnected', timestamp: Date.now() });
         }
         hasConnectedRef.current = true;
+
+        // Всё, что не получило расписку, уходит заново по новой связи. Сервер
+        // узнаёт уже принятое по номеру и второй запуск не заводит.
+        reportGivenUp();
+        const outbox = outboxRef.current;
+        if (outbox && outbox.size > 0) {
+          for (const entry of outbox.pending()) {
+            if (!transmit(websocket, entry)) break;
+          }
+          scheduleOutboxCheck();
+        }
       };
 
       websocket.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data) as ServerEvent;
+          if (data.kind === 'chat_send_ack') {
+            outboxRef.current?.settle(data.clientMessageId);
+            return;
+          }
+          if (data.kind === 'protocol_error' && data.clientMessageId) {
+            // Сервер отказал именно этому сообщению — досылать бессмысленно.
+            outboxRef.current?.settle(data.clientMessageId);
+          }
           dispatch(data);
         } catch (error) {
           console.error('Error parsing WebSocket message:', error);
@@ -162,6 +306,7 @@ const useWebSocketProviderState = (): WebSocketContextType => {
 
         // Attempt to reconnect after 3 seconds
         reconnectTimeoutRef.current = setTimeout(() => {
+          reconnectTimeoutRef.current = null;
           if (unmountedRef.current) return; // Prevent reconnection if unmounted
           connect();
         }, 3000);
@@ -174,16 +319,56 @@ const useWebSocketProviderState = (): WebSocketContextType => {
     } catch (error) {
       console.error('Error creating WebSocket connection:', error);
     }
-  }, [dispatch, isAuthLoading, token, user]); // reconnect with current authentication state
+  }, [dispatch, isAuthLoading, token, user, reportGivenUp, transmit, scheduleOutboxCheck]); // reconnect with current authentication state
+  connectRef.current = connect;
+
+  // Приложение вернулось из фона или появилась сеть. Если есть сообщения без
+  // расписки, связи не доверяем: на iPhone сокет после сна часто числится
+  // открытым, но мёртв, — открываем новый и досылаем.
+  useEffect(() => {
+    const onResume = () => {
+      if (document.visibilityState === 'hidden') return;
+      const outbox = outboxRef.current;
+      if (!outbox || outbox.size === 0) return;
+      const socket = wsRef.current;
+      if (socket && socket.readyState === WebSocket.OPEN && outbox.overdue(0).length > 0) {
+        forceReconnect('приложение вернулось из фона, сообщение ждёт расписки');
+      } else {
+        scheduleOutboxCheck();
+      }
+    };
+    document.addEventListener('visibilitychange', onResume);
+    window.addEventListener('pageshow', onResume);
+    window.addEventListener('online', onResume);
+    return () => {
+      document.removeEventListener('visibilitychange', onResume);
+      window.removeEventListener('pageshow', onResume);
+      window.removeEventListener('online', onResume);
+    };
+  }, [forceReconnect, scheduleOutboxCheck]);
 
   const sendMessage = useCallback((message: unknown) => {
     const socket = wsRef.current;
+    if (isChatSend(message)) {
+      // Сообщение чата не выбрасывается никогда: оно ждёт в очереди, пока
+      // сервер не распишется в получении.
+      const entry = outboxRef.current!.add(message);
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        if (!transmit(socket, entry)) {
+          forceReconnect('сокет не принял сообщение');
+        }
+      } else {
+        console.warn('WebSocket not connected — сообщение ждёт в очереди');
+      }
+      scheduleOutboxCheck();
+      return;
+    }
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify(message));
     } else {
       console.warn('WebSocket not connected');
     }
-  }, []);
+  }, [forceReconnect, scheduleOutboxCheck, transmit]);
 
   const subscribe = useCallback((listener: ServerEventListener) => {
     listenersRef.current.add(listener);

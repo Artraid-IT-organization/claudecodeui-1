@@ -184,7 +184,7 @@
       "retry": "Retry now",
       "retrying": "Loading…",
       "transcriptMissingTitle": "This chat's history wasn't saved",
-      "transcriptMissingDescription": "The first message never reached Claude — the site was restarting. Send it again and the chat will continue."
+      "transcriptMissingDescription": "The first message of this chat never reached Claude. Send it again and the chat will continue."
     },
     "messages": {
       "showingOf": "Showing {{shown}} of {{total}} messages",

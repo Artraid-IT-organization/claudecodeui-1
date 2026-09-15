@@ -200,6 +200,25 @@ export function useChatRealtimeHandlers({
           return;
         }
 
+        case 'chat_send_failed': {
+          // Сообщение так и не получило расписку сервера (contexts/chatOutbox.ts):
+          // сказать прямо и вернуть текст, а не делать вид, что оно ушло.
+          if (sid) {
+            onSessionIdle?.(sid);
+            const text = typeof msg.content === 'string' ? msg.content.trim() : '';
+            const notice = 'Сообщение не дошло до сервера — связь так и не восстановилась. Отправьте его ещё раз.';
+            sessionStore.appendRealtime(sid, {
+              id: `send_failed_${String(msg.clientMessageId || Date.now())}`,
+              sessionId: sid,
+              timestamp: new Date().toISOString(),
+              provider,
+              kind: 'error',
+              content: text ? `${notice}\n\n${text}` : notice,
+            } as NormalizedMessage);
+          }
+          return;
+        }
+
         case 'protocol_error': {
           console.error('[Chat] Protocol error:', msg.code, msg.error);
           if (sid) {
