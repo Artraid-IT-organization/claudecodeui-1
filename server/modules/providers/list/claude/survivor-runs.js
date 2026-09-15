@@ -196,6 +196,13 @@ const SUBAGENT_TOOL_NAMES = new Set(['Agent', 'Task']);
  * инструмент → `tool` (имя); последним пришёл результат → `reading`; размышление
  * → `thinking`; текст ответа → `writing`; сообщение человека → `requesting`.
  *
+ * Незакрытый вызов считается идущим, только пока после него не было ничего,
+ * кроме результатов. Прерывание («Стоп») не всегда оставляет результат — бывает
+ * просто текст «[Request interrupted…]», — а модель не пишет новый текст, пока
+ * ждёт инструмент. Поэтому текст, размышление и сообщение человека закрывают все
+ * незакрытые вызовы: иначе плашка вечно писала бы «Работает: Bash» у чата,
+ * который давно ждёт человека.
+ *
  * @returns {{ phase: string, detail: string | null } | null}
  */
 export function readTranscriptPhase(transcriptPath) {
@@ -238,8 +245,10 @@ export function readTranscriptPhase(transcriptPath) {
           pending.set(block.id, String(block.name || ''));
           last = 'tool';
         } else if (block?.type === 'thinking') {
+          pending.clear();
           last = 'thinking';
         } else if (block?.type === 'text') {
+          pending.clear();
           last = 'writing';
         }
       }
@@ -250,7 +259,12 @@ export function readTranscriptPhase(transcriptPath) {
         }
         last = 'reading';
       } else if (!entry.isMeta && (typeof content === 'string' || Array.isArray(content))) {
-        last = 'requesting';
+        pending.clear();
+        const words = typeof content === 'string'
+          ? content
+          : content.map((block) => (block?.type === 'text' ? block.text : '')).join('');
+        // Прерывание — не просьба человека: работа стоит, этап неизвестен.
+        last = String(words).startsWith('[Request interrupted') ? null : 'requesting';
       }
     }
   }

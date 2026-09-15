@@ -132,6 +132,29 @@ test('этап пережившего агента читается по хво�
     assert.deepEqual(readTranscriptPhase(file), { phase: 'writing', detail: null });
 
     assert.equal(readTranscriptPhase(path.join(dir, 'нет.jsonl')), null);
+
+    // Служебная запись (подсказка хука и т.п.) этап не меняет.
+    await appendFile(file, line({ type: 'user', isMeta: true, message: { content: 'служебное' } }));
+    assert.deepEqual(readTranscriptPhase(file), { phase: 'writing', detail: null });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('прерванный вызов без результата не висит «Работает» вечно', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'phase-'));
+  try {
+    const file = path.join(dir, 't.jsonl');
+    await writeFile(file, toolUse('b1', 'Bash')
+      + line({ type: 'user', message: { content: [{ type: 'text', text: '[Request interrupted by user for tool use]' }] } }));
+    assert.equal(readTranscriptPhase(file), null, 'после прерывания этап неизвестен, не «Работает: Bash»');
+
+    await appendFile(file, line({ type: 'user', message: { content: 'продолжай' } }));
+    assert.deepEqual(readTranscriptPhase(file), { phase: 'requesting', detail: null });
+
+    await appendFile(file, toolUse('a1', 'Agent')
+      + line({ type: 'assistant', message: { content: [{ type: 'text', text: 'ответ' }] } }));
+    assert.deepEqual(readTranscriptPhase(file), { phase: 'writing', detail: null }, 'текст модели закрывает незакрытые вызовы');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
