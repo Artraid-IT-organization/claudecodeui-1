@@ -44,20 +44,30 @@ export default function SessionTabsBar({
   activities,
 }: SessionTabsBarProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const scrolledToKeyRef = useRef<string | null>(null);
+
+  // Докрутка к активной вкладке — ОДИН раз на смену активной вкладки.
+  // Раньше эффект зависел от массивов `tabs`/`terminals`, а `openTabs`
+  // пересобирается `.map()` на каждой перерисовке AppContent (а та идёт на
+  // каждое сообщение сокета, пока любой чат работает). Итог — полоса,
+  // пролистанная пальцем, через долю секунды уезжала обратно к активной
+  // вкладке (Егор 15.09.26: «листаю — возвращается в исходную позицию»).
+  // Зависимости — строки, а не массивы: перерисовка без смены состава их не
+  // меняет. Состав вкладок в зависимостях остаётся по старой причине:
+  // вкладка только что открытого чата появляется на рендер позже, чем
+  // activeSessionId, и первый проход её ещё не находит — тогда ключ не
+  // запоминается и докрутка случится, когда вкладка появится.
+  const activeKey = activeTerminalId !== null ? `term:${activeTerminalId}` : `chat:${activeSessionId ?? ''}`;
+  const tabIdsKey = tabs.map((tab) => tab.sessionId).join('|');
+  const terminalIdsKey = terminals.map((term) => term.id).join('|');
 
   useEffect(() => {
+    if (scrolledToKeyRef.current === activeKey) return;
     const activeTabElement = scrollRef.current?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]');
-    activeTabElement?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
-    // `tabs` (not just activeSessionId) is a real dependency here: opening a
-    // session that isn't an existing tab yet adds it to `tabs` one render
-    // after activeSessionId changes (see useOpenSessionTabs - the tab-adding
-    // effect and this one both key off activeSessionId, but React commits
-    // that render before either effect runs, so the querySelector above finds
-    // nothing on the render where activeSessionId first changes). Without
-    // `tabs` here, that first (and only) run finds no match and this effect
-    // never re-fires once the tab actually exists in the DOM - the active
-    // tab silently stays off-screen with no scrollbar to reveal it.
-  }, [activeSessionId, tabs, activeTerminalId, terminals]);
+    if (!activeTabElement) return;
+    scrolledToKeyRef.current = activeKey;
+    activeTabElement.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+  }, [activeKey, tabIdsKey, terminalIdsKey]);
 
   if (tabs.length === 0 && terminals.length === 0) {
     return null;
