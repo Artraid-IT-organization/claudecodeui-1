@@ -30,7 +30,6 @@ interface UseQueuedMessageAutoSendArgs {
 export function useQueuedMessageAutoSend({
   processingSessions,
   activeSessionId,
-  ws,
   sendMessage,
   markSessionProcessing,
 }: UseQueuedMessageAutoSendArgs) {
@@ -51,12 +50,9 @@ export function useQueuedMessageAutoSend({
         continue;
       }
 
-      // A closed socket would drop the send silently; keep the draft so the
-      // composer (or a later completion) can retry once we're connected.
-      if (!ws || ws.readyState !== WebSocket.OPEN) {
-        continue;
-      }
-
+      // Проверки «сокет открыт» здесь больше нет: на iPhone она врёт в обе
+      // стороны, а chat.send теперь не выбрасывается — WebSocketContext держит
+      // его в очереди до расписки сервера и досылает сам (contexts/chatOutbox.ts).
       clearQueuedMessage(sessionId);
       sendMessage({
         type: 'chat.send',
@@ -66,5 +62,5 @@ export function useQueuedMessageAutoSend({
       });
       markSessionProcessing(sessionId, { statusText: null, canInterrupt: true });
     }
-  }, [processingSessions, activeSessionId, ws, sendMessage, markSessionProcessing]);
+  }, [processingSessions, activeSessionId, sendMessage, markSessionProcessing]);
 }
