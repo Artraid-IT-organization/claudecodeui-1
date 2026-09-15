@@ -95,6 +95,19 @@ export class ChatOutbox {
     return true;
   }
 
+  /** Снять все сообщения чата: сервер сказал, что чат занят, — повтор не поможет. */
+  settleSession(sessionId: string): number {
+    let removed = 0;
+    for (const entry of this.pending()) {
+      if (entry.message.sessionId === sessionId) {
+        this.entries.delete(entry.id);
+        removed += 1;
+      }
+    }
+    if (removed > 0) this.save();
+    return removed;
+  }
+
   markSent(id: string): void {
     const entry = this.entries.get(id);
     if (!entry) {

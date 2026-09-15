@@ -60,6 +60,10 @@ const ACK_TIMEOUT_MS = 10_000;
 const OUTBOX_CHECK_MS = 3_000;
 /** Соединение, не открывшееся за это время, пересоздаётся. */
 const CONNECT_STALL_MS = 15_000;
+/** Сколько ждать от сервера сообщения о возможностях, прежде чем счесть его старым. */
+const HELLO_GRACE_MS = 2_000;
+/** Что умеет страница; сервер отвечает `server_capabilities` только знающим. */
+const SOCKET_CAPS = 'send-ack-1';
 
 export const useWebSocket = () => {
   const context = useContext(WebSocketContext);
@@ -71,13 +75,15 @@ export const useWebSocket = () => {
 
 const buildWebSocketUrl = (token: string | null) => {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  if (IS_PLATFORM) return `${protocol}//${window.location.host}/ws`; // Platform mode: Use same domain as the page (goes through proxy)
+  // `caps` — страница понимает расписки: только тогда сервер шлёт ей
+  // `server_capabilities` (старая страница вывела бы его в ленту строкой).
+  if (IS_PLATFORM) return `${protocol}//${window.location.host}/ws?caps=${SOCKET_CAPS}`; // Platform mode: Use same domain as the page (goes through proxy)
   if (!token) return null;
   if (isAuthTokenExpired(token)) {
     expireAuthSession();
     return null;
   }
-  return `${protocol}//${window.location.host}/ws?token=${encodeURIComponent(token)}`; // OSS mode: Use same host:port that served the page
+  return `${protocol}//${window.location.host}/ws?token=${encodeURIComponent(token)}&caps=${SOCKET_CAPS}`; // OSS mode: Use same host:port that served the page
 };
 
 const createOutbox = (): ChatOutbox => {
@@ -112,6 +118,17 @@ const useWebSocketProviderState = (): WebSocketContextType => {
   const outboxTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const connectStartedAtRef = useRef(0);
   const connectRef = useRef<() => void>(() => {});
+  /**
+   * Умеет ли сервер этого соединения расписываться в получении. Страница может
+   * оказаться новее сервера (соседняя выкатка вернула старый сервер, а вкладка
+   * не перезагружалась) — 15.09.26 так страница досылала сообщение старому
+   * серверу каждые 12 секунд, получала «already has a run in progress» и в
+   * конце писала «не дошло», хотя агент уже работал. Досылать можно только
+   * серверу, который сам сказал, что узнаёт повторы.
+   */
+  const ackModeRef = useRef<'unknown' | 'ack' | 'legacy'>('unknown');
+  const helloTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flushRef = useRef<(socket: WebSocket) => void>(() => {});
 
   const dispatch = useCallback((event: ServerEvent) => {
     for (const listener of listenersRef.current) {
@@ -192,7 +209,9 @@ const useWebSocketProviderState = (): WebSocketContextType => {
       if (!socket) {
         if (!reconnectTimeoutRef.current) connectRef.current();
       } else if (socket.readyState === WebSocket.OPEN) {
-        if (outbox.overdue(ACK_TIMEOUT_MS).length > 0) {
+        if (ackModeRef.current === 'legacy') {
+          flushRef.current(socket);
+        } else if (ackModeRef.current === 'ack' && outbox.overdue(ACK_TIMEOUT_MS).length > 0) {
           forceReconnect('нет расписки сервера о получении сообщения');
         }
       } else if (socket.readyState === WebSocket.CONNECTING) {
@@ -206,6 +225,27 @@ const useWebSocketProviderState = (): WebSocketContextType => {
       scheduleOutboxCheck();
     }, OUTBOX_CHECK_MS);
   }, [forceReconnect, reportGivenUp]);
+
+  /** Отправить очередь по открытому соединению с учётом того, что умеет сервер. */
+  const flushOutbox = useCallback((socket: WebSocket) => {
+    const outbox = outboxRef.current;
+    if (!outbox || socket.readyState !== WebSocket.OPEN) return;
+    reportGivenUp();
+    const mode = ackModeRef.current;
+    if (mode === 'unknown') return;
+    for (const entry of outbox.pending()) {
+      if (mode === 'legacy') {
+        // Старый сервер: расписок не шлёт и повтор не узнает (второй раз
+        // ответит «чат занят»), — отправляем один раз, как было до очереди.
+        if (entry.lastSentAt === null && !transmit(socket, entry)) break;
+        outbox.settle(entry.id);
+      } else if (!transmit(socket, entry)) {
+        break;
+      }
+    }
+    if (outbox.size > 0) scheduleOutboxCheck();
+  }, [reportGivenUp, transmit, scheduleOutboxCheck]);
+  flushRef.current = flushOutbox;
 
   useEffect(() => {
     // The cleanup below sets unmountedRef = true. Without this reset, every
@@ -230,6 +270,10 @@ const useWebSocketProviderState = (): WebSocketContextType => {
       if (outboxTimerRef.current) {
         clearTimeout(outboxTimerRef.current);
         outboxTimerRef.current = null;
+      }
+      if (helloTimerRef.current) {
+        clearTimeout(helloTimerRef.current);
+        helloTimerRef.current = null;
       }
       const activeSocket = wsRef.current;
       if (activeSocket) {
@@ -268,28 +312,46 @@ const useWebSocketProviderState = (): WebSocketContextType => {
         }
         hasConnectedRef.current = true;
 
-        // Всё, что не получило расписку, уходит заново по новой связи. Сервер
-        // узнаёт уже принятое по номеру и второй запуск не заводит.
-        reportGivenUp();
-        const outbox = outboxRef.current;
-        if (outbox && outbox.size > 0) {
-          for (const entry of outbox.pending()) {
-            if (!transmit(websocket, entry)) break;
-          }
-          scheduleOutboxCheck();
-        }
+        // Очередь уходит, когда сервер скажет, умеет ли он расписываться
+        // (`server_capabilities` — первое, что он шлёт). Промолчал — это
+        // старый сервер: отправляем один раз, без повторов.
+        ackModeRef.current = 'unknown';
+        if (helloTimerRef.current) clearTimeout(helloTimerRef.current);
+        helloTimerRef.current = setTimeout(() => {
+          helloTimerRef.current = null;
+          if (wsRef.current !== websocket || ackModeRef.current !== 'unknown') return;
+          console.warn('[outbox] сервер не сообщил о расписках — старая версия, отправляю без повторов');
+          ackModeRef.current = 'legacy';
+          flushRef.current(websocket);
+        }, HELLO_GRACE_MS);
       };
 
       websocket.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data) as ServerEvent;
+          if (data.kind === 'server_capabilities') {
+            ackModeRef.current = data.chatSendAck === true ? 'ack' : 'legacy';
+            if (helloTimerRef.current) {
+              clearTimeout(helloTimerRef.current);
+              helloTimerRef.current = null;
+            }
+            flushRef.current(websocket);
+            return;
+          }
           if (data.kind === 'chat_send_ack') {
+            ackModeRef.current = 'ack';
             outboxRef.current?.settle(data.clientMessageId);
             return;
           }
-          if (data.kind === 'protocol_error' && data.clientMessageId) {
-            // Сервер отказал именно этому сообщению — досылать бессмысленно.
-            outboxRef.current?.settle(data.clientMessageId);
+          if (data.kind === 'protocol_error') {
+            if (data.clientMessageId) {
+              // Сервер отказал именно этому сообщению — досылать бессмысленно.
+              outboxRef.current?.settle(data.clientMessageId);
+            } else if (data.code === 'RUN_IN_PROGRESS' && typeof data.sessionId === 'string') {
+              // «Чат уже работает» без номера — ответ старого сервера. Повтором
+              // это не лечится, только множит красные ошибки в ленте.
+              outboxRef.current?.settleSession(data.sessionId);
+            }
           }
           dispatch(data);
         } catch (error) {
@@ -331,7 +393,7 @@ const useWebSocketProviderState = (): WebSocketContextType => {
       const outbox = outboxRef.current;
       if (!outbox || outbox.size === 0) return;
       const socket = wsRef.current;
-      if (socket && socket.readyState === WebSocket.OPEN && outbox.overdue(0).length > 0) {
+      if (socket && socket.readyState === WebSocket.OPEN && ackModeRef.current === 'ack' && outbox.overdue(0).length > 0) {
         forceReconnect('приложение вернулось из фона, сообщение ждёт расписки');
       } else {
         scheduleOutboxCheck();
@@ -353,10 +415,14 @@ const useWebSocketProviderState = (): WebSocketContextType => {
       // Сообщение чата не выбрасывается никогда: оно ждёт в очереди, пока
       // сервер не распишется в получении.
       const entry = outboxRef.current!.add(message);
-      if (socket && socket.readyState === WebSocket.OPEN) {
+      if (socket && socket.readyState === WebSocket.OPEN && ackModeRef.current !== 'unknown') {
         if (!transmit(socket, entry)) {
           forceReconnect('сокет не принял сообщение');
+        } else if (ackModeRef.current === 'legacy') {
+          outboxRef.current!.settle(entry.id);
         }
+      } else if (socket && socket.readyState === WebSocket.OPEN) {
+        // Сервер ещё не сказал, умеет ли расписываться, — уйдёт через миг.
       } else {
         console.warn('WebSocket not connected — сообщение ждёт в очереди');
       }

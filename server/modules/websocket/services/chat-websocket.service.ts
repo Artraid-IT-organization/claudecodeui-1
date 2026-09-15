@@ -134,6 +134,18 @@ function sendProtocolError(
   });
 }
 
+/** Метка страницы, понимающей расписки и `server_capabilities` (src/contexts/WebSocketContext.tsx). */
+const CHAT_SEND_ACK_CAP = 'send-ack-1';
+
+function readSocketCaps(request: AuthenticatedWebSocketRequest): string[] {
+  const rawUrl = (request as { url?: string }).url || '';
+  try {
+    return (new URL(rawUrl, 'http://localhost').searchParams.get('caps') || '').split(',');
+  } catch {
+    return [];
+  }
+}
+
 function readRequiredSessionId(data: AnyRecord): string | null {
   const sessionId = typeof data.sessionId === 'string' ? data.sessionId.trim() : '';
   return sessionId.length > 0 ? sessionId : null;
@@ -503,6 +515,15 @@ export function handleChatConnection(
 ): void {
   console.log('[INFO] Chat WebSocket connected');
   connectedClients.add(ws);
+  // Первым делом — что умеет этот сервер. Страница досылает сообщения только
+  // серверу, который расписывается в получении и узнаёт повторы; со старым
+  // сервером повтор давал «already has a run in progress» (15.09.26).
+  // Шлём только странице, которая сама сказала, что понимает это событие
+  // (`caps` в адресе подключения): старая страница вывела бы незнакомое
+  // событие в ленту строкой.
+  if (readSocketCaps(request).includes(CHAT_SEND_ACK_CAP)) {
+    sendJson(ws, { kind: 'server_capabilities', chatSendAck: true });
+  }
 
   const userId = readRequestUserId(request);
 

@@ -14,7 +14,14 @@
 set -uo pipefail
 
 COMMIT="${1:?укажите коммит}"
-NO_RESTART="${2:-}"
+NO_RESTART=""
+ALLOW_ROLLBACK=""
+for arg in "${@:2}"; do
+    case "$arg" in
+        --no-restart) NO_RESTART="--no-restart" ;;
+        --allow-rollback) ALLOW_ROLLBACK=1 ;;
+    esac
+done
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SHARED="/home/claude/claudecodeui-shared"
 SOURCE_MODULES="/home/claude/claudecodeui/node_modules"
@@ -33,6 +40,26 @@ if [ "${HEAD_NOW:0:${#COMMIT}}" != "$COMMIT" ]; then
     exit 1
 fi
 say "Сборка в своём каталоге: $(git log --oneline -1)"
+
+# Выкатка не затирает чужую работу. Сайт общий, выкатывают несколько чатов, и
+# каждый — свою ветку. 15.09.26 правку «сообщения не теряются» (12:07) за
+# полчаса молча сняли семь чужих выкаток веток без неё; страница осталась
+# новой, сервер — старым, и сообщения посыпались ошибками. Выкатывать можно
+# только коммит, в котором уже есть то, что сейчас на сайте. Намеренный откат —
+# флаг --allow-rollback. Такая же проверка стоит хуком для всех чатов
+# (~/.claude/hooks/ccui-deploy-guard.py): у соседей может быть старая копия
+# этого скрипта.
+LIVE="$(git -C "$SHARED" rev-parse HEAD 2>/dev/null)"
+if [ -z "$NO_RESTART" ] && [ -n "$LIVE" ] && ! git merge-base --is-ancestor "$LIVE" "$HEAD_NOW"; then
+    if [ -z "$ALLOW_ROLLBACK" ]; then
+        say "ОШИБКА: на сайте сейчас $(git -C "$SHARED" log -1 --format='%h %s'),"
+        say "а в $COMMIT этого нет — выкатка сняла бы чужую работу."
+        say "Сначала влейте живой коммит в свою ветку (git merge ${LIVE:0:8}), соберите и выкатывайте."
+        say "Намеренный откат: добавьте --allow-rollback."
+        exit 1
+    fi
+    say "ВНИМАНИЕ: намеренный откат — на сайте было ${LIVE:0:8}"
+fi
 
 # Жёсткие ссылки вместо npm install: семь секунд, места не занимают и, в отличие
 # от установки в worktree, не теряют молча devDependencies.

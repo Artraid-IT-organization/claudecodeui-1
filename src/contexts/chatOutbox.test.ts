@@ -86,3 +86,13 @@ test('чужая расписка и повторная постановка т�
   assert.equal(outbox.settle(undefined), false);
   assert.equal(outbox.size, 1);
 });
+
+test('«чат занят» от старого сервера снимает сообщения этого чата, чужие остаются', () => {
+  const outbox = new ChatOutbox(memoryStorage());
+  outbox.add({ type: 'chat.send', sessionId: 'busy', content: '1' });
+  outbox.add({ type: 'chat.send', sessionId: 'busy', content: '2' });
+  const other = outbox.add({ type: 'chat.send', sessionId: 'other', content: '3' });
+  assert.equal(outbox.settleSession('busy'), 2);
+  assert.deepEqual(outbox.pending().map((e) => e.id), [other.id]);
+  assert.equal(outbox.settleSession('nobody'), 0);
+});
