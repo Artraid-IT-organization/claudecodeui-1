@@ -12,6 +12,7 @@ import { createMessageHistoryRefreshCoordinator } from '../utils/messageHistoryR
 import { createCachedDiffCalculator, type DiffCalculator } from '../utils/messageTransforms';
 
 import { normalizedToChatMessages } from './useChatMessages';
+import { useScrollAnchor } from './useScrollAnchor';
 import { knownRunStartedAt } from '../utils/liveRunCursor';
 
 /**
@@ -51,27 +52,13 @@ const EMPTY_CHAIN_MIN_GROWTH_PX = 200;
 /** Столько невидимых порций подгружается подряд за одно движение. */
 const EMPTY_CHAIN_MAX_ROUNDS = 8;
 
-interface ScrollRestoreState {
-  height: number;
-  top: number;
-  anchor: HTMLElement | null;
-  anchorOffset: number | null;
-}
-
-function captureScrollRestoreState(container: HTMLDivElement): ScrollRestoreState {
-  const containerBounds = container.getBoundingClientRect();
-  const anchor = Array.from(container.querySelectorAll<HTMLElement>('.chat-message'))
-    .find((element) => element.getBoundingClientRect().bottom >= containerBounds.top)
-    ?? null;
-
-  return {
-    height: container.scrollHeight,
-    top: container.scrollTop,
-    anchor,
-    anchorOffset: anchor
-      ? anchor.getBoundingClientRect().top - containerBounds.top
-      : null,
-  };
+/**
+ * За сколько до верха ленты брать следующую порцию ранних сообщений — три
+ * экрана: сервер отдаёт порцию за 0,03–0,8 с, и бросок пальцем не долетает до
+ * края раньше неё (Егор, 15.09.26: «не листается выше»).
+ */
+function topPreloadMargin(container: HTMLElement): number {
+  return Math.max(1200, container.clientHeight * 3);
 }
 
 /* ------------------------------------------------------------------ */
@@ -212,9 +199,8 @@ export function useChatSessionState({
   const isLoadingMoreRef = useRef(false);
   const allMessagesLoadedRef = useRef(false);
   const topLoadLockRef = useRef(false);
-  const pendingScrollRestoreRef = useRef<ScrollRestoreState | null>(null);
-  // Толчок для восстановления позиции после подгрузки ранних сообщений.
-  const [scrollRestoreTick, setScrollRestoreTick] = useState(0);
+  // Высота ленты до последней порции ранних сообщений: видна ли прибавка.
+  const growthCheckRef = useRef<number | null>(null);
   // Сколько порций подряд подгружено без видимой прибавки в ленте.
   const emptyChainRoundsRef = useRef(0);
   const loadOlderMessagesRef = useRef<((container: HTMLDivElement) => Promise<boolean>) | null>(null);
@@ -278,7 +264,7 @@ export function useChatSessionState({
     wasNearTopRef.current = false;
     searchScrollActiveRef.current = false;
     topLoadLockRef.current = false;
-    pendingScrollRestoreRef.current = null;
+    growthCheckRef.current = null;
     pendingInitialScrollRef.current = true;
     lastLoadedSessionKeyRef.current = null;
 
@@ -449,13 +435,39 @@ export function useChatSessionState({
     });
   }, []);
 
+  /** Верх ленты ближе трёх экранов к краю — пора брать следующую порцию. */
+  const isTopSentinelNear = useCallback((container: HTMLDivElement) => {
+    const sentinel = topSentinelElRef.current;
+    if (!sentinel?.isConnected) return false;
+    return sentinel.getBoundingClientRect().bottom
+      >= container.getBoundingClientRect().top - topPreloadMargin(container);
+  }, []);
+
+  // Место на экране при любых сдвигах над ним (порция ранних сообщений,
+  // дорисовка, раскрытие) держит useScrollAnchor — там же зачем и как.
+  const { clearDeferredShift, getDeferredShift } = useScrollAnchor({
+    scrollContainerRef,
+    enabled: isActive,
+    suspendedRef: pendingInitialScrollRef,
+    markProgrammaticScroll,
+    onSettled: () => {
+      // Пока сдвиг был отложен, верхний сторож стоял дальше от экрана и порцию
+      // не просил; лента остановилась — проверяем сами.
+      const container = scrollContainerRef.current;
+      if (container && isTopSentinelNear(container) && emptyChainRoundsRef.current < EMPTY_CHAIN_MAX_ROUNDS) {
+        void loadOlderMessagesRef.current?.(container);
+      }
+    },
+  });
+
   const scrollToBottom = useCallback(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
+    clearDeferredShift();
     const target = container.scrollHeight;
     markProgrammaticScroll(target);
     container.scrollTop = target;
-  }, [markProgrammaticScroll]);
+  }, [clearDeferredShift, markProgrammaticScroll]);
 
   const scrollToBottomAndReset = useCallback(() => {
     scrollToBottom();
@@ -473,34 +485,6 @@ export function useChatSessionState({
     return scrollHeight - scrollTop - clientHeight < 50;
   }, []);
 
-  /** Верх ленты ближе экрана к краю — пора брать следующую порцию. */
-  const isTopSentinelNear = useCallback((container: HTMLDivElement) => {
-    const sentinel = topSentinelElRef.current;
-    if (!sentinel?.isConnected) return false;
-    const margin = Math.max(400, container.clientHeight);
-    return sentinel.getBoundingClientRect().bottom >= container.getBoundingClientRect().top - margin;
-  }, []);
-
-  // Возврат позиции после подгрузки ранних сообщений. На iPhone запись
-  // scrollTop во время инерции Safari тут же перебивает остатком броска —
-  // лента оставалась у самого верха, и дальше ничего не грузилось. Приём из
-  // popmotion.io («manually set scroll while iOS momentum scroll bounces»):
-  // на кадр снять прокрутку (overflow hidden гасит инерцию), записать место,
-  // вернуть прокрутку в следующем кадре. На компьютере инерции нет — пишем как есть.
-  const setScrollTopFirmly = useCallback((container: HTMLDivElement, target: number) => {
-    markProgrammaticScroll(target);
-    const touch = typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches;
-    if (!touch) {
-      container.scrollTop = target;
-      return;
-    }
-    container.style.overflowY = 'hidden';
-    container.scrollTop = target;
-    requestAnimationFrame(() => {
-      container.style.overflowY = '';
-    });
-  }, [markProgrammaticScroll]);
-
   const loadOlderMessages = useCallback(
     async (container: HTMLDivElement) => {
       if (!isActive) return false;
@@ -509,7 +493,7 @@ export function useChatSessionState({
       if (!hasMoreMessages || !selectedSession || !selectedProject) return false;
 
       isLoadingMoreRef.current = true;
-      const scrollRestoreState = captureScrollRestoreState(container);
+      const heightBefore = container.scrollHeight + getDeferredShift();
 
       try {
         const result = await sessionStore.fetchMore(selectedSession.id, {
@@ -551,15 +535,9 @@ export function useChatSessionState({
           return false;
         }
 
-        pendingScrollRestoreRef.current = scrollRestoreState;
-        // Восстановление должно сработать в ближайшей отрисовке, даже если
-        // число сообщений в ней уже не меняется: хранилище иногда дорисовывает
-        // порцию раньше, чем сюда вернулся ответ, и без этого толчка позиция
-        // оставалась у самого верха (замер 15.09.26: прокрутка 68 в 2–3
-        // подгрузках из 6–8 — лента скакала). Возврат идёт по сообщению,
-        // стоявшему первым на экране, поэтому место встаёт верно и тогда,
-        // когда новые сообщения уже нарисованы.
-        setScrollRestoreTick((tick) => tick + 1);
+        // Место на экране держит useScrollAnchor; здесь только проверка после
+        // отрисовки, видна ли прибавка и не пора ли следующая порция.
+        growthCheckRef.current = heightBefore;
         setVisibleMessageCount((prev) => prev + SESSION_MESSAGES_PAGE_SIZE);
         if (!slot.hasMore) {
           allMessagesLoadedRef.current = true;
@@ -575,7 +553,7 @@ export function useChatSessionState({
         isLoadingMoreRef.current = false;
       }
     },
-    [hasMoreMessages, isActive, isLoadingMoreMessages, isTopSentinelNear, selectedProject, selectedSession, sessionStore],
+    [getDeferredShift, hasMoreMessages, isActive, isLoadingMoreMessages, isTopSentinelNear, selectedProject, selectedSession, sessionStore],
   );
 
   // Подгрузка ранних сообщений — сторож у верха ленты.
@@ -602,7 +580,7 @@ export function useChatSessionState({
       if (container && emptyChainRoundsRef.current < EMPTY_CHAIN_MAX_ROUNDS) {
         void loadOlderMessagesRef.current?.(container);
       }
-    }, { root, rootMargin: `${Math.max(400, root.clientHeight)}px 0px 0px 0px` });
+    }, { root, rootMargin: `${topPreloadMargin(root)}px 0px 0px 0px` });
     observer.observe(topSentinel);
     return () => observer.disconnect();
   }, [hasMoreMessages, isActive, topSentinel]);
@@ -755,50 +733,30 @@ export function useChatSessionState({
     if (!isActive || !scrollContainerRef.current) return;
 
     const container = scrollContainerRef.current;
-    if (pendingScrollRestoreRef.current) {
-      const restore = pendingScrollRestoreRef.current;
-      pendingScrollRestoreRef.current = null;
-      // Возврат идёт по сообщению, стоявшему первым на экране до порции.
-      const targetFor = (current: HTMLDivElement) => {
-        if (restore.anchor?.isConnected && restore.anchorOffset !== null) {
-          const nextAnchorOffset = (
-            restore.anchor.getBoundingClientRect().top
-            - current.getBoundingClientRect().top
-          );
-          return current.scrollTop + (nextAnchorOffset - restore.anchorOffset);
-        }
-        return restore.top + Math.max(current.scrollHeight - restore.height, 0);
-      };
-      setScrollTopFirmly(container, targetFor(container));
-      // Порция из одних действий вливается в верхний свёрнутый «Ход работы»:
-      // лента не растёт, и кажется, что ничего не подгрузилось (замер
-      // 15.09.26). Такие порции берутся подряд, не больше EMPTY_CHAIN_MAX_ROUNDS.
-      const grewVisibly = container.scrollHeight - restore.height >= EMPTY_CHAIN_MIN_GROWTH_PX;
-      emptyChainRoundsRef.current = grewVisibly ? 0 : emptyChainRoundsRef.current + 1;
-      window.requestAnimationFrame(() => {
-        const current = scrollContainerRef.current;
-        if (!current) return;
-        // Сверка через кадр: если остаток броска на iPhone всё же перебил
-        // возврат, ставим место ещё раз — инерция уже погашена.
-        const target = targetFor(current);
-        if (Math.abs(current.scrollTop - target) > 24) {
-          setScrollTopFirmly(current, target);
-        }
-        // Верх всё ещё ближе экрана — сторож нового пересечения не увидит,
-        // следующую порцию просим сами.
-        if (isTopSentinelNear(current) && emptyChainRoundsRef.current < EMPTY_CHAIN_MAX_ROUNDS) {
-          void loadOlderMessagesRef.current?.(current);
-        }
-      });
-      return;
-    }
-
     if (becameActive) {
+      clearDeferredShift();
       const target = isUserScrolledUp ? scrollPositionRef.current.top : container.scrollHeight;
       markProgrammaticScroll(target);
       container.scrollTop = target;
     }
-  }, [chatMessages.length, isActive, isTopSentinelNear, isUserScrolledUp, markProgrammaticScroll, scrollRestoreTick, setScrollTopFirmly]);
+  }, [clearDeferredShift, isActive, isUserScrolledUp, markProgrammaticScroll]);
+
+  // После отрисовки порции ранних сообщений. Порция из одних действий вливается
+  // в верхний свёрнутый «Ход работы»: лента почти не растёт, и кажется, что
+  // ничего не подгрузилось (замер 15.09.26) — такие берутся подряд, не больше
+  // EMPTY_CHAIN_MAX_ROUNDS. Верх всё ещё рядом — сторож нового пересечения не
+  // увидит, следующую порцию просим сами.
+  useEffect(() => {
+    const heightBefore = growthCheckRef.current;
+    const container = scrollContainerRef.current;
+    if (heightBefore === null || !container || !isActive) return;
+    growthCheckRef.current = null;
+    const grewVisibly = container.scrollHeight + getDeferredShift() - heightBefore >= EMPTY_CHAIN_MIN_GROWTH_PX;
+    emptyChainRoundsRef.current = grewVisibly ? 0 : emptyChainRoundsRef.current + 1;
+    if (isTopSentinelNear(container) && emptyChainRoundsRef.current < EMPTY_CHAIN_MAX_ROUNDS) {
+      void loadOlderMessagesRef.current?.(container);
+    }
+  }, [chatMessages.length, getDeferredShift, isActive, isTopSentinelNear, visibleMessageCount]);
 
   // Reset scroll/pagination state on session change
   useEffect(() => {
@@ -807,7 +765,7 @@ export function useChatSessionState({
       setVisibleMessageCount(INITIAL_VISIBLE_MESSAGES);
     }
     topLoadLockRef.current = false;
-    pendingScrollRestoreRef.current = null;
+    growthCheckRef.current = null;
     wasNearTopRef.current = false;
     emptyChainRoundsRef.current = 0;
     historyRetryAttemptsRef.current = 0;
@@ -1200,7 +1158,7 @@ export function useChatSessionState({
   useEffect(() => {
     if (!isActive) return;
     if (!scrollContainerRef.current || chatMessages.length === 0) return;
-    if (isLoadingMoreRef.current || isLoadingMoreMessages || pendingScrollRestoreRef.current) return;
+    if (isLoadingMoreRef.current || isLoadingMoreMessages || growthCheckRef.current !== null) return;
     if (searchScrollActiveRef.current) return;
 
     if (isUserScrolledUp) {
@@ -1246,9 +1204,6 @@ export function useChatSessionState({
       loadAllOverlayTimerRef.current = null;
     }
 
-    const container = scrollContainerRef.current;
-    const scrollRestoreState = container ? captureScrollRestoreState(container) : null;
-
     try {
       const slot = await sessionStore.fetchFromServer(requestSessionId, {
         limit: null,
@@ -1262,10 +1217,6 @@ export function useChatSessionState({
       if (currentSessionId !== requestSessionId) return;
 
       if (slot) {
-        if (scrollRestoreState) {
-          pendingScrollRestoreRef.current = scrollRestoreState;
-        }
-
         setHasMoreMessages(false);
         setTotalMessages(slot.total);
         messagesOffsetRef.current = slot.offset;

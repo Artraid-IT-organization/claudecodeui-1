@@ -199,7 +199,7 @@ function ChatMessagesPane({
           </div>
         </div>
       )}
-      <div className="mx-auto w-full max-w-[54.25rem] space-y-3 px-4 sm:space-y-4">
+      <div className="chat-rows mx-auto w-full max-w-[54.25rem] space-y-3 px-4 sm:space-y-4">
       {historyLoadError && chatMessages.length === 0 ? (
         // Переписка не пришла (обрыв связи, перезапуск сайта). Раньше здесь
         // вставал «Продолжить разговор» — как будто чат пуст (Егор, 15.09.26).
