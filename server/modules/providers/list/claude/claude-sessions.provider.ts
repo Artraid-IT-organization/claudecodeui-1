@@ -326,12 +326,17 @@ async function getSessionMessages(
  * content-level check the same payload renders as a huge user bubble during the
  * run and then vanishes on reload. The skill is already represented by the
  * `Skill` tool call, so it is never user-visible content.
+ *
+ * Stop hook feedback is the same case: the CLI sends a hook's `block` reason
+ * back to the model as a user turn. On disk it is `isMeta: true` (hidden after
+ * reload), live it has no flag and rendered as a bubble the human never wrote.
  */
 const INTERNAL_CONTENT_PREFIXES = [
   '<system-reminder>',
   'Caveat:',
   '[Request interrupted',
   'Base directory for this skill:',
+  'Stop hook feedback:',
 ] as const;
 
 function isInternalContent(content: string): boolean {

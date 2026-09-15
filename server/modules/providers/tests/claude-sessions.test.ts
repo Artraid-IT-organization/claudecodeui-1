@@ -40,6 +40,23 @@ test('claude: injected skill bodies are hidden even without the isMeta flag', ()
   assert.deepEqual(persisted, []);
 });
 
+test('claude: stop hook feedback is not shown as a human message', () => {
+  const provider = new ClaudeSessionsProvider();
+  const text = 'Stop hook feedback:\nНе останавливайся на вопросе-разрешении.';
+
+  const live = provider.normalizeMessage(
+    { uuid: 'h1', timestamp: '2026-09-15T14:25:00.000Z', message: { role: 'user', content: [{ type: 'text', text }] } },
+    SESSION_ID,
+  );
+  assert.deepEqual(live, []);
+
+  const liveString = provider.normalizeMessage(
+    { uuid: 'h2', timestamp: '2026-09-15T14:25:00.000Z', message: { role: 'user', content: text } },
+    SESSION_ID,
+  );
+  assert.deepEqual(liveString, []);
+});
+
 test('claude: the Skill tool result itself still reaches the UI', () => {
   const provider = new ClaudeSessionsProvider();
 
