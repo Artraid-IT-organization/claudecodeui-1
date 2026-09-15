@@ -152,6 +152,13 @@ test('прерванный вызов без результата не виси�
     await appendFile(file, line({ type: 'user', message: { content: 'продолжай' } }));
     assert.deepEqual(readTranscriptPhase(file), { phase: 'requesting', detail: null });
 
+    // Посреди идущей команды: уведомление о фоновой задаче и сообщение в очередь.
+    await appendFile(file, toolUse('w1', 'Write')
+      + line({ type: 'user', message: { content: '<task-notification>\n<task-id>x</task-id>' } })
+      + line({ type: 'user', message: { content: 'я тебя жду' } }));
+    assert.deepEqual(readTranscriptPhase(file), { phase: 'tool', detail: 'Write' }, 'вставки не закрывают идущую команду');
+    await appendFile(file, toolResult('w1'));
+
     await appendFile(file, toolUse('a1', 'Agent')
       + line({ type: 'assistant', message: { content: [{ type: 'text', text: 'ответ' }] } }));
     assert.deepEqual(readTranscriptPhase(file), { phase: 'writing', detail: null }, 'текст модели закрывает незакрытые вызовы');

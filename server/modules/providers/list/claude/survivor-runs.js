@@ -199,9 +199,10 @@ const SUBAGENT_TOOL_NAMES = new Set(['Agent', 'Task']);
  * Незакрытый вызов считается идущим, только пока после него не было ничего,
  * кроме результатов. Прерывание («Стоп») не всегда оставляет результат — бывает
  * просто текст «[Request interrupted…]», — а модель не пишет новый текст, пока
- * ждёт инструмент. Поэтому текст, размышление и сообщение человека закрывают все
+ * ждёт инструмент. Поэтому текст/размышление модели и прерывание закрывают все
  * незакрытые вызовы: иначе плашка вечно писала бы «Работает: Bash» у чата,
- * который давно ждёт человека.
+ * который давно ждёт человека. Сообщение человека и служебные вставки вызовы НЕ
+ * закрывают — они приходят и посреди идущей команды.
  *
  * @returns {{ phase: string, detail: string | null } | null}
  */
@@ -259,12 +260,20 @@ export function readTranscriptPhase(transcriptPath) {
         }
         last = 'reading';
       } else if (!entry.isMeta && (typeof content === 'string' || Array.isArray(content))) {
-        pending.clear();
-        const words = typeof content === 'string'
+        const words = String(typeof content === 'string'
           ? content
-          : content.map((block) => (block?.type === 'text' ? block.text : '')).join('');
-        // Прерывание — не просьба человека: работа стоит, этап неизвестен.
-        last = String(words).startsWith('[Request interrupted') ? null : 'requesting';
+          : content.map((block) => (block?.type === 'text' ? block.text : '')).join('')).trimStart();
+        if (words.startsWith('[Request interrupted')) {
+          // Прерывание: незакрытые вызовы остановлены, этап неизвестен.
+          pending.clear();
+          last = null;
+        } else if (!words.startsWith('<')) {
+          // Сообщение человека. Вызовы не закрывает: оно могло встать в
+          // очередь, пока команда ещё идёт. Служебные вставки
+          // (<task-notification> о фоновой задаче и т.п.) этап не меняют —
+          // рядом может идти другой вызов (журнал 7048bba0, 15.09.26).
+          last = 'requesting';
+        }
       }
     }
   }
