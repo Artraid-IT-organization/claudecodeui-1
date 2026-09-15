@@ -93,7 +93,9 @@ if [ ! -f "$REL/.verified" ]; then
     export HUSKY=0 NODE_OPTIONS="--max-old-space-size=${CCUI_BUILD_HEAP_MB:-1536}"
 
     say "Зависимости версии $SHORT"
-    nice -n 19 ionice -c 3 npm ci --no-audit --no-fund > .npm-ci.log 2>&1 \
+    # --include=dev: сборке нужны инструменты разработки (vite, tsc, husky), а
+    # NODE_ENV=production или omit=dev в настройках npm молча их пропускают.
+    nice -n 19 ionice -c 3 npm ci --include=dev --no-audit --no-fund > .npm-ci.log 2>&1 \
         || { status "ОШИБКА: не установились зависимости версии $SHORT, работает прежняя. Лог: $REL/.npm-ci.log"; exit 1; }
 
     built=0
