@@ -56,6 +56,12 @@ export function createVoiceRouter(dependencies: VoiceRouterDependencies): expres
   });
 
   router.post('/transcribe', (request, response, next) => {
+    // Решается до разбора тела: колбэки multer идут вне контекста запроса,
+    // и там уже не видно, чья это запись (владелец или гость общего сайта).
+    const archive = dependencies.audioArchive?.mayArchiveCurrentRequest()
+      ? dependencies.audioArchive
+      : undefined;
+
     dependencies.parseAudioUpload(request, response, (uploadError?: unknown) => {
       if (uploadError) {
         const message = uploadError instanceof Error ? uploadError.message : String(uploadError);
@@ -71,34 +77,30 @@ export function createVoiceRouter(dependencies: VoiceRouterDependencies): expres
           return;
         }
 
+        const audio = {
+          bytes: request.file.buffer,
+          mimeType: request.file.mimetype || 'audio/webm',
+          fileName: request.file.originalname || 'recording.webm',
+        };
+
+        // На диск до распознавания: упавшая или зависшая расшифровка не
+        // должна уносить с собой саму запись.
+        const kept = archive ? await archive.keep(audio) : null;
+
         const result = await dependencies.voiceService.transcribe({
-          audio: {
-            bytes: request.file.buffer,
-            mimeType: request.file.mimetype || 'audio/webm',
-            fileName: request.file.originalname || 'recording.webm',
-          },
+          audio,
           overrides: parseVoiceOverrides(request),
         });
+
+        // Без await: ни задержка Telegram, ни его отказ не должны стоить
+        // пользователю ответа, который уже готов.
+        void archive?.publish(kept, result.ok ? { text: result.value.text } : { error: result.error });
 
         if (sendFailure(response, result)) {
           return;
         }
 
         response.json(result.value);
-
-        // После ответа браузеру и намеренно без await: архив — побочная
-        // задача, и ни задержка Telegram, ни его отказ не должны стоить
-        // пользователю расшифровки, которая уже готова.
-        dependencies.audioArchive?.archive(
-          {
-            bytes: request.file.buffer,
-            mimeType: request.file.mimetype || 'audio/webm',
-            fileName: request.file.originalname || 'recording.webm',
-          },
-          typeof (result.value as { text?: unknown })?.text === 'string'
-            ? ((result.value as { text: string }).text)
-            : null,
-        );
       })().catch(next);
     });
   });

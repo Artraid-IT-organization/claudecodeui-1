@@ -1,4 +1,10 @@
+import { execFile } from 'node:child_process';
+import fs from 'node:fs';
+
 import multer from 'multer';
+
+import { getRequestRuntimeContext } from '@/shared/request-context.js';
+import { OPEN_REGISTRATION, isPlatformOwnerWebUser } from '@/shared/utils.js';
 
 import { createAudioArchiveService } from './audio-archive.service.js';
 import { createVoiceRouter } from './voice.routes.js';
@@ -59,15 +65,63 @@ const audioUpload = multer({
   limits: { fileSize: voiceMaxUploadBytes },
 });
 
-// Копия каждой продиктованной записи в Telegram-чат. Выключено, пока не
-// заданы обе переменные: без токена и чата ничего никуда не отправляется.
+/**
+ * Reads BOT_TOKEN and CHAT_ID from another bot's env file, so the archive posts
+ * into that bot's group without a second copy of its token to keep in sync.
+ */
+function readTelegramEnvFile(filePath: string): { botToken: string; chatId: string } {
+  if (!filePath) {
+    return { botToken: '', chatId: '' };
+  }
+  try {
+    const values: Record<string, string> = {};
+    for (const line of fs.readFileSync(filePath, 'utf8').split('\n')) {
+      const match = line.match(/^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)\s*=\s*(.*?)\s*$/);
+      if (match) {
+        values[match[1]] = match[2].replace(/^(['"])(.*)\1$/, '$2');
+      }
+    }
+    return { botToken: values.BOT_TOKEN || '', chatId: values.CHAT_ID || '' };
+  } catch (error) {
+    console.warn(`[Voice] Could not read AUDIO_ARCHIVE_TG_ENV_FILE: ${error instanceof Error ? error.message : String(error)}`);
+    return { botToken: '', chatId: '' };
+  }
+}
+
+const telegramFromFile = readTelegramEnvFile(process.env.AUDIO_ARCHIVE_TG_ENV_FILE || '');
+const parsedRetentionDays = Number(process.env.AUDIO_ARCHIVE_RETENTION_DAYS);
+
+// Каждая продиктованная запись: на диск на AUDIO_ARCHIVE_RETENTION_DAYS дней
+// (по умолчанию 14) и голосовым в Telegram-группу. Выключено, пока не задан
+// AUDIO_ARCHIVE_DIR; без токена и чата — только диск.
 const audioArchive = createAudioArchiveService({
-  botToken: process.env.AUDIO_ARCHIVE_TG_TOKEN || '',
-  chatId: process.env.AUDIO_ARCHIVE_TG_CHAT_ID || '',
+  archiveDir: process.env.AUDIO_ARCHIVE_DIR || '',
+  retentionDays: Number.isFinite(parsedRetentionDays) && parsedRetentionDays > 0 ? parsedRetentionDays : 14,
+  botToken: process.env.AUDIO_ARCHIVE_TG_TOKEN || telegramFromFile.botToken,
+  chatId: process.env.AUDIO_ARCHIVE_TG_CHAT_ID || telegramFromFile.chatId,
   fetchTelegram: fetch,
+  convertToVoice: (inputPath, outputPath) => new Promise((resolve, reject) => {
+    // nice + ionice: перекодирование не должно отнимать процессор и диск у чатов и sshd.
+    execFile(
+      'nice',
+      ['-n', '19', 'ionice', '-c', '3', 'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-i', inputPath,
+        '-vn', '-ac', '1', '-c:a', 'libopus', '-b:a', '32k', outputPath],
+      { timeout: 10 * 60 * 1000 },
+      (error) => (error ? reject(error) : resolve()),
+    );
+  }),
+  isArchivableRequest: () => {
+    if (!OPEN_REGISTRATION) {
+      return true;
+    }
+    const userId = getRequestRuntimeContext()?.userId;
+    const numericUserId = userId === undefined || userId === null ? NaN : Number(userId);
+    return Number.isFinite(numericUserId) && isPlatformOwnerWebUser(numericUserId);
+  },
   log: console,
   now: () => new Date(),
 });
+audioArchive.startRetentionSweep();
 
 /** Voice router assembled for the server entrypoint. */
 export const voiceRoutes = createVoiceRouter({
