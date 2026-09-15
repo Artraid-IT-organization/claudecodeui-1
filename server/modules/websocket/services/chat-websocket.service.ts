@@ -10,7 +10,7 @@ import {
   readClientMessageId,
   rememberAcceptedSend,
 } from '@/modules/websocket/services/chat-send-ledger.service.js';
-import { isSurvivorRunning, stopSurvivor } from '@/modules/providers/list/claude/survivor-runs.js';
+import { getSurvivorPhase, isSurvivorRunning, stopSurvivor } from '@/modules/providers/list/claude/survivor-runs.js';
 import { connectedClients, WS_OPEN_STATE } from '@/modules/websocket/services/websocket-state.service.js';
 import {
   isImageAttachmentDescriptor,
@@ -454,10 +454,18 @@ function handleChatSubscribe(
     // Claude runtime, so they can be looked up directly.
     const pendingPermissions = dependencies.runtime.getPendingApprovalsForSession(sessionId);
 
+    // У пережившего перезапуск агента живого потока нет — этап берётся из
+    // хвоста его переписки, иначе вкладка показывает «Ожидает модель».
+    const survivorPhase = isProcessing && (!run || run.status !== 'running')
+      ? getSurvivorPhase(sessionId)
+      : null;
+
     sendJson(ws, {
       kind: 'chat_subscribed',
       sessionId,
       isProcessing,
+      phase: survivorPhase?.phase ?? null,
+      phaseDetail: survivorPhase?.detail ?? null,
       lastSeq: run?.lastSeq ?? 0,
       runStartedAt: run?.startedAt ?? null,
       pendingPermissions,
