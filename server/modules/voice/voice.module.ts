@@ -101,10 +101,10 @@ const audioArchive = createAudioArchiveService({
   chatId: process.env.AUDIO_ARCHIVE_TG_CHAT_ID || telegramFromFile.chatId,
   fetchTelegram: fetch,
   convertToVoice: (inputPath, outputPath) => new Promise((resolve, reject) => {
-    // nice: перекодирование не должно отнимать процессор у чатов и sshd.
+    // nice + ionice: перекодирование не должно отнимать процессор и диск у чатов и sshd.
     execFile(
       'nice',
-      ['-n', '19', 'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-i', inputPath,
+      ['-n', '19', 'ionice', '-c', '3', 'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-i', inputPath,
         '-vn', '-ac', '1', '-c:a', 'libopus', '-b:a', '32k', outputPath],
       { timeout: 10 * 60 * 1000 },
       (error) => (error ? reject(error) : resolve()),
