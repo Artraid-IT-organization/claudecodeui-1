@@ -110,6 +110,23 @@ test('register hashes credentials and commits through injected dependencies', as
   assert.deepEqual(operations, ['begin', 'hash:secret12', 'create:alice:hash', 'commit', 'login:1']);
 });
 
+test('register on an open-registration instance only creates the first account', async () => {
+  const fresh = createAuthService(createDependencies({ openRegistration: true }));
+  assert.equal(fresh.getStatus().needsSetup, true);
+  const result = await fresh.register('owner', 'secret12');
+  assert.equal(result.success, true);
+
+  const taken = createAuthService(createDependencies({
+    openRegistration: true,
+    users: { hasUsers: () => true },
+  }));
+  assert.equal(taken.getStatus().needsSetup, false);
+  await assert.rejects(
+    taken.register('stranger', 'secret12'),
+    (error: unknown) => error instanceof AppError && error.code === 'AUTH_USER_ALREADY_CONFIGURED' && error.statusCode === 403,
+  );
+});
+
 test('login rejects an invalid password without issuing a token', async () => {
   let tokenIssued = false;
   let failureRecorded: [string, string] | undefined;
