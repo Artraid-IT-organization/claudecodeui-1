@@ -132,7 +132,10 @@ export function createAuthService(dependencies: AuthDependencies) {
         // thing as "already set up" - any number of independent accounts can
         // register - so the frontend uses `openRegistration` instead of this
         // flag to decide which auth screen to render.
-        needsSetup: !dependencies.openRegistration && !dependencies.users.hasUsers(),
+        // The very first account (the owner) is created through the same
+        // setup screen in both modes: a brand-new shared install otherwise
+        // has nobody who could mint the first invite.
+        needsSetup: !dependencies.users.hasUsers(),
         isAuthenticated: false,
         openRegistration: dependencies.openRegistration,
       };
@@ -157,11 +160,20 @@ export function createAuthService(dependencies: AuthDependencies) {
 
       dependencies.transaction.begin();
       try {
-        if (!dependencies.openRegistration && dependencies.users.hasUsers()) {
-          throw new AppError('User already exists. This is a single-user system.', {
-            code: 'AUTH_USER_ALREADY_CONFIGURED',
-            statusCode: 403,
-          });
+        // Password registration only ever creates the first account. On an
+        // OPEN_REGISTRATION instance everyone after the owner comes in through
+        // an invite (registerOpen); leaving this open let anyone on the
+        // internet create a password account on a shared install.
+        if (dependencies.users.hasUsers()) {
+          throw new AppError(
+            dependencies.openRegistration
+              ? 'Registration requires an invitation link.'
+              : 'User already exists. This is a single-user system.',
+            {
+              code: 'AUTH_USER_ALREADY_CONFIGURED',
+              statusCode: 403,
+            },
+          );
         }
 
         const passwordHash = await dependencies.hashPassword(password);

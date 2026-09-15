@@ -56,6 +56,11 @@ export default function ProtectedRoute({ children }: ProtectedRouteProps) {
     // unused. Everything else (bare root, unknown token, already-used token)
     // renders a message, never the registration form.
     if (!user) {
+      // Brand-new install: nobody exists yet, so the owner creates the first
+      // account with the ordinary setup form (the server refuses it later).
+      if (needsSetup) {
+        return <SetupForm />;
+      }
       if (inviteToken) {
         if (inviteStatus === 'checking') {
           return <AuthLoadingScreen />;
