@@ -104,3 +104,32 @@ test('когда переживший агент закончил, сервер 
     assert.equal(isSurvivorRunning('chat-3'), false);
   });
 });
+
+test('новый процесс того же разговора гасит прежний, если тот не ушёл сам', async () => {
+  await withLiveDir(async () => {
+    const previousGrace = process.env.CLOUDCLI_STALE_RUN_GRACE_MS;
+    process.env.CLOUDCLI_STALE_RUN_GRACE_MS = '200';
+    try {
+      const stale = spawnSurvivableClaude(fakeAgent(60000), { appSessionId: 'chat-4', providerSessionId: 'provider-4' });
+      const other = spawnSurvivableClaude(fakeAgent(60000), { appSessionId: 'chat-5', providerSessionId: 'provider-5' });
+      const fresh = spawnSurvivableClaude(fakeAgent(60000), { appSessionId: 'chat-4', providerSessionId: 'provider-4' });
+
+      const exited = await new Promise<boolean>((resolve) => {
+        stale.once('exit', () => resolve(true));
+        setTimeout(() => resolve(false), 3000);
+      });
+      assert.equal(exited, true, 'прежний процесс разговора остановлен');
+
+      let otherExited = false;
+      other.once('exit', () => { otherExited = true; });
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      assert.equal(otherExited, false, 'чужой разговор не тронут');
+
+      fresh.kill('SIGTERM');
+      other.kill('SIGTERM');
+    } finally {
+      if (previousGrace === undefined) delete process.env.CLOUDCLI_STALE_RUN_GRACE_MS;
+      else process.env.CLOUDCLI_STALE_RUN_GRACE_MS = previousGrace;
+    }
+  });
+});

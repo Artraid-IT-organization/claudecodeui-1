@@ -69,6 +69,26 @@ const TOOL_APPROVAL_TIMEOUT_MS = parseInt(process.env.CLAUDE_TOOL_APPROVAL_TIMEO
 // forever. The timer resets on every message, so it measures silence, not total time.
 const BG_WAIT_CEILING_MS = 30 * 60 * 1000;
 
+// Сообщения, по которым видно, что CLI начал следующий ход из своей очереди.
+// Хук UserPromptSubmit идёт до `init` и в больших чатах занимает секунды — он
+// тоже знак продолжения (Stop-хуки — нет: они бывают и в конце хода).
+const TURN_CONTINUES_SYSTEM_SUBTYPES = new Set(['init', 'status']);
+function startsQueuedTurn(sdkMessage) {
+  if (sdkMessage?.type === 'system') {
+    if (String(sdkMessage.subtype || '').startsWith('hook_')) {
+      return sdkMessage.hook_event === 'UserPromptSubmit';
+    }
+    return TURN_CONTINUES_SYSTEM_SUBTYPES.has(sdkMessage.subtype);
+  }
+  return sdkMessage?.type === 'assistant' || sdkMessage?.type === 'user' || sdkMessage?.type === 'stream_event';
+}
+// Сколько ждать idle после `result`, если CLI молчит. Обычно idle приходит в
+// ту же миллисекунду (замер 15.09.26: 51 мс); страховка нужна, только если idle
+// не придёт вовсе — например, CLI ждёт фоновую работу, которую сайт не распознал.
+// По страховке экран получает «готово», но вход CLI остаётся открытым до idle:
+// если CLI всё-таки работает, «Стоп» и новое сообщение до него дойдут.
+const TURN_END_FALLBACK_MS = parseInt(process.env.CLAUDE_TURN_END_FALLBACK_MS, 10) || 60000;
+
 const TOOLS_REQUIRING_INTERACTION = new Set(['AskUserQuestion', 'ExitPlanMode']);
 
 // Bound on the real-title-generation control request below. Measured ~1-2s
@@ -248,7 +268,12 @@ function mapCliOptionsToSDK(options = {}) {
 
   // Forward all host env vars (e.g. ANTHROPIC_BASE_URL) to the subprocess.
   // Since SDK 0.2.113, options.env replaces process.env instead of overlaying it.
-  sdkOptions.env = { ...process.env, CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: String(BG_WAIT_CEILING_MS) };
+  sdkOptions.env = {
+    ...process.env,
+    CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: String(BG_WAIT_CEILING_MS),
+    // Сигнал «очередь CLI пуста» — по нему экран узнаёт настоящий конец хода.
+    CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: '1',
+  };
 
   // Multi-tenant env overrides. `options.claudeConfigDir`/`options.anthropicApiKey`
   // are set explicitly by the chat WebSocket handler (chat-websocket.service.ts),
@@ -732,6 +757,15 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
   // The client is told the turn is over as soon as `result` lands, even though
   // the process lingers, so the UI never waits out the idle hold.
   let turnCompleteSent = false;
+  // CLI шлёт session_state_changed (включено CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS).
+  // Пока их нет (старый CLI) — ход, как раньше, кончается на `result`.
+  let stateEventsSeen = false;
+  // `result` пришёл, ждём idle — конец очереди CLI, а не одного хода.
+  let turnEndPending = false;
+  let turnEndFallbackTimer = null;
+  // «Готово» ушло по страховке, вход держим до idle.
+  let heldForIdle = false;
+  let finishTurn = async (_options) => {};
   // Объявлен здесь, чтобы finally мог его остановить при любом выходе.
   let stallTimer = null;
   // Set when a turn starts background work, cleared when the next `result`
@@ -759,6 +793,27 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     }, BG_WAIT_CEILING_MS);
     // Never let the hold keep the server process alive on its own.
     idleReleaseTimer.unref?.();
+  };
+
+  const clearTurnEndFallback = () => {
+    if (turnEndFallbackTimer) {
+      clearTimeout(turnEndFallbackTimer);
+      turnEndFallbackTimer = null;
+    }
+  };
+
+  // Страховка на случай, если idle так и не придёт: за `result` тишина —
+  // значит, очередь пуста. Следующий ход из очереди эту страховку снимает.
+  const armTurnEndFallback = () => {
+    clearTurnEndFallback();
+    turnEndFallbackTimer = setTimeout(() => {
+      turnEndFallbackTimer = null;
+      if (turnEndPending) {
+        console.warn(`[claude] после result ${Math.round(TURN_END_FALLBACK_MS / 1000)} с нет idle — «готово» по страховке, вход держу до idle: ${sessionKey() || 'NEW'}`);
+        finishTurn({ viaFallback: true }).catch((error) => console.error('[claude] конец хода по страховке не удался:', error?.message || error));
+      }
+    }, TURN_END_FALLBACK_MS);
+    turnEndFallbackTimer.unref?.();
   };
 
   // Hoisted above the try so the catch's cleanup can tell whether this run
@@ -998,6 +1053,71 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     }, 30_000);
     stallTimer.unref?.();
 
+    // Конец хода для экрана: «готово», уведомление, название нового чата,
+    // затем либо удержание процесса под фоновую работу, либо выход CLI.
+    finishTurn = async ({ viaFallback = false } = {}) => {
+      turnEndPending = false;
+      clearTurnEndFallback();
+      if (supersededInstances.has(queryInstance)) {
+        // Ход перехватил новый запуск: экран и «готово» принадлежат ему.
+        releasePromptStream();
+        return;
+      }
+      // The turn is done as far as the client is concerned.
+      const abortPending = sessionKey() ? abortedSessionIds.has(sessionKey()) : false;
+      if (!turnCompleteSent && !abortPending) {
+        turnCompleteSent = true;
+        ws.send(createCompleteMessage({ provider: 'claude', sessionId: capturedSessionId || sessionId || null, exitCode: 0 }));
+        notifyRunStopped({
+          userId: ws?.userId || null,
+          provider: 'claude',
+          sessionId: sessionId || capturedSessionId || null,
+          sessionName: sessionSummary,
+          stopReason: 'completed'
+        });
+      } else if (heldForBackgroundWork && !abortPending) {
+        // A result after the turn already reported complete means the work we
+        // held the process open for has finished and pushed a follow-up turn.
+        notifyBackgroundWorkCompleted({
+          userId: ws?.userId || null,
+          provider: 'claude',
+          sessionId: sessionId || capturedSessionId || null,
+          sessionName: sessionSummary
+        });
+      }
+
+      // One real, once-generated title per brand-new session: fired after
+      // the client already has its answer (turnCompleteSent above), so
+      // this can only add latency to the CLI process winding down, never
+      // to what the user sees. Must happen before releasePromptStream()
+      // below — the control request needs the transport still open.
+      if (isBrandNewSession && !titleGenerationTriggered && !abortPending) {
+        titleGenerationTriggered = true;
+        await generateRealSessionTitle(queryInstance, command);
+      }
+
+      if (backgroundWorkPending) {
+        // Work started during this turn is still running. Hold the process
+        // open so it can finish and report back in a follow-up turn; the
+        // ceiling is only a backstop for work that never reports.
+        backgroundWorkPending = false;
+        heldForBackgroundWork = true;
+        scheduleRelease();
+      } else if (viaFallback) {
+        // idle не пришёл: возможно, CLI ещё работает (в том числе ответ фоновой
+        // работы, за которым идёт следующая). Закрыть вход — значит отрезать его
+        // от «Стопа» и новых сообщений; держим до idle или потолка.
+        heldForIdle = true;
+        scheduleRelease();
+      } else {
+        // Either nothing was backgrounded, or the background work just
+        // reported in — let the CLI exit now, as it always has.
+        heldForBackgroundWork = false;
+        heldForIdle = false;
+        releasePromptStream();
+      }
+    };
+
     for await (const message of queryInstance) {
       lastMessageAt = Date.now();
 
@@ -1051,58 +1171,42 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
         backgroundWorkPending = true;
       }
 
-      if (message.type === 'result') {
-        // The turn is done as far as the client is concerned.
-        const abortPending = sessionKey() ? abortedSessionIds.has(sessionKey()) : false;
-        if (!turnCompleteSent && !abortPending) {
-          turnCompleteSent = true;
-          ws.send(createCompleteMessage({ provider: 'claude', sessionId: capturedSessionId || sessionId || null, exitCode: 0 }));
-          notifyRunStopped({
-            userId: ws?.userId || null,
-            provider: 'claude',
-            sessionId: sessionId || capturedSessionId || null,
-            sessionName: sessionSummary,
-            stopReason: 'completed'
-          });
-        } else if (heldForBackgroundWork && !abortPending) {
-          // A result after the turn already reported complete means the work we
-          // held the process open for has finished and pushed a follow-up turn.
-          notifyBackgroundWorkCompleted({
-            userId: ws?.userId || null,
-            provider: 'claude',
-            sessionId: sessionId || capturedSessionId || null,
-            sessionName: sessionSummary
-          });
-        }
+      const isStateEvent = message.type === 'system' && message.subtype === 'session_state_changed';
+      if (isStateEvent) {
+        stateEventsSeen = true;
+      }
 
-        // One real, once-generated title per brand-new session: fired after
-        // the client already has its answer (turnCompleteSent above), so
-        // this can only add latency to the CLI process winding down, never
-        // to what the user sees. Must happen before releasePromptStream()
-        // below — the control request needs the transport still open.
-        if (isBrandNewSession && !titleGenerationTriggered && !abortPending) {
-          titleGenerationTriggered = true;
-          await generateRealSessionTitle(queryInstance, command);
+      if (isStateEvent && message.state === 'idle' && turnEndPending) {
+        await finishTurn();
+      } else if (isStateEvent && message.state === 'idle' && heldForIdle) {
+        heldForIdle = false;
+        releasePromptStream();
+      } else if (message.type === 'result' && stateEventsSeen && !backgroundWorkPending) {
+        // `result` закрывает один ход, но не очередь: если за ним в CLI уже
+        // лежит следующее сообщение (пришло во время хода, или «Стоп» и новое
+        // сообщение в одну секунду), CLI сразу начнёт следующий ход. Раньше
+        // здесь сайт гасил индикатор и закрывал вход — CLI работал дальше
+        // невидимкой, «Стоп» до него не доходил, а следующее сообщение
+        // запускало вторую копию агента на тех же файлах (15.09.26).
+        // Конец очереди CLI сообщает сам: session_state_changed → idle.
+        turnEndPending = true;
+        armTurnEndFallback();
+      } else if (message.type === 'result') {
+        await finishTurn();
+      } else if (turnEndPending && startsQueuedTurn(message)) {
+        // CLI взял из очереди следующий ход — он закончится своим `result`.
+        if (turnEndFallbackTimer) {
+          console.log(`[claude] за result в очереди следующий ход, чат остаётся в работе: ${sessionKey() || 'NEW'}`);
         }
-
-        if (backgroundWorkPending) {
-          // Work started during this turn is still running. Hold the process
-          // open so it can finish and report back in a follow-up turn; the
-          // ceiling is only a backstop for work that never reports.
-          backgroundWorkPending = false;
-          heldForBackgroundWork = true;
-          scheduleRelease();
-        } else {
-          // Either nothing was backgrounded, or the background work just
-          // reported in — let the CLI exit now, as it always has.
-          heldForBackgroundWork = false;
-          releasePromptStream();
-        }
+        clearTurnEndFallback();
       } else if (idleReleaseTimer) {
         // Background activity after the turn — push the countdown back out.
         scheduleRelease();
       }
     }
+
+    turnEndPending = false;
+    clearTurnEndFallback();
 
     // Clean up session on completion — only while this run still owns the map
     // entry. A superseding run may have replaced it, and deleting here would
@@ -1182,6 +1286,7 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     if (stallTimer) {
       clearInterval(stallTimer);
     }
+    clearTurnEndFallback();
     if (idleReleaseTimer) {
       clearTimeout(idleReleaseTimer);
       idleReleaseTimer = null;

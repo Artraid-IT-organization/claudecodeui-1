@@ -109,6 +109,7 @@ export function spawnSurvivableClaude(spawnOptions, context = {}) {
         removeRecord(child.pid);
       }
     });
+    retireStaleRuns(context.providerSessionId, child.pid);
   }
 
   return {
@@ -130,6 +131,52 @@ export function spawnSurvivableClaude(spawnOptions, context = {}) {
     once: child.once.bind(child),
     off: child.off.bind(child),
   };
+}
+
+/**
+ * Один разговор — один агент. Новый ход продолжает разговор новым процессом, а
+ * прежний обычно уходит сам: его прерывают и закрывают ему вход. Если прежний
+ * этого не услышал (вход ему уже закрыли, а он доделывал очередь), он работает
+ * дальше невидимкой — 15.09.26 две копии агента полчаса переписывали одни и те
+ * же файлы. Поэтому через паузу прежний процесс того же разговора гасим сигналом.
+ */
+function retireStaleRuns(providerSessionId, freshPid) {
+  if (!providerSessionId) return;
+  let files = [];
+  try {
+    files = fs.readdirSync(liveRunsDir()).filter((name) => name.endsWith('.json'));
+  } catch {
+    return;
+  }
+  const stalePids = [];
+  for (const name of files) {
+    try {
+      const record = JSON.parse(fs.readFileSync(path.join(liveRunsDir(), name), 'utf8'));
+      if (record.providerSessionId === providerSessionId && record.pid !== freshPid && isAgentAlive(record.pid)) {
+        stalePids.push(record.pid);
+      }
+    } catch {
+      // битая запись — пропускаем
+    }
+  }
+  if (stalePids.length === 0) return;
+  const graceMs = Number(process.env.CLOUDCLI_STALE_RUN_GRACE_MS || 5000);
+  const timer = setTimeout(() => {
+    for (const pid of stalePids) {
+      if (!isAgentAlive(pid)) continue;
+      console.warn(`[survivor-runs] разговор ${providerSessionId} продолжил новый процесс ${freshPid}, прежний ${pid} не остановился сам — останавливаю`);
+      try {
+        process.kill(pid, 'SIGTERM');
+      } catch {
+        // уже завершился
+      }
+      removeRecord(pid);
+      for (const [appSessionId, survivor] of survivors) {
+        if (survivor.pid === pid) survivors.delete(appSessionId);
+      }
+    }
+  }, graceMs);
+  timer.unref?.();
 }
 
 /** Агент сообщил свой номер разговора — дописать в запись, чтобы найти файл переписки. */
