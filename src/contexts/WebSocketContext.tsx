@@ -153,10 +153,9 @@ const useWebSocketProviderState = (): WebSocketContextType => {
     }
   }, []);
 
-  /** Честный отказ по сообщениям, которые больше не досылаются. */
-  const reportGivenUp = useCallback(() => {
-    for (const entry of outboxRef.current?.takeGivenUp(ACK_TIMEOUT_MS) ?? []) {
-      console.warn('[outbox] сообщение так и не получило расписку сервера', entry.id);
+  /** Сказать в ленте, что сообщение не ушло, и вернуть его текст. */
+  const reportFailed = useCallback((entries: OutboxEntry[]) => {
+    for (const entry of entries) {
       dispatch({
         kind: 'chat_send_failed',
         sessionId: typeof entry.message.sessionId === 'string' ? entry.message.sessionId : undefined,
@@ -166,6 +165,13 @@ const useWebSocketProviderState = (): WebSocketContextType => {
       });
     }
   }, [dispatch]);
+
+  /** Честный отказ по сообщениям, которые больше не досылаются. */
+  const reportGivenUp = useCallback(() => {
+    const givenUp = outboxRef.current?.takeGivenUp(ACK_TIMEOUT_MS) ?? [];
+    if (givenUp.length > 0) console.warn('[outbox] сообщения так и не получили расписку сервера', givenUp.map((e) => e.id));
+    reportFailed(givenUp);
+  }, [reportFailed]);
 
   /**
    * Бросить текущее соединение и открыть новое, не дожидаясь `onclose`: у
@@ -350,7 +356,10 @@ const useWebSocketProviderState = (): WebSocketContextType => {
             } else if (data.code === 'RUN_IN_PROGRESS' && typeof data.sessionId === 'string') {
               // «Чат уже работает» без номера — ответ старого сервера. Повтором
               // это не лечится, только множит красные ошибки в ленте.
-              outboxRef.current?.settleSession(data.sessionId);
+              const dropped = outboxRef.current?.settleSession(data.sessionId) ?? [];
+              // Об одном сообщении скажет сама ошибка в ленте; об остальных
+              // из очереди этого чата — отдельно и с текстом, чтобы не пропали молча.
+              reportFailed(dropped.slice(1));
             }
           }
           dispatch(data);
@@ -381,7 +390,7 @@ const useWebSocketProviderState = (): WebSocketContextType => {
     } catch (error) {
       console.error('Error creating WebSocket connection:', error);
     }
-  }, [dispatch, isAuthLoading, token, user, reportGivenUp, transmit, scheduleOutboxCheck]); // reconnect with current authentication state
+  }, [dispatch, isAuthLoading, token, user, reportGivenUp, reportFailed, transmit, scheduleOutboxCheck]); // reconnect with current authentication state
   connectRef.current = connect;
 
   // Приложение вернулось из фона или появилась сеть. Если есть сообщения без

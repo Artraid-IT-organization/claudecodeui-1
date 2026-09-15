@@ -92,7 +92,7 @@ test('«чат занят» от старого сервера снимает с
   outbox.add({ type: 'chat.send', sessionId: 'busy', content: '1' });
   outbox.add({ type: 'chat.send', sessionId: 'busy', content: '2' });
   const other = outbox.add({ type: 'chat.send', sessionId: 'other', content: '3' });
-  assert.equal(outbox.settleSession('busy'), 2);
+  assert.equal(outbox.settleSession('busy').length, 2);
   assert.deepEqual(outbox.pending().map((e) => e.id), [other.id]);
-  assert.equal(outbox.settleSession('nobody'), 0);
+  assert.equal(outbox.settleSession('nobody').length, 0);
 });

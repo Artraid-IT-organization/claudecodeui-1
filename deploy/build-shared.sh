@@ -50,6 +50,7 @@ say "Сборка в своём каталоге: $(git log --oneline -1)"
 # (~/.claude/hooks/ccui-deploy-guard.py): у соседей может быть старая копия
 # этого скрипта.
 LIVE="$(git -C "$SHARED" rev-parse HEAD 2>/dev/null)"
+[ -n "$LIVE" ] || say "ВНИМАНИЕ: не удалось узнать живой коммит сайта — проверка на затирание чужой работы пропущена"
 if [ -z "$NO_RESTART" ] && [ -n "$LIVE" ] && ! git merge-base --is-ancestor "$LIVE" "$HEAD_NOW"; then
     if [ -z "$ALLOW_ROLLBACK" ]; then
         say "ОШИБКА: на сайте сейчас $(git -C "$SHARED" log -1 --format='%h %s'),"
