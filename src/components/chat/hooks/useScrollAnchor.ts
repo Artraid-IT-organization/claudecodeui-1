@@ -92,6 +92,11 @@ export function useScrollAnchor({
   const lastHeightRef = useRef(-1);
   const touchingRef = useRef(false);
   const lastTouchAtRef = useRef(0);
+  // Последнее движение начато пальцем. Колесо и полоса прокрутки ничего не
+  // обрывают записью scrollTop — там сдвиг возвращаем сразу, иначе при быстром
+  // листании колесом лента стояла у «ложного верха», пока не отпустишь
+  // (замер 15.09.26: до 8 шагов). Как в TanStack Virtual PR #1280.
+  const touchProvenanceRef = useRef(false);
   const lastScrollAtRef = useRef(0);
   const flushTimerRef = useRef<number | null>(null);
   const enabledRef = useRef(enabled);
@@ -109,7 +114,7 @@ export function useScrollAnchor({
 
   const inMotion = useCallback((container: HTMLDivElement) => (
     (touchingRef.current && performance.now() - lastTouchAtRef.current < TOUCH_STALE_MS)
-    || performance.now() - lastScrollAtRef.current < MOTION_IDLE_MS
+    || (touchProvenanceRef.current && performance.now() - lastScrollAtRef.current < MOTION_IDLE_MS)
     // Упругий отскок у края (Safari): запись прокрутки в нём теряется.
     || container.scrollTop < 0
   ), []);
@@ -201,8 +206,10 @@ export function useScrollAnchor({
       lastScrollAtRef.current = performance.now();
       reconcile();
     };
+    const onWheel = () => { touchProvenanceRef.current = false; };
     const onTouchStart = () => {
       touchingRef.current = true;
+      touchProvenanceRef.current = true;
       lastTouchAtRef.current = performance.now();
     };
     const onTouchMove = () => { lastTouchAtRef.current = performance.now(); };
@@ -224,6 +231,7 @@ export function useScrollAnchor({
     };
 
     container.addEventListener('scroll', onScroll, { passive: true });
+    container.addEventListener('wheel', onWheel, { passive: true });
     container.addEventListener('touchstart', onTouchStart, { passive: true });
     container.addEventListener('touchmove', onTouchMove, { passive: true });
     container.addEventListener('touchend', onTouchEnd, { passive: true });
@@ -241,6 +249,7 @@ export function useScrollAnchor({
 
     return () => {
       container.removeEventListener('scroll', onScroll);
+      container.removeEventListener('wheel', onWheel);
       container.removeEventListener('touchstart', onTouchStart);
       container.removeEventListener('touchmove', onTouchMove);
       container.removeEventListener('touchend', onTouchEnd);
