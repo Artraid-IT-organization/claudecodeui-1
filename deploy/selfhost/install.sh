@@ -4,7 +4,7 @@
 #
 #   sudo bash deploy/selfhost/install.sh --user claude [--create-user] \
 #        [--domain ui.example.ru] [--email me@example.com] [--port 3003] \
-#        [--groq-key gsk_...] [--owner-name asya]
+#        [--groq-key gsk_...] [--owner-name me]
 #
 # Что делает (повторный запуск безопасен — сделанное пропускается):
 #   1. Проверяет сервер: память, диск, не заняты ли порты 80/443 чужой программой.

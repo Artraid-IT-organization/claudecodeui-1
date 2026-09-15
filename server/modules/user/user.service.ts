@@ -144,7 +144,7 @@ export function createUserService(dependencies: UserDependencies) {
      */
     async getUsageLimits(userId?: number) {
       // Главный источник — тот же, что у `/usage` в Claude Code, и по входу
-      // именно этого пользователя: у Аси свои проценты, у Егора свои.
+      // именно этого пользователя: у каждого пользователя свои проценты.
       // Разбор кэша ниже остаётся запасным путём на случай, если запрос не
       // удался и удачного значения ещё не было.
       const accountDir = resolveWebUserRuntimeContext(
