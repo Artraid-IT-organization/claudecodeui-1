@@ -175,7 +175,14 @@ export function useChatRealtimeHandlers({
           noteRun(sid, msg.runStartedAt, lastSeqRef.current);
 
           if (msg.isProcessing) {
-            onSessionProcessing?.(sid);
+            // Этап приходит только для чата, пережившего перезапуск сайта
+            // (сервер читает хвост переписки); у живого — из потока.
+            onSessionProcessing?.(sid, typeof msg.phase === 'string'
+              ? {
+                phase: msg.phase as ActivityPhase,
+                detail: typeof msg.phaseDetail === 'string' ? msg.phaseDetail : null,
+              }
+              : undefined);
           } else {
             // Idle ack: ignore it if a newer request started after the
             // subscribe was sent — the ack describes the older state.
@@ -351,7 +358,12 @@ export function useChatRealtimeHandlers({
       // Этап работы без содержания — только подпись плашки, в ленту не идёт.
       if (msg.kind === 'run_phase') {
         if (sid && typeof msg.text === 'string') {
-          onSessionProcessing?.(sid, { phase: msg.text as ActivityPhase, detail: null, canInterrupt: true });
+          onSessionProcessing?.(sid, {
+            phase: msg.text as ActivityPhase,
+            // detail — имя инструмента или число помощников (переживший перезапуск чат).
+            detail: typeof msg.detail === 'string' ? msg.detail : null,
+            canInterrupt: true,
+          });
         }
         return;
       }

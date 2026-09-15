@@ -179,14 +179,107 @@ function mtimeOf(file) {
   }
 }
 
+const PHASE_TAIL_BYTES = 512 * 1024;
+const SUBAGENT_TOOL_NAMES = new Set(['Agent', 'Task']);
+
+/**
+ * Что переживший агент делает сейчас — по хвосту его переписки.
+ *
+ * Живого потока у такого чата нет, и плашка до конца работы писала «Ожидает
+ * модель». 15.09.26 Егор решил, что чат завис, остановил его и написал «я
+ * тебя жду»: на деле 4 минуты шёл проверяющий помощник (105 шагов), а его шаги
+ * пишутся в отдельный файл — в переписке чата не менялось ничего. Перезапусков
+ * сайта в день бывает больше десяти, и каждый переводит все идущие чаты в это
+ * состояние.
+ *
+ * Правило: незакрытый вызов помощника → `agents` (сколько); незакрытый другой
+ * инструмент → `tool` (имя); последним пришёл результат → `reading`; размышление
+ * → `thinking`; текст ответа → `writing`; сообщение человека → `requesting`.
+ *
+ * @returns {{ phase: string, detail: string | null } | null}
+ */
+export function readTranscriptPhase(transcriptPath) {
+  if (!transcriptPath) return null;
+  let text;
+  try {
+    const fd = fs.openSync(transcriptPath, 'r');
+    try {
+      const size = fs.fstatSync(fd).size;
+      const length = Math.min(size, PHASE_TAIL_BYTES);
+      const buffer = Buffer.alloc(length);
+      fs.readSync(fd, buffer, 0, length, size - length);
+      text = buffer.toString('utf8');
+      // Первая строка могла начаться с середины — выбросить.
+      if (length < size) text = text.slice(text.indexOf('\n') + 1);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+
+  /** id вызова → имя инструмента, пока нет результата */
+  const pending = new Map();
+  let last = null;
+  for (const line of text.split('\n')) {
+    if (!line) continue;
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    // Шаги помощников живут в своих файлах, в переписку чата не попадают.
+    if (entry?.isSidechain) continue;
+    const content = entry?.message?.content;
+    if (entry?.type === 'assistant' && Array.isArray(content)) {
+      for (const block of content) {
+        if (block?.type === 'tool_use' && block.id) {
+          pending.set(block.id, String(block.name || ''));
+          last = 'tool';
+        } else if (block?.type === 'thinking') {
+          last = 'thinking';
+        } else if (block?.type === 'text') {
+          last = 'writing';
+        }
+      }
+    } else if (entry?.type === 'user') {
+      if (Array.isArray(content) && content.some((block) => block?.type === 'tool_result')) {
+        for (const block of content) {
+          if (block?.type === 'tool_result') pending.delete(block.tool_use_id);
+        }
+        last = 'reading';
+      } else if (!entry.isMeta && (typeof content === 'string' || Array.isArray(content))) {
+        last = 'requesting';
+      }
+    }
+  }
+
+  const names = Array.from(pending.values());
+  const agents = names.filter((name) => SUBAGENT_TOOL_NAMES.has(name)).length;
+  if (agents > 0) return { phase: 'agents', detail: String(agents) };
+  if (names.length > 0) return { phase: 'tool', detail: names[names.length - 1] || null };
+  if (!last || last === 'tool') return null;
+  return { phase: last, detail: null };
+}
+
+function refreshPhase(survivor) {
+  const next = readTranscriptPhase(survivor.transcriptPath);
+  const changed = (next?.phase ?? null) !== (survivor.phase?.phase ?? null)
+    || (next?.detail ?? null) !== (survivor.phase?.detail ?? null);
+  survivor.phase = next;
+  return changed;
+}
+
 /**
  * После старта сервера: найти агентов, переживших прошлый сервер, и следить
  * за ними. `onTranscriptChange(appSessionId)` — переписка изменилась,
+ * `onPhase(appSessionId, phase)` — сменился этап работы (см. readTranscriptPhase),
  * `onGone(appSessionId)` — агент закончил.
  *
- * @param {{ onTranscriptChange?: (appSessionId: string) => void, onGone?: (appSessionId: string) => void, pollMs?: number }} [options]
+ * @param {{ onTranscriptChange?: (appSessionId: string) => void, onPhase?: (appSessionId: string, phase: { phase: string, detail: string | null } | null) => void, onGone?: (appSessionId: string) => void, pollMs?: number }} [options]
  */
-export function adoptSurvivors({ onTranscriptChange = (_id) => {}, onGone = (_id) => {}, pollMs = 3000 } = {}) {
+export function adoptSurvivors({ onTranscriptChange = (_id) => {}, onPhase = (_id, _phase) => {}, onGone = (_id) => {}, pollMs = 3000 } = {}) {
   shuttingDown = false;
   let files = [];
   try {
@@ -208,26 +301,29 @@ export function adoptSurvivors({ onTranscriptChange = (_id) => {}, onGone = (_id
       continue;
     }
     const transcriptPath = findTranscript(record);
-    survivors.set(record.appSessionId, {
+    const survivor = {
       ...record,
       transcriptPath,
       transcriptMtime: transcriptPath ? mtimeOf(transcriptPath) : 0,
-    });
+      phase: null,
+    };
+    refreshPhase(survivor);
+    survivors.set(record.appSessionId, survivor);
     console.log(`[survivor-runs] чат ${record.appSessionId} пережил перезапуск (PID ${record.pid}), продолжаю показывать его работу`);
   }
 
   if (pollTimer) clearInterval(pollTimer);
   if (pollMs > 0) {
-    pollTimer = setInterval(() => pollSurvivors({ onTranscriptChange, onGone }), pollMs);
+    pollTimer = setInterval(() => pollSurvivors({ onTranscriptChange, onPhase, onGone }), pollMs);
     pollTimer.unref?.();
   }
   return listSurvivors();
 }
 
 /**
- * @param {{ onTranscriptChange?: (appSessionId: string) => void, onGone?: (appSessionId: string) => void }} [options]
+ * @param {{ onTranscriptChange?: (appSessionId: string) => void, onPhase?: (appSessionId: string, phase: { phase: string, detail: string | null } | null) => void, onGone?: (appSessionId: string) => void }} [options]
  */
-export function pollSurvivors({ onTranscriptChange = (_id) => {}, onGone = (_id) => {} } = {}) {
+export function pollSurvivors({ onTranscriptChange = (_id) => {}, onPhase = (_id, _phase) => {}, onGone = (_id) => {} } = {}) {
   for (const [appSessionId, survivor] of survivors) {
     if (!isAgentAlive(survivor.pid)) {
       survivors.delete(appSessionId);
@@ -242,12 +338,20 @@ export function pollSurvivors({ onTranscriptChange = (_id) => {}, onGone = (_id)
     if (mtime && mtime !== survivor.transcriptMtime) {
       survivor.transcriptMtime = mtime;
       onTranscriptChange(appSessionId);
+      if (refreshPhase(survivor)) {
+        onPhase(appSessionId, survivor.phase);
+      }
     }
   }
 }
 
 export function isSurvivorRunning(appSessionId) {
   return Boolean(appSessionId) && survivors.has(appSessionId);
+}
+
+/** Этап пережившего агента для ответа на подписку вкладки; null — неизвестен или не переживший. */
+export function getSurvivorPhase(appSessionId) {
+  return survivors.get(appSessionId)?.phase ?? null;
 }
 
 export function listSurvivors() {

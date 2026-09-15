@@ -488,6 +488,22 @@ async function startServer() {
                 onTranscriptChange: (appSessionId) => {
                     void broadcastSessionUpserted(appSessionId).catch(() => {});
                 },
+                // Этап по хвосту переписки — иначе плашка до конца работы
+                // писала «Ожидает модель», и чат выглядел зависшим.
+                onPhase: (appSessionId, phase) => {
+                    if (!phase) return;
+                    const event = JSON.stringify({
+                        kind: 'run_phase',
+                        sessionId: appSessionId,
+                        provider: 'claude',
+                        text: phase.phase,
+                        detail: phase.detail,
+                        timestamp: new Date().toISOString(),
+                    });
+                    connectedClients.forEach((client) => {
+                        if (client.readyState === WS_OPEN_STATE) client.send(event);
+                    });
+                },
                 onGone: (appSessionId) => {
                     // Порядок важен: страница не перечитывает переписку, пока
                     // считает чат работающим. Сначала «чат свободен», потом
