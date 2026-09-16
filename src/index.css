@@ -621,6 +621,20 @@
     contain: layout style;
   }
 
+  /* Клавиатура открыта (класс ставит AppContent): полоски «домой» под полем
+     нет, отступ под неё давал пустую полосу над клавиатурой (16.09.26).
+     !important — нижний отступ задан utility-классом, он в слое выше. */
+  html.keyboard-open .chat-composer-shell {
+    padding-bottom: 0 !important;
+  }
+
+  /* Поле ввода меняет высоту на каждую строку. Общее правило
+     «transition: all» для textarea растягивало это на 150 мс, и Safari
+     на iPhone рисовал курсор по промежуточной высоте — строкой ниже текста. */
+  textarea.chat-input-placeholder {
+    transition: none;
+  }
+
   .chat-activity-enter {
     animation: chat-activity-enter 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
     transform-origin: bottom center;

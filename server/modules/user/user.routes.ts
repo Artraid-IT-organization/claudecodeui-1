@@ -56,6 +56,21 @@ export function createUserRouter(service: ReturnType<typeof createUserService>):
     }
   });
 
+  // Замер экрана телефона при открытой клавиатуре — только в журнал службы.
+  // iOS сообщает размеры видимой области по-разному в браузере и в приложении
+  // с экрана «Домой», эмулятор на сервере это не повторяет (16.09.26).
+  router.post('/viewport-probe', (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const numbers: Record<string, number | boolean | string> = {};
+    for (const [key, value] of Object.entries(body).slice(0, 40)) {
+      if (typeof value === 'number' && Number.isFinite(value)) numbers[key] = Math.round(value * 10) / 10;
+      else if (typeof value === 'boolean') numbers[key] = value;
+      else if (typeof value === 'string') numbers[key] = value.slice(0, 40);
+    }
+    console.log(`[viewport-probe] user=${readUserId(req)} ${JSON.stringify(numbers)}`);
+    res.json({ ok: true });
+  });
+
   router.get('/usage-limits', async (req, res, next) => {
     try {
       res.json(await service.getUsageLimits(readUserId(req)));

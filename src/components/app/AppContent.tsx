@@ -17,7 +17,7 @@ import { useTerminalTabs } from '../../hooks/useTerminalTabs';
 import { useQueuedMessageAutoSend } from '../../hooks/useQueuedMessageAutoSend';
 import { useBrowserUseEnabled } from '../../hooks/useBrowserUseEnabled';
 import { ensureLatestBuild, watchServiceWorkerUpdates } from '../../lib/appUpdate';
-import { api } from '../../utils/api';
+import { api, authenticatedFetch } from '../../utils/api';
 import type { AppTab } from '../../types/app';
 
 type RunningSessionApiItem = {
@@ -361,6 +361,16 @@ function AppContentInner() {
       // vv.offsetTop which would make --keyboard-height fluctuate during
       // normal scrolling, causing the container to bounce up and down.
       const gap = Math.max(0, window.innerHeight - vv.height);
+
+      // Клавиатура открыта: идёт набор и видимая область заметно короче
+      // экрана (внешняя клавиатура даёт полоску в несколько десятков точек).
+      // Полоски «домой» под полем в этот момент нет — её закрывает
+      // клавиатура, а отступ под неё давал пустую полосу между полем и
+      // клавиатурой (снимок Егора 16.09.26). Класс keyboard-open снимает
+      // этот отступ (index.css). Вычет restingGap оставлен как был: попытка
+      // убрать его вместе со сбросом прокрутки спрятала поле под клавиатуру.
+      const keyboardOpen = isTyping() && gap > 120;
+      document.documentElement.classList.toggle('keyboard-open', keyboardOpen);
       const raw = isStandalone ? Math.max(0, gap - restingGap) : gap;
 
       // Ограничитель. Клавиатура физически не занимает больше двух третей
@@ -388,8 +398,80 @@ function AppContentInner() {
       // клавиатуры: без клавиатуры он всегда ноль, и обычная прокрутка ленты
       // оболочку не двигает.
       const pan = Math.max(0, Math.min(vv.offsetTop, kb));
+      const changed = kb !== lastKb || pan !== lastPan;
+      lastKb = kb;
+      lastPan = pan;
       document.documentElement.style.setProperty('--keyboard-height', `${kb}px`);
       document.documentElement.style.setProperty('--app-pan', `${pan}px`);
+      if (changed) scheduleCaretRedraw();
+      if (isTyping()) scheduleProbe({ gap, kb, pan, keyboardOpen });
+    };
+
+    // Замер для журнала сайта: настоящие числа iPhone при открытой клавиатуре.
+    // Эмулятор на сервере дважды разошёлся с телефоном (16.09.26).
+    let probeTimer = 0;
+    let probesLeft = 12;
+    const scheduleProbe = (state: { gap: number; kb: number; pan: number; keyboardOpen: boolean }) => {
+      if (probesLeft <= 0) return;
+      window.clearTimeout(probeTimer);
+      probeTimer = window.setTimeout(() => {
+        probesLeft -= 1;
+        const rectOf = (selector: string) => document.querySelector(selector)?.getBoundingClientRect();
+        const composer = rectOf('.chat-composer-shell');
+        const form = document.querySelector('textarea.chat-input-placeholder')?.closest('form')?.getBoundingClientRect();
+        const textarea = rectOf('textarea.chat-input-placeholder');
+        const shell = rectOf('div.fixed.inset-0.flex.bg-background');
+        void authenticatedFetch('/api/user/viewport-probe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ...state,
+            standalone: isStandalone,
+            restingGap,
+            innerHeight: window.innerHeight,
+            vvHeight: vv.height,
+            vvTop: vv.offsetTop,
+            vvScale: vv.scale,
+            scrollY: window.scrollY,
+            screenH: window.screen.height,
+            docClientH: document.documentElement.clientHeight,
+            shellTop: shell?.top ?? -1,
+            shellBottom: shell?.bottom ?? -1,
+            composerBottom: composer?.bottom ?? -1,
+            formBottom: form?.bottom ?? -1,
+            textareaTop: textarea?.top ?? -1,
+            composerPad: composer ? parseFloat(getComputedStyle(document.querySelector('.chat-composer-shell')!).paddingBottom) : -1,
+            focused: document.activeElement?.tagName ?? '',
+          }),
+        }).catch(() => {});
+      }, 900);
+    };
+    let lastKb = -1;
+    let lastPan = -1;
+
+    // Курсор ниже текста (iOS 26, снимок Егора 16.09.26: набрано «Ром»,
+    // курсор строкой ниже). Safari рисует курсор по месту поля в момент
+    // фокуса и не переносит его, когда закреплённая оболочка сдвигается
+    // следом за клавиатурой. Известная ошибка WebKit с полями внутри
+    // position: fixed. После каждого сдвига оболочки выделение ставится
+    // заново — это заставляет Safari пересчитать место курсора. Сбрасывать
+    // прокрутку документа в ноль нельзя: этим сдвигом iOS и поднимает поле
+    // над клавиатурой, без него поле ушло под клавиатуру (снимок 16.09.26).
+    let caretFrame = 0;
+    const scheduleCaretRedraw = () => {
+      if (caretFrame) window.cancelAnimationFrame(caretFrame);
+      caretFrame = window.requestAnimationFrame(() => {
+        caretFrame = 0;
+        const active = document.activeElement;
+        if (!(active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement)) return;
+        try {
+          const { selectionStart, selectionEnd, selectionDirection } = active;
+          if (selectionStart === null || selectionEnd === null) return;
+          active.setSelectionRange(selectionStart, selectionEnd, selectionDirection ?? undefined);
+        } catch {
+          // Поля без выделения (type=number и т.п.) — курсора нет, чинить нечего.
+        }
+      });
     };
     let frame = 0;
     const scheduleUpdate = () => {
@@ -424,7 +506,10 @@ function AppContentInner() {
     return () => {
       vv.removeEventListener('resize', update);
       vv.removeEventListener('scroll', scheduleUpdate);
+      window.clearTimeout(probeTimer);
       if (frame) window.cancelAnimationFrame(frame);
+      if (caretFrame) window.cancelAnimationFrame(caretFrame);
+      document.documentElement.classList.remove('keyboard-open');
       window.removeEventListener('orientationchange', recalibrate);
       document.removeEventListener('visibilitychange', recalibrate);
     };
