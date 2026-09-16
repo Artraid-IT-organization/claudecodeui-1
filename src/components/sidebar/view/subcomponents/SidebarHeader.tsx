@@ -1,4 +1,5 @@
-import { Archive, Folder, FolderPlus, Plus, RefreshCw, Search, X, PanelLeftClose } from 'lucide-react';
+import { Archive, Clock, Folder, FolderPlus, Plus, RefreshCw, Search, X, PanelLeftClose } from 'lucide-react';
+import { useSessionListView } from '../../hooks/useSessionListView';
 import type { TFunction } from 'i18next';
 import type { ReactNode } from 'react';
 
@@ -87,6 +88,34 @@ export default function SidebarHeader({
   onPulseSessionSelect,
   t,
 }: SidebarHeaderProps) {
+  // «Последние чаты»: нажата — все чаты по дням, отжата — по группам.
+  const [listView, setListView] = useSessionListView();
+  const recentToggle = (
+    <Tooltip content="Последние чаты" position="top">
+      <button
+        onClick={() => {
+          // Из архива кнопка ведёт к списку чатов сразу в виде «Последние».
+          if (searchMode === 'archived') {
+            onSearchModeChange('projects');
+            setListView('recent');
+            return;
+          }
+          setListView(listView === 'recent' ? 'groups' : 'recent');
+        }}
+        aria-pressed={searchMode !== 'archived' && listView === 'recent'}
+        aria-label="Последние чаты"
+        title={listView === 'recent' ? 'Показать по группам' : 'Последние чаты'}
+        className={cn(
+          "flex h-7 items-center justify-center rounded-md px-2.5 text-xs font-normal transition-all",
+          searchMode !== 'archived' && listView === 'recent'
+            ? "bg-background shadow-sm text-foreground"
+            : "text-muted-foreground hover:text-foreground"
+        )}
+      >
+        <Clock className="h-3 w-3" />
+      </button>
+    </Tooltip>
+  );
   const showSearchTools = (projectsCount > 0 || pulseSessionsCount > 0 || archivedSessionsCount > 0 || isArchivedSessionsLoading) && !isLoading;
   const searchPlaceholder = searchMode === 'archived'
     ? t('search.archivedPlaceholder', 'Search archived sessions...')
@@ -216,6 +245,7 @@ export default function SidebarHeader({
                   <Archive className="h-3 w-3" />
                 </button>
               </Tooltip>
+              {recentToggle}
               {terminalSlot}
             </div>
             <div className="relative">
@@ -335,6 +365,7 @@ export default function SidebarHeader({
                   <Archive className="h-3 w-3" />
                 </button>
               </Tooltip>
+              {recentToggle}
               {terminalSlot}
             </div>
             <div className="relative">
