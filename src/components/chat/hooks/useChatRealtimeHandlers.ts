@@ -227,6 +227,21 @@ export function useChatRealtimeHandlers({
           return;
         }
 
+        case 'chat_send_waiting_done': {
+          if (sid) {
+            sessionStore.appendRealtime(sid, {
+              id: `send_waiting_done_${String(msg.clientMessageId || Date.now())}`,
+              sessionId: sid,
+              timestamp: new Date().toISOString(),
+              provider,
+              kind: 'task_notification',
+              status: 'completed',
+              summary: 'Место освободилось — сообщение отправлено.',
+            } as NormalizedMessage);
+          }
+          return;
+        }
+
         case 'chat_send_failed': {
           // Сообщение так и не получило расписку сервера (contexts/chatOutbox.ts):
           // сказать прямо и вернуть текст, а не делать вид, что оно ушло.

@@ -50,6 +50,12 @@ export const OUTBOX_ENTRY_TTL_MS = 2 * 60 * 60 * 1000;
 /** После стольких отправок без расписки человеку честно говорится, что сообщение не дошло. */
 export const OUTBOX_MAX_ATTEMPTS = 6;
 
+/**
+ * Сколько сообщение может ждать свободного места. Дольше обычного срока: пока
+ * сервер отвечает «жди», связь в порядке, а пять долгих чатов работают часами.
+ */
+export const OUTBOX_SLOT_WAIT_TTL_MS = 12 * 60 * 60 * 1000;
+
 /** Как часто повторять сообщение, ждущее свободного места. */
 export const SLOT_RETRY_MS = 15_000;
 
@@ -213,7 +219,7 @@ export class ChatOutbox {
   takeGivenUp(ackTimeoutMs: number): OutboxEntry[] {
     const now = this.now();
     const givenUp = this.pending().filter((entry) => (
-      now - entry.queuedAt >= OUTBOX_ENTRY_TTL_MS
+      now - entry.queuedAt >= (entry.waitingSlotSince ? OUTBOX_SLOT_WAIT_TTL_MS : OUTBOX_ENTRY_TTL_MS)
       || (entry.attempts >= OUTBOX_MAX_ATTEMPTS && entry.lastSentAt !== null && now - entry.lastSentAt >= ackTimeoutMs)
     ));
     if (givenUp.length > 0) {

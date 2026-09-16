@@ -357,6 +357,10 @@ const useWebSocketProviderState = (): WebSocketContextType => {
           }
           if (data.kind === 'chat_send_ack') {
             ackModeRef.current = 'ack';
+            if (outboxRef.current?.isWaitingForSlot(data.clientMessageId)) {
+              // Ждавшее места сообщение наконец принято — отметить в ленте.
+              dispatch({ kind: 'chat_send_waiting_done', sessionId: data.sessionId, clientMessageId: data.clientMessageId, timestamp: Date.now() });
+            }
             outboxRef.current?.settle(data.clientMessageId);
             return;
           }

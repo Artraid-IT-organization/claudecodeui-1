@@ -6,6 +6,7 @@ import {
   OUTBOX_ENTRY_TTL_MS,
   OUTBOX_MAX_ATTEMPTS,
   OUTBOX_STORAGE_KEY,
+  OUTBOX_SLOT_WAIT_TTL_MS,
   SLOT_RETRY_MS,
 } from './chatOutbox';
 
@@ -119,8 +120,8 @@ test('отказ «предел одновременных чатов» не в�
   const reloaded = new ChatOutbox(storage, () => now);
   assert.equal(reloaded.isWaitingForSlot(first.id), true, 'ожидание переживает перезагрузку');
 
-  now += 3 * 60 * 1000;
-  assert.deepEqual(outbox.takeGivenUp(10_000), [], 'долгое ожидание места не превращается в «не дошло»');
+  now += OUTBOX_ENTRY_TTL_MS + 60_000;
+  assert.deepEqual(outbox.takeGivenUp(10_000), [], 'ожидание места дольше двух часов не превращается в «не дошло»');
   assert.equal(outbox.settle(first.id), true, 'сервер принял — сообщение уходит из очереди');
 });
 
@@ -145,4 +146,13 @@ test('новое сообщение чата встаёт за ждущим ме
 
   outbox.settle(first.id);
   assert.deepEqual(outbox.dueSlotRetries(SLOT_RETRY_MS).map((e) => e.id), [second.id, other.id]);
+});
+
+test('ждущее места сообщение сдаётся только после долгого срока', () => {
+  let now = 1_000;
+  const outbox = new ChatOutbox(memoryStorage(), () => now);
+  const entry = outbox.add(send('a'));
+  outbox.markWaitingForSlot(entry.id);
+  now += OUTBOX_SLOT_WAIT_TTL_MS;
+  assert.deepEqual(outbox.takeGivenUp(10_000).map((e) => e.id), [entry.id]);
 });
