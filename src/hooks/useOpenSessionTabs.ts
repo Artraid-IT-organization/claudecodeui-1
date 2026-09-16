@@ -226,6 +226,20 @@ export function useOpenSessionTabs({ projects, activeSessionId, activeSession, n
     });
   }, [activeSessionId, navigate]);
 
+  // Перетаскивание вкладки: порядок сохраняется в том же localStorage.
+  const moveTab = useCallback((sessionId: string, toIndex: number) => {
+    setTabs((previous) => {
+      const from = previous.findIndex((tab) => tab.sessionId === sessionId);
+      if (from === -1) return previous;
+      const target = Math.max(0, Math.min(previous.length - 1, toIndex));
+      if (from === target) return previous;
+      const next = [...previous];
+      const [moved] = next.splice(from, 1);
+      next.splice(target, 0, moved);
+      return next;
+    });
+  }, []);
+
   const removeTabsForSessions = useCallback((sessionIds: string[]) => {
     if (sessionIds.length === 0) return;
     const idsToRemove = new Set(sessionIds);
@@ -239,5 +253,5 @@ export function useOpenSessionTabs({ projects, activeSessionId, activeSession, n
     title: tab.title?.trim() || 'New Session',
   }));
 
-  return { openTabs, switchToTab, closeTab, removeTabsForSessions };
+  return { openTabs, switchToTab, closeTab, moveTab, removeTabsForSessions };
 }

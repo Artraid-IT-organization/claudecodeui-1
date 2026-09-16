@@ -173,7 +173,7 @@ function AppContentInner() {
   // gets a tab the moment it's actually viewed — sidebar click, search
   // result, notification, deep link — never eagerly for the whole sidebar.
   const activeSessionId = selectedSession?.id ?? sessionId ?? null;
-  const { openTabs, switchToTab, closeTab, removeTabsForSessions } = useOpenSessionTabs({
+  const { openTabs, switchToTab, closeTab, moveTab, removeTabsForSessions } = useOpenSessionTabs({
     projects,
     activeSessionId,
     activeSession: selectedSession,
@@ -509,6 +509,7 @@ function AppContentInner() {
             switchToTab(id);
           }}
           onClose={closeTab}
+          onReorder={moveTab}
           terminals={terminals}
           activeTerminalId={activeTerminalId}
           onSelectTerminal={focusTerminal}
