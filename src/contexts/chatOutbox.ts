@@ -28,6 +28,14 @@ export type OutboxEntry = {
   /** Сколько раз сообщение действительно ушло в сокет. */
   attempts: number;
   lastSentAt: number | null;
+  /**
+   * С какого момента сообщение ждёт свободного места: сервер ответил «у вас
+   * уже работает предельное число чатов». Такое сообщение не выбрасывается,
+   * а досылается раз в `SLOT_RETRY_MS`, пока сервер не примет.
+   */
+  waitingSlotSince?: number | null;
+  /** Когда пришёл последний такой отказ — от него отсчитывается следующий повтор. */
+  lastWaitAt?: number | null;
 };
 
 type KeyValueStorage = {
@@ -41,6 +49,18 @@ export const OUTBOX_STORAGE_KEY = 'chat_send_outbox_v1';
 export const OUTBOX_ENTRY_TTL_MS = 2 * 60 * 60 * 1000;
 /** После стольких отправок без расписки человеку честно говорится, что сообщение не дошло. */
 export const OUTBOX_MAX_ATTEMPTS = 6;
+
+/** Как часто повторять сообщение, ждущее свободного места. */
+export const SLOT_RETRY_MS = 15_000;
+
+/**
+ * Коды отказа, после которых сообщение ждёт, а не выбрасывается: предел
+ * одновременных чатов; «этот чат ещё работает» — для уже ждущего сообщения.
+ * 16.09.26 первое сообщение после «You already have 3 chats running»
+ * пропало: страница сочла отказ окончательным, и агент получил только
+ * следующее, «ye?», без смысла.
+ */
+export const SLOT_WAIT_CODE = 'TOO_MANY_CONCURRENT_RUNS';
 
 export function isChatSend(message: unknown): message is Record<string, unknown> {
   return Boolean(message)
@@ -105,6 +125,63 @@ export class ChatOutbox {
     return removed;
   }
 
+  /**
+   * Сервер отказал из-за предела одновременных чатов: сообщение остаётся в
+   * очереди и ждёт места. Попытки обнуляются — ожидание не расходует лимит
+   * повторов при плохой связи. Возвращает `true`, если ждать начало только
+   * что (о нём один раз говорится в ленте), `false` — если уже ждало или
+   * сообщения нет.
+   */
+  markWaitingForSlot(id: unknown): boolean {
+    const entry = typeof id === 'string' ? this.entries.get(id) : undefined;
+    if (!entry) {
+      return false;
+    }
+    const firstTime = !entry.waitingSlotSince;
+    entry.waitingSlotSince = entry.waitingSlotSince || this.now();
+    entry.lastWaitAt = this.now();
+    entry.attempts = 0;
+    entry.lastSentAt = null;
+    this.save();
+    return firstTime;
+  }
+
+  isWaitingForSlot(id: unknown): boolean {
+    return typeof id === 'string' && Boolean(this.entries.get(id)?.waitingSlotSince);
+  }
+
+  /** Есть ли в этом чате сообщение, ждущее места: новое должно встать за ним. */
+  hasWaitingInSession(sessionId: unknown): boolean {
+    return typeof sessionId === 'string'
+      && this.pending().some((entry) => entry.waitingSlotSince && entry.message.sessionId === sessionId);
+  }
+
+  /**
+   * Ждущие места сообщения, которые пора повторить: по одному на чат (самое
+   * раннее) — порядок внутри чата сохраняется, второе уйдёт после первого.
+   */
+  dueSlotRetries(retryMs: number): OutboxEntry[] {
+    const now = this.now();
+    const seenSessions = new Set<unknown>();
+    const due: OutboxEntry[] = [];
+    for (const entry of this.pending()) {
+      if (!entry.waitingSlotSince) continue;
+      const sessionId = entry.message.sessionId;
+      if (seenSessions.has(sessionId)) continue;
+      seenSessions.add(sessionId);
+      if (entry.lastSentAt !== null) continue;
+      if (now - (entry.lastWaitAt ?? entry.waitingSlotSince) >= retryMs) due.push(entry);
+    }
+    return due;
+  }
+
+  /** Ждёт места, но не первое в своём чате — уходит только после предыдущего. */
+  isQueuedBehindInSession(entry: OutboxEntry): boolean {
+    if (!entry.waitingSlotSince) return false;
+    const first = this.pending().find((other) => other.waitingSlotSince && other.message.sessionId === entry.message.sessionId);
+    return Boolean(first && first.id !== entry.id);
+  }
+
   markSent(id: string): void {
     const entry = this.entries.get(id);
     if (!entry) {
@@ -166,6 +243,8 @@ export class ChatOutbox {
             queuedAt: Number(entry.queuedAt) || this.now(),
             attempts: Number(entry.attempts) || 0,
             lastSentAt: typeof entry.lastSentAt === 'number' ? entry.lastSentAt : null,
+            waitingSlotSince: typeof entry.waitingSlotSince === 'number' ? entry.waitingSlotSince : null,
+            lastWaitAt: typeof entry.lastWaitAt === 'number' ? entry.lastWaitAt : null,
           });
         }
       }

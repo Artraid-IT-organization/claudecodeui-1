@@ -4,7 +4,7 @@ import { useAuth } from '../components/auth/context/AuthContext';
 import { IS_PLATFORM } from '../shared/utils';
 import { expireAuthSession, isAuthTokenExpired } from '../utils/api';
 
-import { ChatOutbox, isChatSend, type OutboxEntry } from './chatOutbox';
+import { ChatOutbox, isChatSend, SLOT_RETRY_MS, SLOT_WAIT_CODE, type OutboxEntry } from './chatOutbox';
 
 /**
  * One frame received from the chat websocket. The server guarantees every
@@ -219,6 +219,14 @@ const useWebSocketProviderState = (): WebSocketContextType => {
           flushRef.current(socket);
         } else if (ackModeRef.current === 'ack' && outbox.overdue(ACK_TIMEOUT_MS).length > 0) {
           forceReconnect('нет расписки сервера о получении сообщения');
+        } else if (ackModeRef.current === 'ack') {
+          // Сообщения, ждущие свободного места, — повтор раз в SLOT_RETRY_MS.
+          for (const entry of outbox.dueSlotRetries(SLOT_RETRY_MS)) {
+            if (!transmit(socket, entry)) {
+              forceReconnect('сокет не принял сообщение');
+              break;
+            }
+          }
         }
       } else if (socket.readyState === WebSocket.CONNECTING) {
         if (Date.now() - connectStartedAtRef.current > CONNECT_STALL_MS) {
@@ -230,7 +238,7 @@ const useWebSocketProviderState = (): WebSocketContextType => {
       }
       scheduleOutboxCheck();
     }, OUTBOX_CHECK_MS);
-  }, [forceReconnect, reportGivenUp]);
+  }, [forceReconnect, reportGivenUp, transmit]);
 
   /** Отправить очередь по открытому соединению с учётом того, что умеет сервер. */
   const flushOutbox = useCallback((socket: WebSocket) => {
@@ -245,6 +253,9 @@ const useWebSocketProviderState = (): WebSocketContextType => {
         // ответит «чат занят»), — отправляем один раз, как было до очереди.
         if (entry.lastSentAt === null && !transmit(socket, entry)) break;
         outbox.settle(entry.id);
+      } else if (outbox.isQueuedBehindInSession(entry)) {
+        // Второе ждущее сообщение чата уходит только после первого.
+        continue;
       } else if (!transmit(socket, entry)) {
         break;
       }
@@ -350,6 +361,27 @@ const useWebSocketProviderState = (): WebSocketContextType => {
             return;
           }
           if (data.kind === 'protocol_error') {
+            const outbox = outboxRef.current;
+            const waitsForSlot = data.code === SLOT_WAIT_CODE
+              || (data.code === 'RUN_IN_PROGRESS' && Boolean(outbox?.isWaitingForSlot(data.clientMessageId)));
+            if (data.clientMessageId && outbox && waitsForSlot) {
+              // Предел одновременных чатов — не окончательный отказ: сообщение
+              // остаётся в очереди и уйдёт само, когда место освободится.
+              // В ленте — одно спокойное пояснение, без красной ошибки.
+              if (outbox.markWaitingForSlot(data.clientMessageId)) {
+                const entry = outbox.pending().find((item) => item.id === data.clientMessageId);
+                dispatch({
+                  kind: 'chat_send_waiting',
+                  sessionId: data.sessionId,
+                  clientMessageId: data.clientMessageId,
+                  limit: data.limit,
+                  content: entry?.message.content,
+                  timestamp: Date.now(),
+                });
+              }
+              scheduleOutboxCheck();
+              return;
+            }
             if (data.clientMessageId) {
               // Сервер отказал именно этому сообщению — досылать бессмысленно.
               outboxRef.current?.settle(data.clientMessageId);
@@ -423,8 +455,14 @@ const useWebSocketProviderState = (): WebSocketContextType => {
     if (isChatSend(message)) {
       // Сообщение чата не выбрасывается никогда: оно ждёт в очереди, пока
       // сервер не распишется в получении.
-      const entry = outboxRef.current!.add(message);
-      if (socket && socket.readyState === WebSocket.OPEN && ackModeRef.current !== 'unknown') {
+      const outbox = outboxRef.current!;
+      const behindWaiting = outbox.hasWaitingInSession(message.sessionId);
+      const entry = outbox.add(message);
+      if (behindWaiting) {
+        // В этом чате уже ждёт места более раннее сообщение — новое встаёт
+        // за ним, иначе ушло бы первым и перепутало порядок.
+        outbox.markWaitingForSlot(entry.id);
+      } else if (socket && socket.readyState === WebSocket.OPEN && ackModeRef.current !== 'unknown') {
         if (!transmit(socket, entry)) {
           forceReconnect('сокет не принял сообщение');
         } else if (ackModeRef.current === 'legacy') {

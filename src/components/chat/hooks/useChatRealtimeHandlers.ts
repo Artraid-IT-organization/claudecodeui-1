@@ -207,6 +207,26 @@ export function useChatRealtimeHandlers({
           return;
         }
 
+        case 'chat_send_waiting': {
+          // Сервер не взял сообщение из-за предела одновременных чатов
+          // (contexts/chatOutbox.ts): оно ждёт в очереди и уйдёт само. Чат
+          // остаётся «занятым» — новые сообщения встанут за этим, а не вперёд.
+          if (sid) {
+            const limit = typeof msg.limit === 'number' ? msg.limit : null;
+            const busy = limit ? `Сейчас уже работают ${limit} чатов` : 'Сейчас уже работает предельное число чатов';
+            sessionStore.appendRealtime(sid, {
+              id: `send_waiting_${String(msg.clientMessageId || Date.now())}`,
+              sessionId: sid,
+              timestamp: new Date().toISOString(),
+              provider,
+              kind: 'task_notification',
+              status: 'running',
+              summary: `${busy}. Сообщение не потеряно: оно ждёт и отправится само, как только один из них закончит.`,
+            } as NormalizedMessage);
+          }
+          return;
+        }
+
         case 'chat_send_failed': {
           // Сообщение так и не получило расписку сервера (contexts/chatOutbox.ts):
           // сказать прямо и вернуть текст, а не делать вид, что оно ушло.
