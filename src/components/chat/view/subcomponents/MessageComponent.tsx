@@ -128,7 +128,10 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
     !message.isThinking;
 
 
-  const formattedTime = useMemo(() => new Date(message.timestamp).toLocaleTimeString(), [message.timestamp]);
+  const formattedTime = useMemo(() => {
+    const date = new Date(message.timestamp);
+    return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString();
+  }, [message.timestamp]);
   const shouldHideThinkingMessage = Boolean(message.isThinking && (!showThinking || isEmptyThinking(message)));
 
   if (shouldHideThinkingMessage) {
@@ -455,6 +458,8 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
               </div>
             )}
 
+            {/* Время стоит под каждым ответом, а не только под первым из идущих подряд:
+                по нему видно, когда это было написано. */}
             {(shouldShowAssistantCopyControl || !isGrouped) && (
               <div className="mt-1 flex w-full items-center gap-2 text-[11px] text-gray-400 dark:text-gray-500">
                 {shouldShowAssistantCopyControl && (
@@ -463,7 +468,7 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                 {shouldShowAssistantCopyControl && (
                   <MessageSpeakControl content={assistantCopyContent} />
                 )}
-                {!isGrouped && <span>{formattedTime}</span>}
+                {formattedTime && <span>{formattedTime}</span>}
               </div>
             )}
           </div>
