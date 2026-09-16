@@ -200,11 +200,14 @@ export function useOpenSessionTabs({ projects, activeSessionId, activeSession, n
     pushTimer: 0,
     pushing: false,
     fetching: false,
+    /** Растёт при смене пользователя: ответ сверки под прежним отбрасывается. */
+    generation: 0,
   });
 
   const pushTabs = useCallback(async () => {
     const sync = syncRef.current;
     sync.pushTimer = 0;
+    if (userKey === null) return;
     if (sync.pushing) {
       sync.pushTimer = window.setTimeout(() => void pushTabs(), SYNC_PUSH_DELAY_MS);
       return;
@@ -246,11 +249,15 @@ export function useOpenSessionTabs({ projects, activeSessionId, activeSession, n
 
   const pullTabs = useCallback(async () => {
     const sync = syncRef.current;
-    if (sync.fetching) return;
+    // Пока пользователь не известен, сверять нечего: кэш и номер версии
+    // лежат под его именем (гонка при запуске 16.09.26 теряла местные вкладки).
+    if (userKey === null || sync.fetching) return;
     sync.fetching = true;
+    const generation = sync.generation;
     try {
       const response = await api.openTabs.get(sync.ready && sync.version !== null ? sync.version : undefined);
       const state = await readServerState(response);
+      if (generation !== sync.generation) return;
       // Пока своё изменение не записано, чужой список не трогает экран.
       if (!state || sync.pushTimer || sync.pushing) return;
 
@@ -304,6 +311,8 @@ export function useOpenSessionTabs({ projects, activeSessionId, activeSession, n
   // Сверка: при запуске, при возвращении на страницу и раз в 15 с, пока видна.
   useEffect(() => {
     const sync = syncRef.current;
+    sync.generation += 1;
+    sync.fetching = false;
     sync.ready = false;
     sync.version = null;
     sync.syncedJson = '';
