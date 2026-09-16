@@ -40,6 +40,74 @@ test('claude: injected skill bodies are hidden even without the isMeta flag', ()
   assert.deepEqual(persisted, []);
 });
 
+test('claude: stop hook feedback is not shown as a human message', () => {
+  const provider = new ClaudeSessionsProvider();
+  const text = 'Stop hook feedback:\nНе останавливайся на вопросе-разрешении.';
+
+  const live = provider.normalizeMessage(
+    { uuid: 'h1', timestamp: '2026-09-15T14:25:00.000Z', message: { role: 'user', content: [{ type: 'text', text }] } },
+    SESSION_ID,
+  );
+  assert.deepEqual(live, []);
+
+  const liveString = provider.normalizeMessage(
+    { uuid: 'h2', timestamp: '2026-09-15T14:25:00.000Z', message: { role: 'user', content: text } },
+    SESSION_ID,
+  );
+  assert.deepEqual(liveString, []);
+});
+
+test('claude: a subagent prompt is not shown as a human message', () => {
+  const provider = new ClaudeSessionsProvider();
+  const prompt = 'Только чтение, ничего не менять. Проверь ДЕЛОМ выполнимость плана.';
+
+  const live = provider.normalizeMessage(
+    { type: 'user', parent_tool_use_id: 'toolu_agent', parentToolUseId: 'toolu_agent', message: { role: 'user', content: prompt } },
+    SESSION_ID,
+  );
+  assert.deepEqual(live, []);
+
+  const liveArray = provider.normalizeMessage(
+    { type: 'user', parent_tool_use_id: 'toolu_agent', message: { role: 'user', content: [{ type: 'text', text: prompt }] } },
+    SESSION_ID,
+  );
+  assert.deepEqual(liveArray, []);
+
+  const sidechain = provider.normalizeMessage(
+    { uuid: 's1', isSidechain: true, message: { role: 'user', content: prompt } },
+    SESSION_ID,
+  );
+  assert.deepEqual(sidechain, []);
+
+  const synthetic = provider.normalizeMessage(
+    { type: 'user', isSynthetic: true, message: { role: 'user', content: prompt } },
+    SESSION_ID,
+  );
+  assert.deepEqual(synthetic, []);
+
+  const sdkObject = { parent_tool_use_id: 'toolu_agent', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: 'x' }, { type: 'text', text: prompt }] } };
+  provider.normalizeMessage(sdkObject, SESSION_ID);
+  assert.equal(sdkObject.message.content.length, 2);
+
+  const subagentTool = provider.normalizeMessage(
+    {
+      uuid: 's2',
+      parent_tool_use_id: 'toolu_agent',
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_read', content: 'ok' }] },
+    },
+    SESSION_ID,
+  );
+  assert.equal(subagentTool.length, 1);
+  assert.equal(subagentTool[0].kind, 'tool_result');
+
+  const human = provider.normalizeMessage(
+    { uuid: 'u9', message: { role: 'user', content: 'хай' } },
+    SESSION_ID,
+  );
+  assert.equal(human.length, 1);
+  assert.equal(human[0].role, 'user');
+});
+
 test('claude: the Skill tool result itself still reaches the UI', () => {
   const provider = new ClaudeSessionsProvider();
 

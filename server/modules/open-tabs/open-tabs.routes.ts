@@ -3,7 +3,8 @@
  *
  * GET  /api/open-tabs?since=<версия> — при совпадении версии 204 без тела:
  *      страница спрашивает раз в 15 секунд и при возвращении на неё.
- * PUT  /api/open-tabs { tabs } — записать список целиком, ответ — новое состояние.
+ * PUT  /api/open-tabs { tabs, merge? } — записать список целиком (merge — дописать
+ *      недостающие к серверному, первая отправка устройства), ответ — новое состояние.
  * Устройство см. `database/repositories/open-tabs.ts`.
  */
 import express from 'express';
@@ -37,9 +38,9 @@ router.put('/', (req, res) => {
   const userId = readUserId(req);
   if (userId === null) return res.status(401).json({ error: 'нет пользователя' });
   try {
-    const body = (req.body ?? {}) as { tabs?: unknown };
+    const body = (req.body ?? {}) as { tabs?: unknown; merge?: unknown };
     if (!Array.isArray(body.tabs)) return res.status(400).json({ error: 'tabs должен быть списком' });
-    return res.json({ success: true, ...openTabsDb.put(userId, body.tabs) });
+    return res.json({ success: true, ...openTabsDb.put(userId, body.tabs, body.merge === true) });
   } catch (error) {
     console.error('Не удалось сохранить открытые вкладки:', error);
     return res.status(500).json({ error: 'Не удалось сохранить вкладки' });
