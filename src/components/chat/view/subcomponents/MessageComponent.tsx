@@ -462,13 +462,19 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                 по нему видно, когда это было написано. */}
             {(shouldShowAssistantCopyControl || !isGrouped) && (
               <div className="mt-1 flex w-full items-center gap-2 text-[11px] text-gray-400 dark:text-gray-500">
+                {/* Обёртка не даёт блоку копирования растянуться на всю строку телефона:
+                    время стоит сразу за «MD ▾», а не в конце строки. */}
                 {shouldShowAssistantCopyControl && (
-                  <MessageCopyControl content={assistantCopyContent} messageType="assistant" />
+                  <div className="flex min-w-0 items-center">
+                    <MessageCopyControl content={assistantCopyContent} messageType="assistant" />
+                  </div>
                 )}
+                {formattedTime && <span className="whitespace-nowrap">{formattedTime}</span>}
                 {shouldShowAssistantCopyControl && (
-                  <MessageSpeakControl content={assistantCopyContent} />
+                  <div className="ml-auto">
+                    <MessageSpeakControl content={assistantCopyContent} />
+                  </div>
                 )}
-                {formattedTime && <span>{formattedTime}</span>}
               </div>
             )}
           </div>
