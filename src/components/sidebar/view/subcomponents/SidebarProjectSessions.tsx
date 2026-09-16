@@ -294,7 +294,7 @@ export default function SidebarProjectSessions({
         <div
           role="radiogroup"
           aria-label="Вид списка чатов"
-          className="mx-1 flex rounded-lg bg-muted/60 p-0.5"
+          className="mx-3 flex rounded-lg bg-muted/60 p-0.5 md:mx-0"
         >
           {([
             { value: 'groups', label: 'Группы', Icon: Layers },
