@@ -69,6 +69,8 @@ type Drag = {
   box: DOMRect;
   raf: number;
   settling: boolean;
+  /** Жест отменён сменой состава вкладок — перестановку не выполнять. */
+  cancelled?: boolean;
 };
 
 type Options = {
@@ -117,11 +119,14 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
       pendingResetRef.current = null;
       return;
     }
+    // Состав сменился и во время «доезда» (например, пришли вкладки с другого
+    // устройства) — место считалось для старого набора, перестановку отменяем.
     const drag = dragRef.current;
-    if (drag && !drag.settling) {
+    if (drag) {
       cancelAnimationFrame(drag.raf);
       clearStyles(drag.els);
       if (containerRef.current) setOverflowX(containerRef.current, drag.overflowX);
+      drag.cancelled = true;
       dragRef.current = null;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -284,6 +289,7 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
       // Снимает их clearStyles после перестановки.
 
       window.setTimeout(() => {
+        if (drag.cancelled) return;
         dragRef.current = null;
         if (target !== from && onReorderRef.current) {
           pendingResetRef.current = els;
