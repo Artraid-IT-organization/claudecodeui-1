@@ -23,10 +23,12 @@
  * сами чаты: у второго пользователя площадки свои группы, чужих он не видит.
  */
 import { randomUUID } from 'node:crypto';
+import os from 'node:os';
 
 import { getConnection } from '@/modules/database/connection.js';
 
-export type ChatGroupSource = 'manual' | 'auto';
+/** manual — человек; auto — слова для подбора; ai — модель (chat-group-classifier). */
+export type ChatGroupSource = 'manual' | 'auto' | 'ai';
 
 export type ChatGroup = {
   id: string;
@@ -59,6 +61,7 @@ type SessionForGrouping = {
   group_id: string | null;
   group_source: string | null;
   isArchived: number;
+  origin: string | null;
 };
 
 const NAME_MAX = 40;
@@ -67,6 +70,23 @@ const KEYWORDS_MAX = 40;
 // Готовность запоминается на подключение, а не навсегда: тесты и перезапуск
 // базы дают новое подключение к файлу, где таблицы ещё может не быть.
 let readyConnection: unknown = null;
+
+export function ensureChatGroupsSchema(): void {
+  ensureTable();
+}
+
+/**
+ * Чат, созданный программой, а не человеком. Признак пути надёжнее названия:
+ * тестовые прогоны 13.09.26 шли через настоящий терминал (`origin` terminal),
+ * но всегда в одноразовых папках. В группы такие чаты не попадают — Егор
+ * 16.09.26: «не записывать туда чаты, которые создала нейросеть».
+ */
+export function isMachineMadeChat(row: { origin: string | null; project_path: string | null }): boolean {
+  if (row.origin === 'auto') return true;
+  const projectPath = row.project_path ?? '';
+  if (projectPath.startsWith('/tmp/') || projectPath.startsWith(`${os.tmpdir()}/`)) return true;
+  return projectPath.split('/').some((segment) => /^e2e(?:[-_]|$)/i.test(segment));
+}
 
 function ensureTable(): void {
   const db = getConnection();
@@ -86,6 +106,13 @@ function ensureTable(): void {
   const columns = (db.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>).map((c) => c.name);
   if (!columns.includes('group_source')) {
     db.exec('ALTER TABLE sessions ADD COLUMN group_source TEXT');
+  }
+  // Тема-кандидат от модели и название, которое модель при этом видела.
+  if (!columns.includes('group_hint')) {
+    db.exec('ALTER TABLE sessions ADD COLUMN group_hint TEXT');
+  }
+  if (!columns.includes('group_hint_title')) {
+    db.exec('ALTER TABLE sessions ADD COLUMN group_hint_title TEXT');
   }
   readyConnection = db;
 }
@@ -272,21 +299,29 @@ export const chatGroupsDb = {
     const db = getConnection();
     const session = db
       .prepare(
-        `SELECT session_id, custom_name, project_path, account_dir, group_id, group_source, isArchived
+        `SELECT session_id, custom_name, project_path, account_dir, group_id, group_source, isArchived, origin
          FROM sessions WHERE session_id = ?`,
       )
       .get(sessionId) as SessionForGrouping | undefined;
     if (!session || !session.account_dir || session.group_source === 'manual') {
       return false;
     }
+    if (isMachineMadeChat(session)) {
+      return false;
+    }
     // Чаты, сгруппированные старой кнопкой «Organize by topic», имеют свои
     // группы без записи в таблице — их тоже не трогаем.
-    if (session.group_id && session.group_source !== 'auto') {
+    if (session.group_id && session.group_source !== 'auto' && session.group_source !== 'ai') {
       return false;
     }
 
     const groups = pickGroupsForMatching(session.account_dir);
     const match = matchGroupForText(`${session.custom_name ?? ''} ${session.project_path ?? ''}`, groups);
+    // Словами не подобралось, а модель уже положила чат в группу — её решение
+    // остаётся. Сменится название — модель разберёт чат заново сама.
+    if (!match && session.group_source === 'ai') {
+      return false;
+    }
     const nextId = match?.id ?? null;
     if (nextId === session.group_id) {
       return false;
@@ -306,7 +341,7 @@ export const chatGroupsDb = {
       getConnection()
         .prepare(
           `SELECT session_id FROM sessions
-           WHERE account_dir = ? AND (group_source IS NULL OR group_source = 'auto')`,
+           WHERE account_dir = ? AND (group_source IS NULL OR group_source IN ('auto', 'ai'))`,
         )
         .all(accountDir) as Array<{ session_id: string }>
     ).map((row) => row.session_id);
@@ -329,7 +364,7 @@ export const chatGroupsDb = {
     if (!row) return null;
     return {
       groupId: row.group_id,
-      groupSource: row.group_source === 'manual' || row.group_source === 'auto' ? row.group_source : null,
+      groupSource: row.group_source === 'manual' || row.group_source === 'auto' || row.group_source === 'ai' ? row.group_source : null,
       isArchived: Boolean(row.isArchived),
     };
   },
