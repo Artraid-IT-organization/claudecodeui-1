@@ -436,7 +436,9 @@ export const api = {
   // Открытые вкладки чатов — общие для всех устройств пользователя.
   openTabs: {
     get: (since) => authenticatedFetch(`/api/open-tabs${Number.isInteger(since) ? `?since=${since}` : ''}`),
-    put: (tabs) => authenticatedFetch('/api/open-tabs', { method: 'PUT', body: JSON.stringify({ tabs }) }),
+    // keepalive — запрос доходит, даже если страница закрывается или перезагружается.
+    put: (tabs, keepalive = false) =>
+      authenticatedFetch('/api/open-tabs', { method: 'PUT', body: JSON.stringify({ tabs }), keepalive }),
   },
 
   // User endpoints

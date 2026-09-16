@@ -204,8 +204,9 @@ export function useOpenSessionTabs({ projects, activeSessionId, activeSession, n
     generation: 0,
   });
 
-  const pushTabs = useCallback(async () => {
+  const pushTabs = useCallback(async (keepalive = false) => {
     const sync = syncRef.current;
+    if (sync.pushTimer) window.clearTimeout(sync.pushTimer);
     sync.pushTimer = 0;
     if (userKey === null) return;
     if (sync.pushing) {
@@ -216,7 +217,7 @@ export function useOpenSessionTabs({ projects, activeSessionId, activeSession, n
     if (json === sync.syncedJson) return;
     sync.pushing = true;
     try {
-      const state = await readServerState(await api.openTabs.put(JSON.parse(json)));
+      const state = await readServerState(await api.openTabs.put(JSON.parse(json), keepalive));
       if (state) {
         sync.version = state.version;
         sync.syncedJson = json;
@@ -280,7 +281,11 @@ export function useOpenSessionTabs({ projects, activeSessionId, activeSession, n
         }
         sync.version = state.version;
         sync.syncedJson = serializeTabs(state.tabs);
-        writeSyncVersion(userKey, state.version);
+        // Отметку «сверено» в кэш — только когда кэш и сервер совпадают. Иначе
+        // её ставит отправка. Страница при первом заходе сама перезагружается
+        // (обновление сборки); отметка до отправки заставляла вторую загрузку
+        // довериться серверу и терять местные вкладки (16.09.26).
+        if (serializeTabs(next) === sync.syncedJson) writeSyncVersion(userKey, state.version);
         if (serializeTabs(next) !== serializeTabs(local)) applyRemote(next, false);
         if (serializeTabs(next) !== sync.syncedJson) {
           sync.pushTimer = window.setTimeout(() => void pushTabs(), SYNC_PUSH_DELAY_MS);
@@ -319,11 +324,17 @@ export function useOpenSessionTabs({ projects, activeSessionId, activeSession, n
     void pullTabs();
     const onVisible = () => {
       if (document.visibilityState === 'visible') void pullTabs();
+      // Уходим со страницы — несохранённое изменение отправить сейчас, а не через 300 мс.
+      else if (sync.pushTimer) void pushTabs(true);
+    };
+    const onPageHide = () => {
+      if (sync.pushTimer) void pushTabs(true);
     };
     const timer = window.setInterval(() => {
       if (document.visibilityState === 'visible') void pullTabs();
     }, SYNC_POLL_MS);
     document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('pagehide', onPageHide);
     window.addEventListener('focus', onVisible);
     window.addEventListener('online', onVisible);
     return () => {
@@ -333,10 +344,11 @@ export function useOpenSessionTabs({ projects, activeSessionId, activeSession, n
         sync.pushTimer = 0;
       }
       document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('pagehide', onPageHide);
       window.removeEventListener('focus', onVisible);
       window.removeEventListener('online', onVisible);
     };
-  }, [pullTabs]);
+  }, [pullTabs, pushTabs]);
 
   // Whatever session is currently being viewed always gets a tab — this is
   // the single funnel that covers sidebar clicks, archived-session opens,
