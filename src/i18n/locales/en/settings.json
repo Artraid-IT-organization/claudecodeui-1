@@ -106,7 +106,7 @@
     "copied": "Copied",
     "copyFailed": "Copy failed",
     "selectFirst": "Select some text first",
-    "inputTitle": "Paste or type text",
+    "inputTitle": "Paste text",
     "inputHint": "Long-press the field → Paste. The text goes to the terminal without Enter.",
     "viewTitle": "Terminal text",
     "close": "Close",

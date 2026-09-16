@@ -284,7 +284,7 @@ class ShellMobileSelectionCore implements MobileTerminalSelectionManager {
     button.style.appearance = 'none';
     button.style.border = 'none';
     button.style.margin = '0';
-    button.style.padding = '10px 14px';
+    button.style.padding = '14px 16px';
     button.style.background = 'transparent';
     button.style.color = '#f9fafb';
     button.style.fontSize = '14px';

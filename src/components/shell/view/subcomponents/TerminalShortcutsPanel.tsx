@@ -218,8 +218,8 @@ export default function TerminalShortcutsPanel({
           onClick={() => setSheetMode('input')}
           disabled={!isConnected}
           className={ICON_BTN}
-          title={t('terminalShortcuts.inputTitle', { defaultValue: 'Вставить или набрать текст' })}
-          aria-label={t('terminalShortcuts.inputTitle', { defaultValue: 'Вставить или набрать текст' })}
+          title={t('terminalShortcuts.inputTitle', { defaultValue: 'Вставка текста' })}
+          aria-label={t('terminalShortcuts.inputTitle', { defaultValue: 'Вставка текста' })}
         >
           <TextCursorInput className="h-4 w-4" />
         </button>

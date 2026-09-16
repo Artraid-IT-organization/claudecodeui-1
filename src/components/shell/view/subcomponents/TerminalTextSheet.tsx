@@ -91,7 +91,7 @@ export default function TerminalTextSheet({ mode, terminal, onClose }: TerminalT
 
   const title =
     mode === 'input'
-      ? t('terminalShortcuts.inputTitle', { defaultValue: 'Вставить или набрать текст' })
+      ? t('terminalShortcuts.inputTitle', { defaultValue: 'Вставка текста' })
       : t('terminalShortcuts.viewTitle', { defaultValue: 'Текст терминала' });
 
   return (
