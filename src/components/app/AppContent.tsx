@@ -361,7 +361,17 @@ function AppContentInner() {
       // vv.offsetTop which would make --keyboard-height fluctuate during
       // normal scrolling, causing the container to bounce up and down.
       const gap = Math.max(0, window.innerHeight - vv.height);
-      const raw = isStandalone ? Math.max(0, gap - restingGap) : gap;
+
+      // Клавиатура открыта: идёт набор и видимая область заметно короче
+      // экрана (внешняя клавиатура даёт полоску в несколько десятков точек).
+      // В этом состоянии полоски «домой» внизу нет — её закрывает клавиатура,
+      // поэтому ни вычитать её из высоты, ни держать под неё отступ у поля
+      // ввода нельзя: вместе они давали пустую полосу между полем и
+      // клавиатурой (снимок Егора 16.09.26). Низ оболочки — ровно край
+      // видимой области, отступ поля снимается классом keyboard-open.
+      const keyboardOpen = isTyping() && gap > 120;
+      document.documentElement.classList.toggle('keyboard-open', keyboardOpen);
+      const raw = isStandalone && !keyboardOpen ? Math.max(0, gap - restingGap) : gap;
 
       // Ограничитель. Клавиатура физически не занимает больше двух третей
       // экрана, а вот числа от браузера в момент её появления бывают любыми:
@@ -388,8 +398,44 @@ function AppContentInner() {
       // клавиатуры: без клавиатуры он всегда ноль, и обычная прокрутка ленты
       // оболочку не двигает.
       const pan = Math.max(0, Math.min(vv.offsetTop, kb));
+      const changed = kb !== lastKb || pan !== lastPan;
+      lastKb = kb;
+      lastPan = pan;
       document.documentElement.style.setProperty('--keyboard-height', `${kb}px`);
       document.documentElement.style.setProperty('--app-pan', `${pan}px`);
+      if (changed) scheduleCaretRedraw();
+    };
+    let lastKb = -1;
+    let lastPan = -1;
+
+    // Курсор ниже текста (iOS 26, снимок Егора 16.09.26: набрано «Ром»,
+    // курсор строкой ниже). Safari рисует курсор по месту поля в момент
+    // фокуса и не переносит его, когда закреплённая оболочка сдвигается
+    // следом за клавиатурой. Известная ошибка WebKit с полями внутри
+    // position: fixed. Два средства: пока идёт набор, прокрутка документа
+    // возвращается в ноль (документ у нас не прокручивается, сдвиг делает
+    // только сама iOS), и после каждого сдвига оболочки выделение ставится
+    // заново — это заставляет Safari пересчитать место курсора.
+    let caretFrame = 0;
+    const scheduleCaretRedraw = () => {
+      if (caretFrame) window.cancelAnimationFrame(caretFrame);
+      caretFrame = window.requestAnimationFrame(() => {
+        caretFrame = 0;
+        const active = document.activeElement;
+        if (!(active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement)) return;
+        try {
+          const { selectionStart, selectionEnd, selectionDirection } = active;
+          if (selectionStart === null || selectionEnd === null) return;
+          active.setSelectionRange(selectionStart, selectionEnd, selectionDirection ?? undefined);
+        } catch {
+          // Поля без выделения (type=number и т.п.) — курсора нет, чинить нечего.
+        }
+      });
+    };
+    const resetDocumentScroll = () => {
+      if (isTyping() && (window.scrollY !== 0 || window.scrollX !== 0)) {
+        window.scrollTo(0, 0);
+      }
     };
     let frame = 0;
     const scheduleUpdate = () => {
@@ -410,9 +456,14 @@ function AppContentInner() {
     update();
 
 
+    const onViewportScroll = () => {
+      resetDocumentScroll();
+      scheduleUpdate();
+    };
     vv.addEventListener('resize', update);
     // Сдвиг iOS меняется событием scroll видимой области, а не resize.
-    vv.addEventListener('scroll', scheduleUpdate);
+    vv.addEventListener('scroll', onViewportScroll);
+    window.addEventListener('scroll', resetDocumentScroll, { passive: true });
     // Re-measure the device's own gap only at moments when a keyboard cannot
     // be the cause: a turned phone, and coming back to the app.
     const recalibrate = () => {
@@ -423,8 +474,11 @@ function AppContentInner() {
     document.addEventListener('visibilitychange', recalibrate);
     return () => {
       vv.removeEventListener('resize', update);
-      vv.removeEventListener('scroll', scheduleUpdate);
+      vv.removeEventListener('scroll', onViewportScroll);
+      window.removeEventListener('scroll', resetDocumentScroll);
       if (frame) window.cancelAnimationFrame(frame);
+      if (caretFrame) window.cancelAnimationFrame(caretFrame);
+      document.documentElement.classList.remove('keyboard-open');
       window.removeEventListener('orientationchange', recalibrate);
       document.removeEventListener('visibilitychange', recalibrate);
     };
