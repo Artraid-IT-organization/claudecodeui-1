@@ -20,14 +20,14 @@ import type { RefObject } from 'react';
  *   место; сдвиги снимаются в useLayoutEffect — до отрисовки, без мигания.
  *
  * Мышь: тянуть сразу, после сдвига на 5 px (короткий щелчок — выбор вкладки).
- * Палец: подержать ~0,3 с, потом тянуть. Иначе обычное листание полосы
+ * Палец: подержать ~0,35 с, потом тянуть. Иначе обычное листание полосы
  * пальцем перестало бы работать. Касания — через touch-события, а не pointer:
  * только так iOS Safari даёт отменить прокрутку уже после начала жеста.
  */
 
 const MOUSE_SLOP = 5;
 const TOUCH_SLOP = 8;
-const LONG_PRESS_MS = 280;
+const LONG_PRESS_MS = 350;
 const SETTLE_MS = 200;
 const EASE = 'cubic-bezier(0.2, 0, 0, 1)';
 const EDGE = 48;
@@ -55,6 +55,9 @@ type Drag = {
   pointerX: number;
   scrollStart: number;
   lastDx: number;
+  /** Сдвигали ли вкладку по-настоящему: без сдвига отпускание — обычный щелчок. */
+  moved: boolean;
+  overflowX: string;
   raf: number;
   settling: boolean;
 };
@@ -100,8 +103,10 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
     if (drag && !drag.settling) {
       cancelAnimationFrame(drag.raf);
       clearStyles(drag.els);
+      if (containerRef.current) containerRef.current.style.overflowX = drag.overflowX;
       dragRef.current = null;
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [idsKey]);
 
   useEffect(() => {
@@ -145,6 +150,7 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
 
       if (dx !== drag.lastDx) {
         drag.lastDx = dx;
+        if (Math.abs(dx) > 3) drag.moved = true;
         drag.els[from].style.transform = `translate3d(${dx}px, 0, 0)`;
 
         const center = lefts[from] + widths[from] / 2 + dx;
@@ -181,6 +187,12 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
         widths.push(r.width);
       }
 
+      // Пока тянем, полоса не прокручивается сама: иначе iOS, успевший признать
+      // жест листанием, уводит полосу из-под пальца одновременно с перестановкой.
+      // scrollLeft из кода (автопрокрутка у краёв) при этом работает.
+      const overflowX = container.style.overflowX;
+      container.style.overflowX = 'hidden';
+
       els.forEach((el, i) => {
         el.style.willChange = 'transform';
         if (i === from) {
@@ -205,6 +217,8 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
         pointerX,
         scrollStart: container.scrollLeft,
         lastDx: 0,
+        moved: false,
+        overflowX,
         raf: 0,
         settling: false,
       };
@@ -216,6 +230,14 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
       const drag = dragRef.current;
       if (!drag || drag.settling) return;
       cancelAnimationFrame(drag.raf);
+      container.style.overflowX = drag.overflowX;
+
+      // Подержал и отпустил, не сдвинув, — это нажатие, чат должен открыться.
+      if (!drag.moved && drag.target === drag.from) {
+        clearStyles(drag.els);
+        dragRef.current = null;
+        return;
+      }
       drag.settling = true;
       suppressClickUntil = performance.now() + 400;
 
@@ -342,6 +364,7 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
       if (drag && !drag.settling) {
         cancelAnimationFrame(drag.raf);
         clearStyles(drag.els);
+        container.style.overflowX = drag.overflowX;
         dragRef.current = null;
       }
       container.removeEventListener('pointerdown', onPointerDown);
