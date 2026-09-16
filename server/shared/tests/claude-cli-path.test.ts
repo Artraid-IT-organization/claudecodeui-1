@@ -108,4 +108,18 @@ test('waitForClaudeCodeExecutable gives up after the timeout and uses PATH looku
   });
 
   assert.equal(resolved, 'claude');
+
+  // A broken install must not stall every following turn for the full timeout.
+  const before = clock;
+  const again = await waitForClaudeCodeExecutable(undefined, {
+    platform: 'linux',
+    execPath: '/opt/node/bin/node',
+    now: () => clock,
+    sleep: async (ms) => { clock += ms; },
+    readdirSync: () => ['claude-code'],
+    statSync: () => null,
+    timeoutMs: 10_000,
+  });
+  assert.equal(again, 'claude');
+  assert.equal(clock, before, 'no waiting during the cooldown');
 });

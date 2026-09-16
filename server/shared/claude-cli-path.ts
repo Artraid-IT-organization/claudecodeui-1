@@ -153,6 +153,10 @@ export type WaitForClaudeExecutableDependencies = {
 const REINSTALL_WAIT_TIMEOUT_MS = 120_000;
 const REINSTALL_SETTLE_MS = 5_000;
 const REINSTALL_POLL_MS = 1_000;
+// After one full timeout the install is broken rather than mid-reinstall;
+// don't make every following turn wait the whole timeout again.
+const REINSTALL_GIVE_UP_COOLDOWN_MS = 10 * 60_000;
+let gaveUpAt: number | null = null;
 
 /**
  * Picks the Claude CLI that was installed together with the Node running this
@@ -209,7 +213,8 @@ export async function waitForClaudeCodeExecutable(
     return fallback;
   }
 
-  const timeoutMs = dependencies.timeoutMs ?? REINSTALL_WAIT_TIMEOUT_MS;
+  const coolingDown = gaveUpAt !== null && now() - gaveUpAt < REINSTALL_GIVE_UP_COOLDOWN_MS;
+  const timeoutMs = coolingDown ? 0 : (dependencies.timeoutMs ?? REINSTALL_WAIT_TIMEOUT_MS);
   const settleMs = dependencies.settleMs ?? REINSTALL_SETTLE_MS;
   const pollMs = dependencies.pollMs ?? REINSTALL_POLL_MS;
   const startedAt = now();
@@ -220,12 +225,17 @@ export async function waitForClaudeCodeExecutable(
     // A binary written moments ago may still be mid-copy by the postinstall step.
     const ready = Boolean(stat && stat.isFile() && (stat.mode & 0o111) && now() - stat.mtimeMs >= settleMs);
     if (ready) {
+      gaveUpAt = null;
       if (warned) {
         console.log(`[claude-cli] ${candidate} is back after ${Math.round((now() - startedAt) / 1000)}s`);
       }
       return candidate;
     }
     if (now() - startedAt >= timeoutMs) {
+      if (coolingDown) {
+        return fallback;
+      }
+      gaveUpAt = now();
       console.warn(`[claude-cli] ${candidate} still not ready after ${Math.round(timeoutMs / 1000)}s, falling back to PATH lookup`);
       return fallback;
     }
