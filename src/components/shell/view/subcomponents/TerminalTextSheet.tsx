@@ -96,7 +96,7 @@ export default function TerminalTextSheet({ mode, terminal, onClose }: TerminalT
 
   return (
     <div
-      className="fixed inset-0 z-50 flex flex-col bg-gray-950/95 md:hidden"
+      className="fixed inset-0 z-50 flex flex-col bg-gray-950 md:hidden"
       style={{ paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)' }}
       role="dialog"
       aria-modal="true"
@@ -105,6 +105,17 @@ export default function TerminalTextSheet({ mode, terminal, onClose }: TerminalT
       <div className="flex items-center gap-2 border-b border-gray-800 px-3 py-2">
         <div className="min-w-0 flex-1 truncate text-sm font-semibold text-gray-100">{title}</div>
         {notice && <div className="shrink-0 text-xs text-green-400">{notice}</div>}
+        {mode === 'input' && (
+          // Кнопка наверху: внизу её закрыла бы экранная клавиатура.
+          <button
+            type="button"
+            onClick={sendDraft}
+            disabled={draft.length === 0}
+            className={`shrink-0 ${SHEET_BTN_PRIMARY}`}
+          >
+            {t('terminalShortcuts.sendToTerminal', { defaultValue: 'В терминал' })}
+          </button>
+        )}
         <button
           type="button"
           onClick={onClose}
@@ -133,19 +144,6 @@ export default function TerminalTextSheet({ mode, terminal, onClose }: TerminalT
             // 16px и больше — иначе iPhone увеличивает страницу при фокусе.
             className="m-3 min-h-0 flex-1 resize-none rounded-lg border border-gray-700 bg-gray-900 p-3 font-mono text-base text-gray-100 outline-none focus:border-blue-500"
           />
-          <div className="flex justify-end gap-2 px-3 pb-3">
-            <button type="button" onClick={onClose} className={SHEET_BTN}>
-              {t('terminalShortcuts.cancel', { defaultValue: 'Отмена' })}
-            </button>
-            <button
-              type="button"
-              onClick={sendDraft}
-              disabled={draft.length === 0}
-              className={SHEET_BTN_PRIMARY}
-            >
-              {t('terminalShortcuts.sendToTerminal', { defaultValue: 'В терминал' })}
-            </button>
-          </div>
         </>
       ) : (
         <>
