@@ -43,6 +43,7 @@ import projectModuleRoutes from './modules/projects/projects.routes.js';
 import notificationRoutes from './modules/notifications/notifications.routes.js';
 import { promptPresetsRoutes } from './modules/presets/index.js';
 import { chatGroupsRoutes } from './modules/chat-groups/index.js';
+import { startChatGroupClassifier } from './modules/chat-groups/chat-group-classifier.js';
 import { userRoutes } from './modules/user/index.js';
 import {
     getPluginPort,
@@ -481,6 +482,14 @@ async function startServer() {
             if (!OPEN_REGISTRATION) {
                 await initializeSessionsWatcher();
             }
+
+            // Раскладка чатов человека по группам моделью — в фоне, раз в
+            // несколько минут (chat-group-classifier.ts).
+            startChatGroupClassifier(async (sessionIds) => {
+                for (const sessionId of sessionIds) {
+                    await broadcastSessionUpserted(sessionId).catch(() => {});
+                }
+            });
 
             // Чаты, пережившие перезапуск сайта: показывать их работу и
             // сообщить вкладкам, когда агент закончит.
