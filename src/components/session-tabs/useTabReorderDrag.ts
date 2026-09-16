@@ -44,6 +44,8 @@ type Pending = {
   startY: number;
   touchId?: number;
   timer?: number;
+  /** Последнее положение пальца до «поднятия» вкладки. */
+  lastX?: number;
 };
 
 type Drag = {
@@ -63,6 +65,8 @@ type Drag = {
   /** Сдвигали ли вкладку по-настоящему: без сдвига отпускание — обычный щелчок. */
   moved: boolean;
   overflowX: string;
+  /** Рамка полосы на экране — меряется один раз при старте. */
+  box: DOMRect;
   raf: number;
   settling: boolean;
 };
@@ -141,19 +145,21 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
       pending = null;
     };
 
-    const frame = () => {
-      const drag = dragRef.current;
-      if (!drag || drag.settling) return;
-
+    // Сдвиг по текущему положению пальца/мыши. Зовётся и из покадрового цикла
+    // (автопрокрутка у краёв), и прямо из touchmove: Safari на iPhone во время
+    // касания выполняет requestAnimationFrame с опозданием или реже, и вкладка,
+    // двигавшаяся только по кадрам, шла рывками. Повторный вызов без нового
+    // положения ничего не пишет.
+    const update = (drag: Drag, autoscroll: boolean) => {
       // Автопрокрутка у краёв полосы.
-      const box = container.getBoundingClientRect();
+      const box = drag.box;
       let speed = 0;
       if (drag.pointerX < box.left + EDGE) {
         speed = -MAX_AUTOSCROLL * Math.min(1, (box.left + EDGE - drag.pointerX) / EDGE);
       } else if (drag.pointerX > box.right - EDGE) {
         speed = MAX_AUTOSCROLL * Math.min(1, (drag.pointerX - (box.right - EDGE)) / EDGE);
       }
-      if (speed !== 0) container.scrollLeft += speed;
+      if (autoscroll && speed !== 0) container.scrollLeft += speed;
 
       const { lefts, widths, from } = drag;
       const last = lefts.length - 1;
@@ -182,7 +188,12 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
           });
         }
       }
+    };
 
+    const frame = () => {
+      const drag = dragRef.current;
+      if (!drag || drag.settling) return;
+      update(drag, true);
       drag.raf = requestAnimationFrame(frame);
     };
 
@@ -229,12 +240,15 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
         widths,
         from,
         target: from,
-        startX: p.startX,
+        // Отсчёт от положения в момент «поднятия», а не касания: палец успевает
+        // сдвинуться на несколько пикселей за удержание, и вкладка прыгала.
+        startX: pointerX,
         pointerX,
         scrollStart: container.scrollLeft,
         lastDx: 0,
         moved: false,
         overflowX,
+        box,
         raf: 0,
         settling: false,
       };
@@ -264,7 +278,10 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
       const dragged = els[from];
       dragged.style.transition = `transform ${SETTLE_MS}ms ${EASE}, box-shadow 150ms ease`;
       dragged.style.transform = finalDx ? `translate3d(${finalDx}px, 0, 0)` : '';
-      dragged.removeAttribute('data-dragging');
+      // Фон и тень остаются, пока вкладка не встанет на место: снимал их сразу —
+      // 0,2 с «доезда» прозрачная вкладка плыла поверх соседки, и названия
+      // накладывались друг на друга (снимок Егора с iPhone, 16.09.26).
+      // Снимает их clearStyles после перестановки.
 
       window.setTimeout(() => {
         dragRef.current = null;
@@ -328,7 +345,7 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
         touchId: touch.identifier,
       };
       p.timer = window.setTimeout(() => {
-        if (pending === p) startDrag(p, p.startX);
+        if (pending === p) startDrag(p, p.lastX ?? p.startX);
       }, LONG_PRESS_MS);
       pending = p;
     };
@@ -339,13 +356,18 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
       if (drag?.kind === 'touch') {
         if (event.cancelable) event.preventDefault(); // полоса не листается под пальцем
         const touch = findTouch(event.touches, drag.touchId);
-        if (touch) drag.pointerX = touch.clientX;
+        if (touch && !drag.settling) {
+          drag.pointerX = touch.clientX;
+          update(drag, false);
+        }
         return;
       }
       if (pending?.kind === 'touch') {
         const touch = findTouch(event.touches, pending.touchId);
         if (!touch || Math.hypot(touch.clientX - pending.startX, touch.clientY - pending.startY) > TOUCH_SLOP) {
           clearPending(); // это листание, а не удержание
+        } else {
+          pending.lastX = touch.clientX;
         }
       }
     };
