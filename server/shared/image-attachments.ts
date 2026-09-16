@@ -377,7 +377,11 @@ export async function buildClaudeUserContent(
   images: unknown,
   cwd?: string,
 ): Promise<ClaudeContentBlock[]> {
-  const blocks: ClaudeContentBlock[] = [{ type: 'text', text: prompt }];
+  // An image sent without a caption must not carry an empty text block: it is
+  // stored in the transcript, and any later request that replays that history
+  // through a CLI build which doesn't strip it fails with
+  // "text content blocks must be non-empty".
+  const blocks: ClaudeContentBlock[] = prompt.trim() ? [{ type: 'text', text: prompt }] : [];
 
   for (const descriptor of normalizeImageDescriptors(images)) {
     const mediaType = resolveImageMediaType(descriptor);
@@ -412,6 +416,11 @@ export async function buildClaudeUserContent(
       const message = error instanceof Error ? error.message : String(error);
       console.warn(`[Images] Failed to read image ${descriptor.path}: ${message}`);
     }
+  }
+
+  if (blocks.length === 0) {
+    // Nothing readable and no caption: still send a valid, non-empty turn.
+    blocks.push({ type: 'text', text: prompt.trim() || '[image could not be attached]' });
   }
 
   return blocks;

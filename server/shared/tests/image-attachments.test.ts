@@ -236,6 +236,20 @@ test('buildClaudeUserContent reads image bytes into base64 blocks', async () => 
   }
 });
 
+test('buildClaudeUserContent sends a caption-less image without an empty text block', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'image-attachments-'));
+  try {
+    await writeFile(path.join(tempDir, 'shot.png'), PNG_BYTES);
+
+    const content = await buildClaudeUserContent('', [{ path: 'shot.png', mimeType: 'image/png' }], tempDir);
+
+    assert.equal(content.length, 1);
+    assert.equal(content[0].type, 'image');
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test('buildClaudeUserContent skips unsupported types and unreadable files', async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'image-attachments-'));
   try {
