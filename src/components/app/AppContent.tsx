@@ -17,7 +17,7 @@ import { useTerminalTabs } from '../../hooks/useTerminalTabs';
 import { useQueuedMessageAutoSend } from '../../hooks/useQueuedMessageAutoSend';
 import { useBrowserUseEnabled } from '../../hooks/useBrowserUseEnabled';
 import { ensureLatestBuild, watchServiceWorkerUpdates } from '../../lib/appUpdate';
-import { api } from '../../utils/api';
+import { api, authenticatedFetch } from '../../utils/api';
 import type { AppTab } from '../../types/app';
 
 type RunningSessionApiItem = {
@@ -364,14 +364,14 @@ function AppContentInner() {
 
       // Клавиатура открыта: идёт набор и видимая область заметно короче
       // экрана (внешняя клавиатура даёт полоску в несколько десятков точек).
-      // В этом состоянии полоски «домой» внизу нет — её закрывает клавиатура,
-      // поэтому ни вычитать её из высоты, ни держать под неё отступ у поля
-      // ввода нельзя: вместе они давали пустую полосу между полем и
-      // клавиатурой (снимок Егора 16.09.26). Низ оболочки — ровно край
-      // видимой области, отступ поля снимается классом keyboard-open.
+      // Полоски «домой» под полем в этот момент нет — её закрывает
+      // клавиатура, а отступ под неё давал пустую полосу между полем и
+      // клавиатурой (снимок Егора 16.09.26). Класс keyboard-open снимает
+      // этот отступ (index.css). Вычет restingGap оставлен как был: попытка
+      // убрать его вместе со сбросом прокрутки спрятала поле под клавиатуру.
       const keyboardOpen = isTyping() && gap > 120;
       document.documentElement.classList.toggle('keyboard-open', keyboardOpen);
-      const raw = isStandalone && !keyboardOpen ? Math.max(0, gap - restingGap) : gap;
+      const raw = isStandalone ? Math.max(0, gap - restingGap) : gap;
 
       // Ограничитель. Клавиатура физически не занимает больше двух третей
       // экрана, а вот числа от браузера в момент её появления бывают любыми:
@@ -404,6 +404,47 @@ function AppContentInner() {
       document.documentElement.style.setProperty('--keyboard-height', `${kb}px`);
       document.documentElement.style.setProperty('--app-pan', `${pan}px`);
       if (changed) scheduleCaretRedraw();
+      if (isTyping()) scheduleProbe({ gap, kb, pan, keyboardOpen });
+    };
+
+    // Замер для журнала сайта: настоящие числа iPhone при открытой клавиатуре.
+    // Эмулятор на сервере дважды разошёлся с телефоном (16.09.26).
+    let probeTimer = 0;
+    let probesLeft = 12;
+    const scheduleProbe = (state: { gap: number; kb: number; pan: number; keyboardOpen: boolean }) => {
+      if (probesLeft <= 0) return;
+      window.clearTimeout(probeTimer);
+      probeTimer = window.setTimeout(() => {
+        probesLeft -= 1;
+        const rectOf = (selector: string) => document.querySelector(selector)?.getBoundingClientRect();
+        const composer = rectOf('.chat-composer-shell');
+        const form = document.querySelector('textarea.chat-input-placeholder')?.closest('form')?.getBoundingClientRect();
+        const textarea = rectOf('textarea.chat-input-placeholder');
+        const shell = rectOf('div.fixed.inset-0.flex.bg-background');
+        void authenticatedFetch('/api/user/viewport-probe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ...state,
+            standalone: isStandalone,
+            restingGap,
+            innerHeight: window.innerHeight,
+            vvHeight: vv.height,
+            vvTop: vv.offsetTop,
+            vvScale: vv.scale,
+            scrollY: window.scrollY,
+            screenH: window.screen.height,
+            docClientH: document.documentElement.clientHeight,
+            shellTop: shell?.top ?? -1,
+            shellBottom: shell?.bottom ?? -1,
+            composerBottom: composer?.bottom ?? -1,
+            formBottom: form?.bottom ?? -1,
+            textareaTop: textarea?.top ?? -1,
+            composerPad: composer ? parseFloat(getComputedStyle(document.querySelector('.chat-composer-shell')!).paddingBottom) : -1,
+            focused: document.activeElement?.tagName ?? '',
+          }),
+        }).catch(() => {});
+      }, 900);
     };
     let lastKb = -1;
     let lastPan = -1;
@@ -412,10 +453,10 @@ function AppContentInner() {
     // курсор строкой ниже). Safari рисует курсор по месту поля в момент
     // фокуса и не переносит его, когда закреплённая оболочка сдвигается
     // следом за клавиатурой. Известная ошибка WebKit с полями внутри
-    // position: fixed. Два средства: пока идёт набор, прокрутка документа
-    // возвращается в ноль (документ у нас не прокручивается, сдвиг делает
-    // только сама iOS), и после каждого сдвига оболочки выделение ставится
-    // заново — это заставляет Safari пересчитать место курсора.
+    // position: fixed. После каждого сдвига оболочки выделение ставится
+    // заново — это заставляет Safari пересчитать место курсора. Сбрасывать
+    // прокрутку документа в ноль нельзя: этим сдвигом iOS и поднимает поле
+    // над клавиатурой, без него поле ушло под клавиатуру (снимок 16.09.26).
     let caretFrame = 0;
     const scheduleCaretRedraw = () => {
       if (caretFrame) window.cancelAnimationFrame(caretFrame);
@@ -431,11 +472,6 @@ function AppContentInner() {
           // Поля без выделения (type=number и т.п.) — курсора нет, чинить нечего.
         }
       });
-    };
-    const resetDocumentScroll = () => {
-      if (isTyping() && (window.scrollY !== 0 || window.scrollX !== 0)) {
-        window.scrollTo(0, 0);
-      }
     };
     let frame = 0;
     const scheduleUpdate = () => {
@@ -456,14 +492,9 @@ function AppContentInner() {
     update();
 
 
-    const onViewportScroll = () => {
-      resetDocumentScroll();
-      scheduleUpdate();
-    };
     vv.addEventListener('resize', update);
     // Сдвиг iOS меняется событием scroll видимой области, а не resize.
-    vv.addEventListener('scroll', onViewportScroll);
-    window.addEventListener('scroll', resetDocumentScroll, { passive: true });
+    vv.addEventListener('scroll', scheduleUpdate);
     // Re-measure the device's own gap only at moments when a keyboard cannot
     // be the cause: a turned phone, and coming back to the app.
     const recalibrate = () => {
@@ -474,8 +505,8 @@ function AppContentInner() {
     document.addEventListener('visibilitychange', recalibrate);
     return () => {
       vv.removeEventListener('resize', update);
-      vv.removeEventListener('scroll', onViewportScroll);
-      window.removeEventListener('scroll', resetDocumentScroll);
+      vv.removeEventListener('scroll', scheduleUpdate);
+      window.clearTimeout(probeTimer);
       if (frame) window.cancelAnimationFrame(frame);
       if (caretFrame) window.cancelAnimationFrame(caretFrame);
       document.documentElement.classList.remove('keyboard-open');
