@@ -100,7 +100,20 @@
       "closePanel": "Close shortcuts panel",
       "openPanel": "Open shortcuts panel"
     },
-    "paste": "Paste"
+    "paste": "Paste",
+    "copy": "Copy",
+    "selectAll": "Select all",
+    "copied": "Copied",
+    "copyFailed": "Copy failed",
+    "selectFirst": "Select some text first",
+    "inputTitle": "Paste or type text",
+    "inputHint": "Long-press the field → Paste. The text goes to the terminal without Enter.",
+    "viewTitle": "Terminal text",
+    "close": "Close",
+    "cancel": "Cancel",
+    "sendToTerminal": "To terminal",
+    "copySelected": "Copy selection",
+    "copyAll": "Copy all"
   },
   "mainTabs": {
     "label": "Settings",

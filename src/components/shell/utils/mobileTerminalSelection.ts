@@ -1,6 +1,7 @@
 import type { IDisposable, Terminal } from '@xterm/xterm';
 
 import { copyTextToClipboard } from '../../../utils/clipboard';
+import { pasteOrOpenSheet } from './terminalClipboard';
 
 type TerminalCoords = {
   col: number;
@@ -61,10 +62,27 @@ type ContextMenuItem = {
   action: () => void;
 };
 
+export type MobileTerminalSelectionLabels = {
+  copy: string;
+  paste: string;
+  selectAll: string;
+  copied: string;
+  copyFailed: string;
+};
+
+const DEFAULT_LABELS: MobileTerminalSelectionLabels = {
+  copy: 'Копировать',
+  paste: 'Вставить',
+  selectAll: 'Выделить всё',
+  copied: 'Скопировано',
+  copyFailed: 'Не удалось скопировать',
+};
+
 export type MobileTerminalSelectionOptions = {
   minFontSize?: number;
   maxFontSize?: number;
   onFontSizeChange?: (fontSize: number) => void;
+  labels?: Partial<MobileTerminalSelectionLabels>;
 };
 
 function isTouchSelectionEnvironment(): boolean {
@@ -94,6 +112,9 @@ class ShellMobileSelectionCore implements MobileTerminalSelectionManager {
   private readonly startHandle: HTMLDivElement;
   private readonly endHandle: HTMLDivElement;
   private readonly contextMenu: HTMLDivElement;
+  private readonly toast: HTMLDivElement;
+  private readonly labels: MobileTerminalSelectionLabels;
+  private toastTimeout: number | null = null;
   private readonly disposables: IDisposable[] = [];
   private readonly originalPosition: string;
 
@@ -132,6 +153,7 @@ class ShellMobileSelectionCore implements MobileTerminalSelectionManager {
     this.terminal = terminal;
     this.terminalContent = terminalContent;
     this.originalPosition = terminalContent.style.position;
+    this.labels = { ...DEFAULT_LABELS, ...options.labels };
 
     const minFontSize = Number(options.minFontSize) || DEFAULT_MIN_FONT_SIZE;
     const maxFontSize = Number(options.maxFontSize) || DEFAULT_MAX_FONT_SIZE;
@@ -153,7 +175,8 @@ class ShellMobileSelectionCore implements MobileTerminalSelectionManager {
     this.startHandle = this.createHandle('start');
     this.endHandle = this.createHandle('end');
     this.contextMenu = this.createContextMenu();
-    this.overlay.append(this.startHandle, this.endHandle, this.contextMenu);
+    this.toast = this.createToast();
+    this.overlay.append(this.startHandle, this.endHandle, this.contextMenu, this.toast);
     this.terminalContent.appendChild(this.overlay);
 
     this.attachEventListeners();
@@ -207,9 +230,11 @@ class ShellMobileSelectionCore implements MobileTerminalSelectionManager {
     menu.style.whiteSpace = 'nowrap';
     menu.style.userSelect = 'none';
 
+    // Как в системном меню телефона: копировать, вставить, выделить всё.
     const items: ContextMenuItem[] = [
-      { label: 'Copy', action: () => this.copySelection() },
-      { label: 'Select All', action: () => this.selectAllText() },
+      { label: this.labels.copy, action: () => this.copySelection() },
+      { label: this.labels.paste, action: () => this.pasteFromClipboard() },
+      { label: this.labels.selectAll, action: () => this.selectAllText() },
     ];
 
     for (const item of items) {
@@ -219,6 +244,39 @@ class ShellMobileSelectionCore implements MobileTerminalSelectionManager {
     return menu;
   }
 
+  private createToast(): HTMLDivElement {
+    const toast = document.createElement('div');
+    toast.className = 'shell-mobile-selection-toast';
+    toast.style.position = 'absolute';
+    toast.style.left = '50%';
+    toast.style.top = '12px';
+    toast.style.transform = 'translateX(-50%)';
+    toast.style.display = 'none';
+    toast.style.padding = '8px 14px';
+    toast.style.background = '#1f2937';
+    toast.style.color = '#f9fafb';
+    toast.style.fontSize = '14px';
+    toast.style.border = '1px solid rgba(255,255,255,0.12)';
+    toast.style.borderRadius = '10px';
+    toast.style.boxShadow = '0 6px 20px rgba(0,0,0,0.4)';
+    toast.style.pointerEvents = 'none';
+    toast.style.zIndex = '33';
+    toast.style.whiteSpace = 'nowrap';
+    return toast;
+  }
+
+  private showToast(text: string): void {
+    this.toast.textContent = text;
+    this.toast.style.display = 'block';
+    if (this.toastTimeout !== null) {
+      window.clearTimeout(this.toastTimeout);
+    }
+    this.toastTimeout = window.setTimeout(() => {
+      this.toastTimeout = null;
+      this.toast.style.display = 'none';
+    }, 1500);
+  }
+
   private createContextMenuButton(item: ContextMenuItem): HTMLButtonElement {
     const button = document.createElement('button');
     button.type = 'button';
@@ -226,7 +284,7 @@ class ShellMobileSelectionCore implements MobileTerminalSelectionManager {
     button.style.appearance = 'none';
     button.style.border = 'none';
     button.style.margin = '0';
-    button.style.padding = '8px 14px';
+    button.style.padding = '10px 14px';
     button.style.background = 'transparent';
     button.style.color = '#f9fafb';
     button.style.fontSize = '14px';
@@ -665,9 +723,17 @@ class ShellMobileSelectionCore implements MobileTerminalSelectionManager {
   private copySelection(): void {
     const selectionText = this.terminal.getSelection();
     if (selectionText) {
-      void copyTextToClipboard(selectionText);
+      // Без отметки непонятно, сработало ли: выделение просто пропадает.
+      void copyTextToClipboard(selectionText).then((copied) => {
+        this.showToast(copied ? this.labels.copied : this.labels.copyFailed);
+      });
     }
     this.clearSelection();
+  }
+
+  private pasteFromClipboard(): void {
+    this.clearSelection();
+    pasteOrOpenSheet(this.terminal);
   }
 
   private selectAllText(): void {
@@ -1027,6 +1093,10 @@ class ShellMobileSelectionCore implements MobileTerminalSelectionManager {
     this.isDestroyed = true;
     this.clearTapHoldTimeout();
     this.cancelInertia();
+    if (this.toastTimeout !== null) {
+      window.clearTimeout(this.toastTimeout);
+      this.toastTimeout = null;
+    }
 
     this.terminal.element?.removeEventListener('touchstart', this.onTerminalTouchStart);
     this.terminal.element?.removeEventListener('touchmove', this.onTerminalTouchMove);
