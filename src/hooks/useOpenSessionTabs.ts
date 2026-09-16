@@ -3,6 +3,7 @@ import type { NavigateFunction } from 'react-router-dom';
 
 import { useAuth } from '../components/auth/context/AuthContext';
 import type { Project, ProjectSession } from '../types/app';
+import { api } from '../utils/api';
 import { getSessionTitle } from '../utils/pageTitle';
 
 /**
@@ -73,6 +74,67 @@ const writeStoredTabs = (userKey: string | null, tabs: StoredTab[]) => {
   }
 };
 
+/**
+ * Вкладки одни на все устройства пользователя (Егор 16.09.26: «чтобы порядок
+ * на телефоне и на компьютере был одинаковым, и список чатов тоже»).
+ *
+ * localStorage остаётся быстрым кэшем для первого кадра, правда — на сервере
+ * (`/api/open-tabs`, номер версии). Страница спрашивает сервер при запуске,
+ * при возвращении на неё (включили телефон, переключились на окно) и раз в
+ * 15 секунд, пока она видна. Своё изменение уходит на сервер через 300 мс;
+ * пока оно не записано, чужой список не накатывается — иначе только что
+ * открытая или переставленная вкладка отскочила бы назад.
+ *
+ * Первый заход устройства (версии в кэше нет) не теряет его вкладок: к списку
+ * с сервера дописываются местные, которых там нет. Дальше сервер главный.
+ *
+ * Сокетом не рассылаем нарочно: страница старой сборки показала бы
+ * незнакомое событие строкой в ленте.
+ */
+const SYNC_POLL_MS = 15000;
+const SYNC_PUSH_DELAY_MS = 300;
+
+const syncVersionKeyFor = (userKey: string | null): string => `${storageKeyFor(userKey)}:version`;
+
+const readSyncVersion = (userKey: string | null): number | null => {
+  try {
+    const raw = localStorage.getItem(syncVersionKeyFor(userKey));
+    const value = raw === null ? NaN : Number(raw);
+    return Number.isInteger(value) ? value : null;
+  } catch {
+    return null;
+  }
+};
+
+const writeSyncVersion = (userKey: string | null, version: number) => {
+  try {
+    localStorage.setItem(syncVersionKeyFor(userKey), String(version));
+  } catch {
+    // без кэша версии следующий заход просто сольёт списки ещё раз
+  }
+};
+
+/** Одинаковый вид списка для сравнения: порядок полей, без пустых. */
+const serializeTabs = (tabs: StoredTab[]): string =>
+  JSON.stringify(tabs.map((tab) => ({
+    sessionId: tab.sessionId,
+    ...(tab.projectId ? { projectId: tab.projectId } : {}),
+    ...(tab.provider ? { provider: tab.provider } : {}),
+    ...(tab.title ? { title: tab.title } : {}),
+  })));
+
+type ServerTabsState = { version: number; tabs: StoredTab[] };
+
+const readServerState = async (response: Response): Promise<ServerTabsState | null> => {
+  if (response.status === 204 || !response.ok) return null;
+  const body = (await response.json()) as { version?: unknown; tabs?: unknown };
+  if (!Number.isInteger(body.version) || !Array.isArray(body.tabs)) return null;
+  return {
+    version: body.version as number,
+    tabs: (body.tabs as StoredTab[]).filter((tab) => tab && typeof tab.sessionId === 'string'),
+  };
+};
+
 const findSessionInProjects = (
   projects: Project[],
   sessionId: string,
@@ -123,6 +185,170 @@ export function useOpenSessionTabs({ projects, activeSessionId, activeSession, n
     }
     writeStoredTabs(userKey, tabs);
   }, [tabs, userKey]);
+
+  // ── Общие вкладки с сервером ──────────────────────────────────────────
+  const tabsRef = useRef(tabs);
+  tabsRef.current = tabs;
+  const activeSessionIdRef = useRef(activeSessionId);
+  activeSessionIdRef.current = activeSessionId;
+  const navigateRef = useRef(navigate);
+  navigateRef.current = navigate;
+  const syncRef = useRef({
+    ready: false,
+    version: null as number | null,
+    syncedJson: '',
+    pushTimer: 0,
+    pushing: false,
+    fetching: false,
+    /** Растёт при смене пользователя: ответ сверки под прежним отбрасывается. */
+    generation: 0,
+  });
+
+  const pushTabs = useCallback(async (keepalive = false) => {
+    const sync = syncRef.current;
+    if (sync.pushTimer) window.clearTimeout(sync.pushTimer);
+    sync.pushTimer = 0;
+    if (userKey === null) return;
+    if (sync.pushing) {
+      sync.pushTimer = window.setTimeout(() => void pushTabs(), SYNC_PUSH_DELAY_MS);
+      return;
+    }
+    const json = serializeTabs(tabsRef.current);
+    if (json === sync.syncedJson) return;
+    sync.pushing = true;
+    try {
+      const state = await readServerState(await api.openTabs.put(JSON.parse(json), keepalive));
+      if (state) {
+        sync.version = state.version;
+        sync.syncedJson = json;
+        writeSyncVersion(userKey, state.version);
+      }
+    } catch {
+      // сеть пропала — повторим при следующем изменении или опросе
+    } finally {
+      sync.pushing = false;
+    }
+  }, [userKey]);
+
+  // Накатить список с сервера. Если отсюда пропал чат, открытый на ЭТОМ
+  // устройстве, — его закрыли на другом: уходим к соседней вкладке, как при
+  // закрытии крестиком. Иначе правило «открытый чат всегда во вкладках»
+  // вернуло бы вкладку и отменило закрытие на всех устройствах.
+  const applyRemote = useCallback((remote: StoredTab[], followClose = true) => {
+    const previous = tabsRef.current;
+    const activeId = activeSessionIdRef.current;
+    const remoteIds = new Set(remote.map((tab) => tab.sessionId));
+    if (followClose && activeId && !remoteIds.has(activeId) && previous.some((tab) => tab.sessionId === activeId)) {
+      const index = previous.findIndex((tab) => tab.sessionId === activeId);
+      const neighbour = [...previous.slice(index + 1), ...previous.slice(0, index).reverse()]
+        .find((tab) => remoteIds.has(tab.sessionId));
+      navigateRef.current(neighbour ? `/session/${neighbour.sessionId}` : '/');
+    }
+    tabsRef.current = remote;
+    setTabs(remote);
+  }, []);
+
+  const pullTabs = useCallback(async () => {
+    const sync = syncRef.current;
+    // Пока пользователь не известен, сверять нечего: кэш и номер версии
+    // лежат под его именем (гонка при запуске 16.09.26 теряла местные вкладки).
+    if (userKey === null || sync.fetching) return;
+    sync.fetching = true;
+    const generation = sync.generation;
+    try {
+      const response = await api.openTabs.get(sync.ready && sync.version !== null ? sync.version : undefined);
+      const state = await readServerState(response);
+      if (generation !== sync.generation) return;
+      // Пока своё изменение не записано, чужой список не трогает экран.
+      if (!state || sync.pushTimer || sync.pushing) return;
+
+      if (!sync.ready) {
+        sync.ready = true;
+        const local = tabsRef.current;
+        const neverSynced = readSyncVersion(userKey) === null;
+        let next = state.tabs;
+        if (state.version === 0) {
+          next = local; // на сервере пусто — первым туда уходит этот список
+        } else if (neverSynced) {
+          const known = new Set(state.tabs.map((tab) => tab.sessionId));
+          next = [...state.tabs, ...local.filter((tab) => !known.has(tab.sessionId))];
+        } else {
+          // Чат, открытый на этом устройстве прямо сейчас (например, по ссылке
+          // до первой сверки), остаётся вкладкой — закрытием это не было.
+          const activeId = activeSessionIdRef.current;
+          const activeTab = activeId ? local.find((tab) => tab.sessionId === activeId) : undefined;
+          if (activeTab && !state.tabs.some((tab) => tab.sessionId === activeId)) next = [...state.tabs, activeTab];
+        }
+        sync.version = state.version;
+        sync.syncedJson = serializeTabs(state.tabs);
+        // Отметку «сверено» в кэш — только когда кэш и сервер совпадают. Иначе
+        // её ставит отправка. Страница при первом заходе сама перезагружается
+        // (обновление сборки); отметка до отправки заставляла вторую загрузку
+        // довериться серверу и терять местные вкладки (16.09.26).
+        if (serializeTabs(next) === sync.syncedJson) writeSyncVersion(userKey, state.version);
+        if (serializeTabs(next) !== serializeTabs(local)) applyRemote(next, false);
+        if (serializeTabs(next) !== sync.syncedJson) {
+          sync.pushTimer = window.setTimeout(() => void pushTabs(), SYNC_PUSH_DELAY_MS);
+        }
+        return;
+      }
+
+      sync.version = state.version;
+      sync.syncedJson = serializeTabs(state.tabs);
+      writeSyncVersion(userKey, state.version);
+      if (sync.syncedJson !== serializeTabs(tabsRef.current)) applyRemote(state.tabs);
+    } catch {
+      // нет сети — спросим на следующем круге
+    } finally {
+      sync.fetching = false;
+    }
+  }, [applyRemote, pushTabs, userKey]);
+
+  // Своё изменение — на сервер (после первой сверки, чтобы не затереть
+  // серверный список устаревшим кэшем этого устройства).
+  useEffect(() => {
+    const sync = syncRef.current;
+    if (!sync.ready || serializeTabs(tabs) === sync.syncedJson) return;
+    if (sync.pushTimer) window.clearTimeout(sync.pushTimer);
+    sync.pushTimer = window.setTimeout(() => void pushTabs(), SYNC_PUSH_DELAY_MS);
+  }, [tabs, pushTabs]);
+
+  // Сверка: при запуске, при возвращении на страницу и раз в 15 с, пока видна.
+  useEffect(() => {
+    const sync = syncRef.current;
+    sync.generation += 1;
+    sync.fetching = false;
+    sync.ready = false;
+    sync.version = null;
+    sync.syncedJson = '';
+    void pullTabs();
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void pullTabs();
+      // Уходим со страницы — несохранённое изменение отправить сейчас, а не через 300 мс.
+      else if (sync.pushTimer) void pushTabs(true);
+    };
+    const onPageHide = () => {
+      if (sync.pushTimer) void pushTabs(true);
+    };
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void pullTabs();
+    }, SYNC_POLL_MS);
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('pagehide', onPageHide);
+    window.addEventListener('focus', onVisible);
+    window.addEventListener('online', onVisible);
+    return () => {
+      window.clearInterval(timer);
+      if (sync.pushTimer) {
+        window.clearTimeout(sync.pushTimer);
+        sync.pushTimer = 0;
+      }
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('pagehide', onPageHide);
+      window.removeEventListener('focus', onVisible);
+      window.removeEventListener('online', onVisible);
+    };
+  }, [pullTabs, pushTabs]);
 
   // Whatever session is currently being viewed always gets a tab — this is
   // the single funnel that covers sidebar clicks, archived-session opens,

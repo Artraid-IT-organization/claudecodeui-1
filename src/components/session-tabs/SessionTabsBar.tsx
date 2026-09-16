@@ -21,6 +21,8 @@ type SessionTabsBarProps = {
   activeTerminalId?: string | null;
   onSelectTerminal?: (id: string) => void;
   onCloseTerminal?: (id: string) => void;
+  /** Перетаскивание окна командной строки на новое место среди окон. */
+  onReorderTerminal?: (id: string, toIndex: number) => void;
   /**
    * Чем сейчас занят каждый чат. Вкладка работающего чата показывает значок
    * фазы вместо значка Claude — видно, какой из открытых чатов думает, не
@@ -45,6 +47,7 @@ export default function SessionTabsBar({
   activeTerminalId = null,
   onSelectTerminal,
   onCloseTerminal,
+  onReorderTerminal,
   activities,
 }: SessionTabsBarProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -73,7 +76,13 @@ export default function SessionTabsBar({
     activeTabElement.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
   }, [activeKey, tabIdsKey, terminalIdsKey]);
 
-  useTabReorderDrag({ containerRef: scrollRef, itemIds: tabs.map((tab) => tab.sessionId), onReorder });
+  useTabReorderDrag({
+    containerRef: scrollRef,
+    itemIds: [...tabs.map((tab) => tab.sessionId), ...terminals.map((term) => term.id)],
+    onReorder: onReorder || onReorderTerminal
+      ? (id, toIndex, group) => (group === 'terminal' ? onReorderTerminal : onReorder)?.(id, toIndex)
+      : undefined,
+  });
 
   if (tabs.length === 0 && terminals.length === 0) {
     return null;
@@ -102,6 +111,7 @@ export default function SessionTabsBar({
             title={phaseLabel ? `${tab.title} — ${phaseLabel}…` : tab.title}
             data-phase={phaseKey ?? 'idle'}
             data-reorder-id={tab.sessionId}
+            data-reorder-group="chat"
             onClick={() => onSelect(tab.sessionId)}
             onKeyDown={(event) => {
               if (event.key === 'Enter' || event.key === ' ') {
@@ -152,6 +162,8 @@ export default function SessionTabsBar({
             aria-selected={isActive}
             tabIndex={isActive ? 0 : -1}
             title={term.title}
+            data-reorder-id={term.id}
+            data-reorder-group="terminal"
             onClick={() => onSelectTerminal?.(term.id)}
             onKeyDown={(event) => {
               if (event.key === 'Enter' || event.key === ' ') {
@@ -160,7 +172,8 @@ export default function SessionTabsBar({
               }
             }}
             className={cn(
-              'group relative flex min-w-[108px] max-w-[220px] flex-shrink-0 cursor-pointer items-center gap-1.5 border-r border-border/40 px-2.5 py-2 text-xs transition-colors sm:min-w-[140px] sm:text-sm',
+              'group relative flex min-w-[108px] max-w-[220px] flex-shrink-0 cursor-pointer select-none items-center gap-1.5 border-r border-border/40 px-2.5 py-2 text-xs transition-colors [-webkit-touch-callout:none] sm:min-w-[140px] sm:text-sm',
+              'data-[dragging=true]:cursor-grabbing data-[dragging=true]:bg-background data-[dragging=true]:text-foreground data-[dragging=true]:shadow-[0_6px_20px_rgba(0,0,0,0.35)] data-[dragging=true]:ring-1 data-[dragging=true]:ring-border',
               isActive
                 ? 'bg-background text-foreground'
                 : 'text-muted-foreground hover:bg-accent/40 hover:text-foreground',

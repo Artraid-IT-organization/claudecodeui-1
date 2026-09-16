@@ -19,15 +19,18 @@ import type { RefObject } from 'react';
  * - порядок в состоянии меняется только после того, как вкладка «доехала» на
  *   место; сдвиги снимаются в useLayoutEffect — до отрисовки, без мигания.
  *
+ * Вкладки делятся на группы (`data-reorder-group`: чаты, окна командной
+ * строки) — вкладка переставляется только среди своей группы.
+ *
  * Мышь: тянуть сразу, после сдвига на 5 px (короткий щелчок — выбор вкладки).
- * Палец: подержать ~0,3 с, потом тянуть. Иначе обычное листание полосы
+ * Палец: подержать ~0,35 с, потом тянуть. Иначе обычное листание полосы
  * пальцем перестало бы работать. Касания — через touch-события, а не pointer:
  * только так iOS Safari даёт отменить прокрутку уже после начала жеста.
  */
 
 const MOUSE_SLOP = 5;
 const TOUCH_SLOP = 8;
-const LONG_PRESS_MS = 280;
+const LONG_PRESS_MS = 350;
 const SETTLE_MS = 200;
 const EASE = 'cubic-bezier(0.2, 0, 0, 1)';
 const EDGE = 48;
@@ -35,6 +38,7 @@ const MAX_AUTOSCROLL = 14;
 
 type Pending = {
   id: string;
+  group: string;
   kind: 'mouse' | 'touch';
   startX: number;
   startY: number;
@@ -44,6 +48,7 @@ type Pending = {
 
 type Drag = {
   id: string;
+  group: string;
   kind: 'mouse' | 'touch';
   touchId?: number;
   els: HTMLElement[];
@@ -55,15 +60,27 @@ type Drag = {
   pointerX: number;
   scrollStart: number;
   lastDx: number;
+  /** Сдвигали ли вкладку по-настоящему: без сдвига отпускание — обычный щелчок. */
+  moved: boolean;
+  overflowX: string;
   raf: number;
   settling: boolean;
 };
 
 type Options = {
   containerRef: RefObject<HTMLElement | null>;
-  /** Порядок вкладок, которые можно переставлять (sessionId). */
+  /** Порядок всех переставляемых вкладок (id): смена состава отменяет жест. */
   itemIds: string[];
-  onReorder?: (id: string, toIndex: number) => void;
+  /** toIndex — место среди вкладок той же группы. */
+  onReorder?: (id: string, toIndex: number, group: string) => void;
+};
+
+// Смена overflow у полосы с -webkit-overflow-scrolling на iOS может сбросить
+// прокрутку в начало — положение запоминаем и возвращаем.
+const setOverflowX = (container: HTMLElement, value: string) => {
+  const left = container.scrollLeft;
+  container.style.overflowX = value;
+  if (container.scrollLeft !== left) container.scrollLeft = left;
 };
 
 const clearStyles = (els: HTMLElement[]) => {
@@ -100,8 +117,10 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
     if (drag && !drag.settling) {
       cancelAnimationFrame(drag.raf);
       clearStyles(drag.els);
+      if (containerRef.current) setOverflowX(containerRef.current, drag.overflowX);
       dragRef.current = null;
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [idsKey]);
 
   useEffect(() => {
@@ -145,6 +164,7 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
 
       if (dx !== drag.lastDx) {
         drag.lastDx = dx;
+        if (Math.abs(dx) > 3) drag.moved = true;
         drag.els[from].style.transform = `translate3d(${dx}px, 0, 0)`;
 
         const center = lefts[from] + widths[from] / 2 + dx;
@@ -167,7 +187,8 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
     };
 
     const startDrag = (p: Pending, pointerX: number) => {
-      const els = Array.from(container.querySelectorAll<HTMLElement>('[data-reorder-id]'));
+      const els = Array.from(container.querySelectorAll<HTMLElement>('[data-reorder-id]'))
+        .filter((el) => (el.dataset.reorderGroup ?? '') === p.group);
       const from = els.findIndex((el) => el.dataset.reorderId === p.id);
       clearPending();
       if (from === -1 || els.length < 2) return;
@@ -180,6 +201,12 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
         lefts.push(r.left - box.left + container.scrollLeft);
         widths.push(r.width);
       }
+
+      // Пока тянем, полоса не прокручивается сама: иначе iOS, успевший признать
+      // жест листанием, уводит полосу из-под пальца одновременно с перестановкой.
+      // scrollLeft из кода (автопрокрутка у краёв) при этом работает.
+      const overflowX = container.style.overflowX;
+      setOverflowX(container, 'hidden');
 
       els.forEach((el, i) => {
         el.style.willChange = 'transform';
@@ -194,6 +221,7 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
 
       dragRef.current = {
         id: p.id,
+        group: p.group,
         kind: p.kind,
         touchId: p.touchId,
         els,
@@ -205,6 +233,8 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
         pointerX,
         scrollStart: container.scrollLeft,
         lastDx: 0,
+        moved: false,
+        overflowX,
         raf: 0,
         settling: false,
       };
@@ -216,6 +246,14 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
       const drag = dragRef.current;
       if (!drag || drag.settling) return;
       cancelAnimationFrame(drag.raf);
+      setOverflowX(container, drag.overflowX);
+
+      // Подержал и отпустил, не сдвинув, — это нажатие, чат должен открыться.
+      if (!drag.moved && drag.target === drag.from) {
+        clearStyles(drag.els);
+        dragRef.current = null;
+        return;
+      }
       drag.settling = true;
       suppressClickUntil = performance.now() + 400;
 
@@ -232,7 +270,7 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
         dragRef.current = null;
         if (target !== from && onReorderRef.current) {
           pendingResetRef.current = els;
-          onReorderRef.current(drag.id, target);
+          onReorderRef.current(drag.id, target, drag.group);
           // Страховка: если порядок почему-то не сменился, эффект не сработает.
           window.setTimeout(() => {
             if (pendingResetRef.current === els) {
@@ -252,7 +290,7 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
       const tab = tabFromEvent(event.target);
       if (!tab?.dataset.reorderId) return;
       clearPending();
-      pending = { id: tab.dataset.reorderId, kind: 'mouse', startX: event.clientX, startY: event.clientY };
+      pending = { id: tab.dataset.reorderId, group: tab.dataset.reorderGroup ?? '', kind: 'mouse', startX: event.clientX, startY: event.clientY };
     };
     const onPointerMove = (event: PointerEvent) => {
       if (event.pointerType === 'touch') return;
@@ -283,6 +321,7 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
       clearPending();
       const p: Pending = {
         id: tab.dataset.reorderId,
+        group: tab.dataset.reorderGroup ?? '',
         kind: 'touch',
         startX: touch.clientX,
         startY: touch.clientY,
@@ -342,6 +381,7 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
       if (drag && !drag.settling) {
         cancelAnimationFrame(drag.raf);
         clearStyles(drag.els);
+        setOverflowX(container, drag.overflowX);
         dragRef.current = null;
       }
       container.removeEventListener('pointerdown', onPointerDown);

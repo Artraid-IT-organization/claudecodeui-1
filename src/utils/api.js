@@ -433,6 +433,14 @@ export const api = {
       body: JSON.stringify({ path: folderPath }),
     }),
 
+  // Открытые вкладки чатов — общие для всех устройств пользователя.
+  openTabs: {
+    get: (since) => authenticatedFetch(`/api/open-tabs${Number.isInteger(since) ? `?since=${since}` : ''}`),
+    // keepalive — запрос доходит, даже если страница закрывается или перезагружается.
+    put: (tabs, keepalive = false) =>
+      authenticatedFetch('/api/open-tabs', { method: 'PUT', body: JSON.stringify({ tabs }), keepalive }),
+  },
+
   // User endpoints
   user: {
     usageLimits: () => authenticatedFetch('/api/user/usage-limits'),

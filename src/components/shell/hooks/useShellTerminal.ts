@@ -7,6 +7,7 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import { SerializeAddon } from '@xterm/addon-serialize';
 import { Terminal } from '@xterm/xterm';
 
+import i18n from '../../../i18n/config.js';
 import type { Project } from '../../../types/app';
 import { copyTextToClipboard } from '../../../utils/clipboard';
 import {
@@ -183,6 +184,15 @@ export function useShellTerminal({
       nextTerminal,
       terminalContainer,
       {
+        labels: {
+          copy: i18n.t('settings:terminalShortcuts.copy', { defaultValue: 'Копировать' }),
+          paste: i18n.t('settings:terminalShortcuts.paste', { defaultValue: 'Вставить' }),
+          selectAll: i18n.t('settings:terminalShortcuts.selectAll', { defaultValue: 'Выделить всё' }),
+          copied: i18n.t('settings:terminalShortcuts.copied', { defaultValue: 'Скопировано' }),
+          copyFailed: i18n.t('settings:terminalShortcuts.copyFailed', {
+            defaultValue: 'Не удалось скопировать',
+          }),
+        },
         onFontSizeChange: (fontSize) => {
           nextTerminal.options.fontSize = fontSize;
 
@@ -232,40 +242,35 @@ export function useShellTerminal({
 
     terminalContainer.addEventListener('copy', handleTerminalCopy);
 
+    /*
+     * Копирование и вставка с клавиатуры — как в обычном терминале.
+     *
+     * Ctrl/Cmd+C с выделением копирует, без выделения Ctrl+C прерывает команду.
+     * Ctrl+Shift+C копирует всегда и никогда не прерывает — привычка из
+     * терминалов Linux и Windows.
+     *
+     * Ctrl/Cmd+V и Ctrl+Shift+V: терминалу клавишу не отдаём (иначе он пошлёт
+     * программе ^V), но и браузеру не мешаем — он сам вставит текст в скрытое
+     * поле терминала, а терминал обработает это как настоящую вставку.
+     * Раньше здесь читался буфер вручную и текст уходил как набранный: в
+     * Firefox вставка не работала вовсе, а многострочный текст выполнялся
+     * построчно прямо при вставке.
+     */
     nextTerminal.attachCustomKeyEventHandler((event) => {
-      if (
-        event.type === 'keydown' &&
-        (event.ctrlKey || event.metaKey) &&
-        event.key?.toLowerCase() === 'c' &&
-        nextTerminal.hasSelection()
-      ) {
+      if (event.type !== 'keydown' || !(event.ctrlKey || event.metaKey) || event.altKey) {
+        return true;
+      }
+
+      const key = event.key?.toLowerCase();
+
+      if (key === 'c' && (nextTerminal.hasSelection() || (event.ctrlKey && event.shiftKey))) {
         event.preventDefault();
         event.stopPropagation();
         void copyTerminalSelection();
         return false;
       }
 
-      if (
-        event.type === 'keydown' &&
-        (event.ctrlKey || event.metaKey) &&
-        event.key?.toLowerCase() === 'v'
-      ) {
-        // Block native paste so data is only injected after clipboard-read resolves.
-        event.preventDefault();
-        event.stopPropagation();
-
-        if (typeof navigator !== 'undefined' && navigator.clipboard?.readText) {
-          navigator.clipboard
-            .readText()
-            .then((text) => {
-              sendSocketMessage(wsRef.current, {
-                type: 'input',
-                data: text,
-              });
-            })
-            .catch(() => {});
-        }
-
+      if (key === 'v') {
         return false;
       }
 
