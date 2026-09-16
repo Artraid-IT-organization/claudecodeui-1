@@ -57,6 +57,47 @@ test('claude: stop hook feedback is not shown as a human message', () => {
   assert.deepEqual(liveString, []);
 });
 
+test('claude: a subagent prompt is not shown as a human message', () => {
+  const provider = new ClaudeSessionsProvider();
+  const prompt = 'Только чтение, ничего не менять. Проверь ДЕЛОМ выполнимость плана.';
+
+  const live = provider.normalizeMessage(
+    { type: 'user', parent_tool_use_id: 'toolu_agent', parentToolUseId: 'toolu_agent', message: { role: 'user', content: prompt } },
+    SESSION_ID,
+  );
+  assert.deepEqual(live, []);
+
+  const liveArray = provider.normalizeMessage(
+    { type: 'user', parent_tool_use_id: 'toolu_agent', message: { role: 'user', content: [{ type: 'text', text: prompt }] } },
+    SESSION_ID,
+  );
+  assert.deepEqual(liveArray, []);
+
+  const sidechain = provider.normalizeMessage(
+    { uuid: 's1', isSidechain: true, message: { role: 'user', content: prompt } },
+    SESSION_ID,
+  );
+  assert.deepEqual(sidechain, []);
+
+  const subagentTool = provider.normalizeMessage(
+    {
+      uuid: 's2',
+      parent_tool_use_id: 'toolu_agent',
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_read', content: 'ok' }] },
+    },
+    SESSION_ID,
+  );
+  assert.equal(subagentTool.length, 1);
+  assert.equal(subagentTool[0].kind, 'tool_result');
+
+  const human = provider.normalizeMessage(
+    { uuid: 'u9', message: { role: 'user', content: 'хай' } },
+    SESSION_ID,
+  );
+  assert.equal(human.length, 1);
+  assert.equal(human[0].role, 'user');
+});
+
 test('claude: the Skill tool result itself still reaches the UI', () => {
   const provider = new ClaudeSessionsProvider();
 

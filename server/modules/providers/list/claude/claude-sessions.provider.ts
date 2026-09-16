@@ -483,6 +483,22 @@ export class ClaudeSessionsProvider implements IProviderSessions {
     }
 
     const messages: NormalizedMessage[] = [];
+
+    /**
+     * A subagent's own "user" turn is the prompt its parent wrote (Agent tool
+     * input), not something the human typed. Live SDK events mark it with
+     * `parent_tool_use_id`, subagent transcripts with `isSidechain`. Without
+     * this check the prompt rendered as a bubble from the human (16.09.26).
+     * Tool results inside the subagent are kept — they belong to its tool cards.
+     */
+    const isSubagentTurn = Boolean(raw.parent_tool_use_id || raw.parentToolUseId || raw.isSidechain === true);
+    if (isSubagentTurn && raw.message?.role === 'user') {
+      const content = raw.message.content;
+      if (!Array.isArray(content) || !content.some((part: AnyRecord) => part?.type === 'tool_result')) {
+        return messages;
+      }
+      raw.message = { ...raw.message, content: content.filter((part: AnyRecord) => part?.type === 'tool_result') };
+    }
     const ts = raw.timestamp || new Date().toISOString();
     const baseId = raw.uuid || generateMessageId('claude');
 
