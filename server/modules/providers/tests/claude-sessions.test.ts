@@ -79,6 +79,16 @@ test('claude: a subagent prompt is not shown as a human message', () => {
   );
   assert.deepEqual(sidechain, []);
 
+  const synthetic = provider.normalizeMessage(
+    { type: 'user', isSynthetic: true, message: { role: 'user', content: prompt } },
+    SESSION_ID,
+  );
+  assert.deepEqual(synthetic, []);
+
+  const sdkObject = { parent_tool_use_id: 'toolu_agent', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: 'x' }, { type: 'text', text: prompt }] } };
+  provider.normalizeMessage(sdkObject, SESSION_ID);
+  assert.equal(sdkObject.message.content.length, 2);
+
   const subagentTool = provider.normalizeMessage(
     {
       uuid: 's2',

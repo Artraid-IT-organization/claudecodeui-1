@@ -416,7 +416,7 @@ export class ClaudeSessionsProvider implements IProviderSessions {
    * message shape consumed by REST and WebSocket clients.
    */
   normalizeMessage(rawMessage: unknown, sessionId: string | null): NormalizedMessage[] {
-    const raw = readObjectRecord(rawMessage);
+    let raw = readObjectRecord(rawMessage);
     if (!raw) {
       return [];
     }
@@ -487,17 +487,21 @@ export class ClaudeSessionsProvider implements IProviderSessions {
     /**
      * A subagent's own "user" turn is the prompt its parent wrote (Agent tool
      * input), not something the human typed. Live SDK events mark it with
-     * `parent_tool_use_id`, subagent transcripts with `isSidechain`. Without
+     * `parent_tool_use_id`, subagent transcripts with `isSidechain`; the SDK
+     * also declares `isSynthetic` for user turns no human typed. Without
      * this check the prompt rendered as a bubble from the human (16.09.26).
      * Tool results inside the subagent are kept — they belong to its tool cards.
      */
-    const isSubagentTurn = Boolean(raw.parent_tool_use_id || raw.parentToolUseId || raw.isSidechain === true);
+    const isSubagentTurn = Boolean(
+      raw.parent_tool_use_id || raw.parentToolUseId || raw.isSidechain === true || raw.isSynthetic === true,
+    );
     if (isSubagentTurn && raw.message?.role === 'user') {
       const content = raw.message.content;
       if (!Array.isArray(content) || !content.some((part: AnyRecord) => part?.type === 'tool_result')) {
         return messages;
       }
-      raw.message = { ...raw.message, content: content.filter((part: AnyRecord) => part?.type === 'tool_result') };
+      // Copy, not mutate: the live loop keeps reading the same SDK object afterwards.
+      raw = { ...raw, message: { ...raw.message, content: content.filter((part: AnyRecord) => part?.type === 'tool_result') } };
     }
     const ts = raw.timestamp || new Date().toISOString();
     const baseId = raw.uuid || generateMessageId('claude');
