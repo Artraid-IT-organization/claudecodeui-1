@@ -202,33 +202,11 @@ export function useOpenSessionTabs({ projects, activeSessionId, activeSession, n
     fetching: false,
     /** Растёт при смене пользователя: ответ сверки под прежним отбрасывается. */
     generation: 0,
+    /** Первая отправка устройства — дописать на сервере, а не заменить. */
+    mergeNext: false,
+    /** Есть местное изменение, ещё не записанное на сервер (например, не было сети). */
+    dirty: false,
   });
-
-  const pushTabs = useCallback(async (keepalive = false) => {
-    const sync = syncRef.current;
-    if (sync.pushTimer) window.clearTimeout(sync.pushTimer);
-    sync.pushTimer = 0;
-    if (userKey === null) return;
-    if (sync.pushing) {
-      sync.pushTimer = window.setTimeout(() => void pushTabs(), SYNC_PUSH_DELAY_MS);
-      return;
-    }
-    const json = serializeTabs(tabsRef.current);
-    if (json === sync.syncedJson) return;
-    sync.pushing = true;
-    try {
-      const state = await readServerState(await api.openTabs.put(JSON.parse(json), keepalive));
-      if (state) {
-        sync.version = state.version;
-        sync.syncedJson = json;
-        writeSyncVersion(userKey, state.version);
-      }
-    } catch {
-      // сеть пропала — повторим при следующем изменении или опросе
-    } finally {
-      sync.pushing = false;
-    }
-  }, [userKey]);
 
   // Накатить список с сервера. Если отсюда пропал чат, открытый на ЭТОМ
   // устройстве, — его закрыли на другом: уходим к соседней вкладке, как при
@@ -248,6 +226,37 @@ export function useOpenSessionTabs({ projects, activeSessionId, activeSession, n
     setTabs(remote);
   }, []);
 
+  const pushTabs = useCallback(async (keepalive = false) => {
+    const sync = syncRef.current;
+    if (sync.pushTimer) window.clearTimeout(sync.pushTimer);
+    sync.pushTimer = 0;
+    if (userKey === null) return;
+    if (sync.pushing) {
+      sync.pushTimer = window.setTimeout(() => void pushTabs(keepalive), SYNC_PUSH_DELAY_MS);
+      return;
+    }
+    const json = serializeTabs(tabsRef.current);
+    if (json === sync.syncedJson && !sync.mergeNext) return;
+    const merge = sync.mergeNext;
+    sync.pushing = true;
+    try {
+      const state = await readServerState(await api.openTabs.put(JSON.parse(json), keepalive, merge));
+      if (state) {
+        sync.dirty = serializeTabs(tabsRef.current) !== json;
+        sync.mergeNext = false;
+        sync.version = state.version;
+        sync.syncedJson = serializeTabs(state.tabs);
+        writeSyncVersion(userKey, state.version);
+        // Слияние на сервере могло добавить вкладки другого устройства.
+        if (merge && sync.syncedJson !== serializeTabs(tabsRef.current)) applyRemote(state.tabs, false);
+      }
+    } catch {
+      // сеть пропала — повторим при следующем изменении или опросе
+    } finally {
+      sync.pushing = false;
+    }
+  }, [applyRemote, userKey]);
+
   const pullTabs = useCallback(async () => {
     const sync = syncRef.current;
     // Пока пользователь не известен, сверять нечего: кэш и номер версии
@@ -260,18 +269,26 @@ export function useOpenSessionTabs({ projects, activeSessionId, activeSession, n
       const state = await readServerState(response);
       if (generation !== sync.generation) return;
       // Пока своё изменение не записано, чужой список не трогает экран.
-      if (!state || sync.pushTimer || sync.pushing) return;
+      if (sync.pushTimer || sync.pushing) return;
+      // Своё не дошло до сервера (сеть) — не затирать его, а отправить снова.
+      if (sync.ready && sync.dirty) {
+        sync.pushTimer = window.setTimeout(() => void pushTabs(), SYNC_PUSH_DELAY_MS);
+        return;
+      }
+      if (!state) return;
 
       if (!sync.ready) {
         sync.ready = true;
         const local = tabsRef.current;
         const neverSynced = readSyncVersion(userKey) === null;
         let next = state.tabs;
-        if (state.version === 0) {
-          next = local; // на сервере пусто — первым туда уходит этот список
-        } else if (neverSynced) {
+        if (neverSynced || state.version === 0) {
+          // Первая сверка устройства: серверные + местные, которых там нет.
+          // Отправка идёт слиянием на сервере — если другое устройство успело
+          // записать своё между нашим чтением и записью, его вкладки останутся.
           const known = new Set(state.tabs.map((tab) => tab.sessionId));
           next = [...state.tabs, ...local.filter((tab) => !known.has(tab.sessionId))];
+          sync.mergeNext = next.length > state.tabs.length;
         } else {
           // Чат, открытый на этом устройстве прямо сейчас (например, по ссылке
           // до первой сверки), остаётся вкладкой — закрытием это не было.
@@ -288,6 +305,7 @@ export function useOpenSessionTabs({ projects, activeSessionId, activeSession, n
         if (serializeTabs(next) === sync.syncedJson) writeSyncVersion(userKey, state.version);
         if (serializeTabs(next) !== serializeTabs(local)) applyRemote(next, false);
         if (serializeTabs(next) !== sync.syncedJson) {
+          sync.dirty = true;
           sync.pushTimer = window.setTimeout(() => void pushTabs(), SYNC_PUSH_DELAY_MS);
         }
         return;
@@ -309,6 +327,7 @@ export function useOpenSessionTabs({ projects, activeSessionId, activeSession, n
   useEffect(() => {
     const sync = syncRef.current;
     if (!sync.ready || serializeTabs(tabs) === sync.syncedJson) return;
+    sync.dirty = true;
     if (sync.pushTimer) window.clearTimeout(sync.pushTimer);
     sync.pushTimer = window.setTimeout(() => void pushTabs(), SYNC_PUSH_DELAY_MS);
   }, [tabs, pushTabs]);
@@ -321,6 +340,8 @@ export function useOpenSessionTabs({ projects, activeSessionId, activeSession, n
     sync.ready = false;
     sync.version = null;
     sync.syncedJson = '';
+    sync.dirty = false;
+    sync.mergeNext = false;
     void pullTabs();
     const onVisible = () => {
       if (document.visibilityState === 'visible') void pullTabs();

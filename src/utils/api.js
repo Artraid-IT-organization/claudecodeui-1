@@ -437,8 +437,8 @@ export const api = {
   openTabs: {
     get: (since) => authenticatedFetch(`/api/open-tabs${Number.isInteger(since) ? `?since=${since}` : ''}`),
     // keepalive — запрос доходит, даже если страница закрывается или перезагружается.
-    put: (tabs, keepalive = false) =>
-      authenticatedFetch('/api/open-tabs', { method: 'PUT', body: JSON.stringify({ tabs }), keepalive }),
+    put: (tabs, keepalive = false, merge = false) =>
+      authenticatedFetch('/api/open-tabs', { method: 'PUT', body: JSON.stringify({ tabs, merge }), keepalive }),
   },
 
   // User endpoints

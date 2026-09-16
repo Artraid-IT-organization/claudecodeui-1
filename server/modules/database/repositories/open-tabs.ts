@@ -89,16 +89,32 @@ export const openTabsDb = {
     return { version: row.version, tabs, updatedAt: row.updated_at };
   },
 
-  /** Записывает список; версия растёт только при настоящем изменении. */
-  put(userId: number, value: unknown): OpenTabsState {
+  /**
+   * Записывает список; версия растёт только при настоящем изменении.
+   * merge — первая отправка устройства: не заменить, а дописать к серверному
+   * списку вкладки, которых там нет. Делается здесь, в одной транзакции: два
+   * устройства, впервые сверяющиеся одновременно, иначе затирали бы друг друга.
+   */
+  put(userId: number, value: unknown, merge = false): OpenTabsState {
     ensureTable();
-    const tabs = normalizeOpenTabs(value);
-    const json = JSON.stringify(tabs);
+    const incoming = normalizeOpenTabs(value);
     const db = getConnection();
     const write = db.transaction(() => {
       const row = db
         .prepare('SELECT tabs_json, version FROM user_open_tabs WHERE user_id = ?')
         .get(userId) as { tabs_json: string; version: number } | undefined;
+      let tabs = incoming;
+      if (merge && row) {
+        let existing: StoredOpenTab[] = [];
+        try {
+          existing = normalizeOpenTabs(JSON.parse(row.tabs_json));
+        } catch {
+          existing = [];
+        }
+        const known = new Set(existing.map((tab) => tab.sessionId));
+        tabs = normalizeOpenTabs([...existing, ...incoming.filter((tab) => !known.has(tab.sessionId))]);
+      }
+      const json = JSON.stringify(tabs);
       if (row && row.tabs_json === json) return;
       if (row) {
         db.prepare('UPDATE user_open_tabs SET tabs_json = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?')

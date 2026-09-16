@@ -45,6 +45,16 @@ test('вкладки у каждого пользователя свои, вер
   });
 });
 
+test('первая отправка устройства дописывает, а не затирает', async () => {
+  await withIsolatedDatabase(() => {
+    const egor = userId('egor');
+    openTabsDb.put(egor, [{ sessionId: 'pc-1' }, { sessionId: 'common' }], true);
+    const phone = openTabsDb.put(egor, [{ sessionId: 'phone-1' }, { sessionId: 'common' }], true);
+    assert.deepEqual(phone.tabs.map((t) => t.sessionId), ['pc-1', 'common', 'phone-1']);
+    assert.deepEqual(openTabsDb.put(egor, [{ sessionId: 'common' }]).tabs.map((t) => t.sessionId), ['common']);
+  });
+});
+
 test('список чистится: повторы, пустые, лишние поля', () => {
   assert.deepEqual(
     normalizeOpenTabs([{ sessionId: 'a', junk: 1 }, { sessionId: 'a' }, { sessionId: '' }, null, { sessionId: 'b', provider: 'claude' }]),
