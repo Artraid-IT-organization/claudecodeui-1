@@ -103,7 +103,7 @@ export function buildClassifierPrompt(
     '',
     'Для КАЖДОГО чата из списка ниже реши одно:',
     '1. {"id": N, "group": "<имя существующей группы дословно>"} — если чат про дело этой группы. Смотри на смысл, а не на слова: жалоба на прокрутку или вкладки в интерфейсе чата — это группа про сайт/интерфейс Claude, если такая есть.',
-    '2. {"id": N, "topic": "<тема>"} — если ни одна группа не подходит. Тема — широкое дело на 1–3 слова по-русски (например «Покупки и поиск товаров», «Расход лимитов Claude», «Документы и транскрибация»), не пересказ одного чата. Если подходит тема из ждущих — пиши её дословно.',
+    '2. {"id": N, "topic": "<тема>"} — если ни одна группа не подходит. Тема — широкое дело на 1–3 слова по-русски (например «Покупки и поиск товаров», «Расход лимитов Claude», «Документы и транскрибация»), не пересказ одного чата. Если подходит тема из ждущих — пиши её дословно. Не заводи тему, близкую по смыслу к существующей группе или ждущей теме, — клади туда.',
     '3. {"id": N, "skip": true} — если по названию дело не понять вообще (приветствие, служебная команда вроде /resume или /model, «продолжай», «Untitled»), или чат явно создан программой для проверки, а не человеком для дела: «Тест перезапуска сайта», «test worker chat», «create note.txt file», «Say the word …».',
     '',
     'Ответь ТОЛЬКО JSON-массивом, по одному элементу на каждый id, без пояснений.',
@@ -294,8 +294,9 @@ export function applyDecisions(
 
   db.transaction(() => {
     rows.forEach((row, index) => {
-      const decision = decisions.get(index);
-      if (!decision) return; // модель промолчала — разберём в следующий проход
+      // Модель про чат промолчала — считаем «пропустить». Иначе этот чат
+      // уходил бы модели на каждом проходе, вечно и за счёт подписки.
+      const decision = decisions.get(index) ?? { kind: 'skip' as const };
       const group = decision.kind === 'group' ? groupsByName.get(decision.name) : undefined;
       const nextGroupId = group?.id ?? null;
       const result = update.run(
@@ -413,7 +414,11 @@ export async function classifyAccountChats(accountDir: string, ask: Ask = askCla
       rows.map((_, id) => id),
       groups.map((group) => group.name),
     );
-    if (decisions.size === 0) break; // модель не ответила — не долбим её в этом проходе
+    if (decisions.size === 0) {
+      // Ни одного решения — сбой модели, а не ответ. Чаты не помечаются, а
+      // проход бросает ошибку: startChatGroupClassifier отложит аккаунт.
+      throw new Error('модель не дала ни одного решения');
+    }
     applyDecisions(accountDir, rows, decisions).forEach((id) => changed.add(id));
     promoteCandidates(accountDir).forEach((id) => changed.add(id));
   }
@@ -428,7 +433,11 @@ function accountsWithHumanChats(): string[] {
   ).map((row) => row.account_dir);
 }
 
+// Один процесс сервера на базу — флаг в памяти этого достаточно.
 let running = false;
+/** Сбои подряд по аккаунту и время, раньше которого аккаунт не разбирается. */
+const failures = new Map<string, { count: number; retryAt: number }>();
+const MAX_BACKOFF_MS = 6 * 60 * 60 * 1000;
 
 /** Фоновый разбор: раз в несколько минут, по одному проходу за раз. */
 export function startChatGroupClassifier(onChanged: (sessionIds: string[]) => Promise<void> | void): void {
@@ -438,14 +447,22 @@ export function startChatGroupClassifier(onChanged: (sessionIds: string[]) => Pr
     running = true;
     try {
       for (const accountDir of accountsWithHumanChats()) {
+        const failure = failures.get(accountDir);
+        if (failure && Date.now() < failure.retryAt) continue;
         try {
           const changed = await classifyAccountChats(accountDir);
+          failures.delete(accountDir);
           if (changed.length) {
             console.log(`[groups] ${accountDir}: разложено чатов ${changed.length}`);
             await onChanged(changed);
           }
         } catch (error) {
-          console.error(`[groups] разбор ${accountDir} не удался:`, error);
+          // Сбой модели (лимит, таймаут, битый ответ) — пауза растёт вдвое
+          // с каждым сбоем подряд, чтобы не жечь подписку одним и тем же входом.
+          const count = (failure?.count ?? 0) + 1;
+          const delay = Math.min(PASS_INTERVAL_MS * 2 ** count, MAX_BACKOFF_MS);
+          failures.set(accountDir, { count, retryAt: Date.now() + delay });
+          console.error(`[groups] разбор ${accountDir} не удался (${count} подряд, пауза ${Math.round(delay / 60000)} мин):`, error);
         }
       }
     } finally {

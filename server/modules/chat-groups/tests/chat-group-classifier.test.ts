@@ -137,3 +137,28 @@ test('ручной выбор модель не трогает, а подбор 
     assert.equal(prompts.length, before);
   });
 });
+
+test('сбой модели не помечает чаты, а молчание про чат — пропуск без повторных вызовов', async () => {
+  await withIsolatedDatabase(async () => {
+    chatGroupsDb.create(ACCOUNT, { name: 'Сайт Claude', keywords: [] });
+    addChat('x', 'Исчезающие запросы');
+    addChat('y', 'Фриз прокрутки');
+
+    await assert.rejects(classifyAccountChats(ACCOUNT, async () => 'лимит исчерпан'));
+    assert.equal(
+      (getConnection().prepare("SELECT COUNT(*) AS n FROM sessions WHERE group_hint_title IS NOT NULL").get() as { n: number }).n,
+      0,
+    );
+
+    let calls = 0;
+    const answerOnlyFirst = async (prompt: string) => {
+      calls += 1;
+      const chats = JSON.parse(prompt.slice(prompt.lastIndexOf('\n[') + 1)) as Array<{ id: number; title: string }>;
+      return JSON.stringify([{ id: chats[0].id, group: 'Сайт Claude' }]);
+    };
+    await classifyAccountChats(ACCOUNT, answerOnlyFirst);
+    const afterFirst = calls;
+    await classifyAccountChats(ACCOUNT, answerOnlyFirst);
+    assert.equal(calls, afterFirst, 'чат без ответа не уходит модели снова');
+  });
+});
