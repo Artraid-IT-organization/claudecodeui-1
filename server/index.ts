@@ -43,6 +43,7 @@ import projectModuleRoutes from './modules/projects/projects.routes.js';
 import notificationRoutes from './modules/notifications/notifications.routes.js';
 import { promptPresetsRoutes } from './modules/presets/index.js';
 import { chatGroupsRoutes } from './modules/chat-groups/index.js';
+import { openTabsRoutes } from './modules/open-tabs/index.js';
 import { startChatGroupClassifier } from './modules/chat-groups/chat-group-classifier.js';
 import { userRoutes } from './modules/user/index.js';
 import {
@@ -232,6 +233,7 @@ app.use('/api/system', withUserRuntimeContext, systemRoutes);
 app.use('/api/notifications', withUserRuntimeContext, notificationRoutes);
 app.use('/api/prompt-presets', withUserRuntimeContext, promptPresetsRoutes);
 app.use('/api/chat-groups', withUserRuntimeContext, chatGroupsRoutes);
+app.use('/api/open-tabs', withUserRuntimeContext, openTabsRoutes);
 
 // User API Routes (protected)
 app.use('/api/user', withUserRuntimeContext, userRoutes);

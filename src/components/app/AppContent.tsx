@@ -114,6 +114,7 @@ function AppContentInner() {
     openTerminal,
     focusTerminal,
     closeTerminal,
+    moveTerminal,
     clearActiveTerminal,
   } = useTerminalTabs(selectedProject?.projectId ?? null);
 
@@ -514,6 +515,7 @@ function AppContentInner() {
           activeTerminalId={activeTerminalId}
           onSelectTerminal={focusTerminal}
           onCloseTerminal={closeTerminal}
+          onReorderTerminal={moveTerminal}
           activities={processingSessions}
         />
         <MainContent

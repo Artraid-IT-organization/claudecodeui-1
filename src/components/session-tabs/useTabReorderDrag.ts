@@ -19,6 +19,9 @@ import type { RefObject } from 'react';
  * - порядок в состоянии меняется только после того, как вкладка «доехала» на
  *   место; сдвиги снимаются в useLayoutEffect — до отрисовки, без мигания.
  *
+ * Вкладки делятся на группы (`data-reorder-group`: чаты, окна командной
+ * строки) — вкладка переставляется только среди своей группы.
+ *
  * Мышь: тянуть сразу, после сдвига на 5 px (короткий щелчок — выбор вкладки).
  * Палец: подержать ~0,35 с, потом тянуть. Иначе обычное листание полосы
  * пальцем перестало бы работать. Касания — через touch-события, а не pointer:
@@ -35,6 +38,7 @@ const MAX_AUTOSCROLL = 14;
 
 type Pending = {
   id: string;
+  group: string;
   kind: 'mouse' | 'touch';
   startX: number;
   startY: number;
@@ -44,6 +48,7 @@ type Pending = {
 
 type Drag = {
   id: string;
+  group: string;
   kind: 'mouse' | 'touch';
   touchId?: number;
   els: HTMLElement[];
@@ -64,9 +69,10 @@ type Drag = {
 
 type Options = {
   containerRef: RefObject<HTMLElement | null>;
-  /** Порядок вкладок, которые можно переставлять (sessionId). */
+  /** Порядок всех переставляемых вкладок (id): смена состава отменяет жест. */
   itemIds: string[];
-  onReorder?: (id: string, toIndex: number) => void;
+  /** toIndex — место среди вкладок той же группы. */
+  onReorder?: (id: string, toIndex: number, group: string) => void;
 };
 
 // Смена overflow у полосы с -webkit-overflow-scrolling на iOS может сбросить
@@ -181,7 +187,8 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
     };
 
     const startDrag = (p: Pending, pointerX: number) => {
-      const els = Array.from(container.querySelectorAll<HTMLElement>('[data-reorder-id]'));
+      const els = Array.from(container.querySelectorAll<HTMLElement>('[data-reorder-id]'))
+        .filter((el) => (el.dataset.reorderGroup ?? '') === p.group);
       const from = els.findIndex((el) => el.dataset.reorderId === p.id);
       clearPending();
       if (from === -1 || els.length < 2) return;
@@ -214,6 +221,7 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
 
       dragRef.current = {
         id: p.id,
+        group: p.group,
         kind: p.kind,
         touchId: p.touchId,
         els,
@@ -262,7 +270,7 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
         dragRef.current = null;
         if (target !== from && onReorderRef.current) {
           pendingResetRef.current = els;
-          onReorderRef.current(drag.id, target);
+          onReorderRef.current(drag.id, target, drag.group);
           // Страховка: если порядок почему-то не сменился, эффект не сработает.
           window.setTimeout(() => {
             if (pendingResetRef.current === els) {
@@ -282,7 +290,7 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
       const tab = tabFromEvent(event.target);
       if (!tab?.dataset.reorderId) return;
       clearPending();
-      pending = { id: tab.dataset.reorderId, kind: 'mouse', startX: event.clientX, startY: event.clientY };
+      pending = { id: tab.dataset.reorderId, group: tab.dataset.reorderGroup ?? '', kind: 'mouse', startX: event.clientX, startY: event.clientY };
     };
     const onPointerMove = (event: PointerEvent) => {
       if (event.pointerType === 'touch') return;
@@ -313,6 +321,7 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
       clearPending();
       const p: Pending = {
         id: tab.dataset.reorderId,
+        group: tab.dataset.reorderGroup ?? '',
         kind: 'touch',
         startX: touch.clientX,
         startY: touch.clientY,

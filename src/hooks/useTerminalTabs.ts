@@ -87,8 +87,22 @@ export function useTerminalTabs(currentProjectId?: string | null) {
     [activeTerminalId, terminals],
   );
 
+  // Перетаскивание окна на новое место среди окон командной строки.
+  const moveTerminal = useCallback((id: string, toIndex: number) => {
+    setTerminals((previous) => {
+      const from = previous.findIndex((tab) => tab.id === id);
+      const target = Math.max(0, Math.min(previous.length - 1, toIndex));
+      if (from === -1 || from === target) return previous;
+      const next = [...previous];
+      const [moved] = next.splice(from, 1);
+      next.splice(target, 0, moved);
+      return next;
+    });
+  }, []);
+
   return {
     terminals,
+    moveTerminal,
     activeTerminalId,
     openTerminal,
     focusTerminal,

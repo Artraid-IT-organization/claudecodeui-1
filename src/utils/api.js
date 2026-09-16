@@ -433,6 +433,12 @@ export const api = {
       body: JSON.stringify({ path: folderPath }),
     }),
 
+  // Открытые вкладки чатов — общие для всех устройств пользователя.
+  openTabs: {
+    get: (since) => authenticatedFetch(`/api/open-tabs${Number.isInteger(since) ? `?since=${since}` : ''}`),
+    put: (tabs) => authenticatedFetch('/api/open-tabs', { method: 'PUT', body: JSON.stringify({ tabs }) }),
+  },
+
   // User endpoints
   user: {
     usageLimits: () => authenticatedFetch('/api/user/usage-limits'),
