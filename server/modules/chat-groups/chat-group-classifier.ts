@@ -292,11 +292,18 @@ export function applyDecisions(
      WHERE session_id = ? AND (group_source IS NULL OR group_source = 'ai')`,
   );
 
+  const markSeen = db.prepare('UPDATE sessions SET group_hint_title = ? WHERE session_id = ?');
+
   db.transaction(() => {
     rows.forEach((row, index) => {
-      // Модель про чат промолчала — считаем «пропустить». Иначе этот чат
-      // уходил бы модели на каждом проходе, вечно и за счёт подписки.
-      const decision = decisions.get(index) ?? { kind: 'skip' as const };
+      const decision = decisions.get(index);
+      if (!decision) {
+        // Модель про чат промолчала. Молчание — не решение «убрать из
+        // группы»: группа остаётся, чат лишь помечается разобранным. Иначе он
+        // уходил бы модели на каждом проходе, вечно и за счёт подписки.
+        markSeen.run(row.custom_name, row.session_id);
+        return;
+      }
       const group = decision.kind === 'group' ? groupsByName.get(decision.name) : undefined;
       const nextGroupId = group?.id ?? null;
       const result = update.run(

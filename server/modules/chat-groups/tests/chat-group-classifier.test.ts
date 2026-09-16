@@ -162,3 +162,23 @@ test('сбой модели не помечает чаты, а молчание 
     assert.equal(calls, afterFirst, 'чат без ответа не уходит модели снова');
   });
 });
+
+test('молчание модели про чат, уже лежащий в группе, группу не стирает', async () => {
+  await withIsolatedDatabase(async () => {
+    const site = chatGroupsDb.create(ACCOUNT, { name: 'Сайт Claude', keywords: [] });
+    addChat('g', 'Фриз прокрутки');
+    addChat('n', 'Исчезающие запросы');
+    await classifyAccountChats(ACCOUNT, fakeModel(() => ({ group: 'Сайт Claude' })).ask);
+    assert.equal(row('g').group_id, site.id);
+
+    // Название сменилось — чат снова у модели, но она ответила только про другой.
+    getConnection().prepare("UPDATE sessions SET custom_name = 'Фриз прокрутки ленты' WHERE session_id = 'g'").run();
+    getConnection().prepare("UPDATE sessions SET custom_name = 'Исчезающие запросы в чате' WHERE session_id = 'n'").run();
+    await classifyAccountChats(ACCOUNT, async (prompt) => {
+      const chats = JSON.parse(prompt.slice(prompt.lastIndexOf('\n[') + 1)) as Array<{ id: number; title: string }>;
+      const other = chats.find((chat) => chat.title.startsWith('Исчезающие'));
+      return JSON.stringify(other ? [{ id: other.id, group: 'Сайт Claude' }] : []);
+    });
+    assert.equal(row('g').group_id, site.id);
+  });
+});
