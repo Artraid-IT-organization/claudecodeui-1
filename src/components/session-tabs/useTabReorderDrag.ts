@@ -69,6 +69,14 @@ type Options = {
   onReorder?: (id: string, toIndex: number) => void;
 };
 
+// Смена overflow у полосы с -webkit-overflow-scrolling на iOS может сбросить
+// прокрутку в начало — положение запоминаем и возвращаем.
+const setOverflowX = (container: HTMLElement, value: string) => {
+  const left = container.scrollLeft;
+  container.style.overflowX = value;
+  if (container.scrollLeft !== left) container.scrollLeft = left;
+};
+
 const clearStyles = (els: HTMLElement[]) => {
   for (const el of els) {
     el.style.transition = 'none';
@@ -103,7 +111,7 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
     if (drag && !drag.settling) {
       cancelAnimationFrame(drag.raf);
       clearStyles(drag.els);
-      if (containerRef.current) containerRef.current.style.overflowX = drag.overflowX;
+      if (containerRef.current) setOverflowX(containerRef.current, drag.overflowX);
       dragRef.current = null;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -191,7 +199,7 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
       // жест листанием, уводит полосу из-под пальца одновременно с перестановкой.
       // scrollLeft из кода (автопрокрутка у краёв) при этом работает.
       const overflowX = container.style.overflowX;
-      container.style.overflowX = 'hidden';
+      setOverflowX(container, 'hidden');
 
       els.forEach((el, i) => {
         el.style.willChange = 'transform';
@@ -230,7 +238,7 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
       const drag = dragRef.current;
       if (!drag || drag.settling) return;
       cancelAnimationFrame(drag.raf);
-      container.style.overflowX = drag.overflowX;
+      setOverflowX(container, drag.overflowX);
 
       // Подержал и отпустил, не сдвинув, — это нажатие, чат должен открыться.
       if (!drag.moved && drag.target === drag.from) {
@@ -364,7 +372,7 @@ export function useTabReorderDrag({ containerRef, itemIds, onReorder }: Options)
       if (drag && !drag.settling) {
         cancelAnimationFrame(drag.raf);
         clearStyles(drag.els);
-        container.style.overflowX = drag.overflowX;
+        setOverflowX(container, drag.overflowX);
         dragRef.current = null;
       }
       container.removeEventListener('pointerdown', onPointerDown);
