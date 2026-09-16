@@ -1,5 +1,5 @@
-import { useCallback, useMemo, useState } from 'react';
-import { Clock, Layers, MessageSquareText, Plus, SearchX } from 'lucide-react';
+import { useMemo } from 'react';
+import { MessageSquareText, Plus, SearchX } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
 import { Button } from '../../../../shared/view/ui';
@@ -11,6 +11,7 @@ import { getSessionTime, groupByRecency } from '../../utils/utils';
 import { useSessionMessageSearch } from '../../../command-palette/sources/useSessionMessageSearch';
 
 import SidebarSessionItem from './SidebarSessionItem';
+import { useSessionListView } from '../../hooks/useSessionListView';
 
 /*
  * Поиск по чатам в списке слева.
@@ -42,23 +43,6 @@ function sessionTitleMatches(title: string, query: string): boolean {
   if (!q) return true;
   const t = normalizeForSearch(title);
   return t.includes(q) || toLatin(t).includes(toLatin(q));
-}
-
-/*
- * Вид списка: «Группы» — чаты по делам, внизу по дням то, что в группу не
- * попало; «Последние» — все чаты подряд по дням, без групп. Егор 16.09.26:
- * «чтобы я мог легко переключить — посмотреть последние чаты, а могу
- * посмотреть в группах». Выбор помнит устройство.
- */
-type SessionListView = 'groups' | 'recent';
-const LIST_VIEW_STORAGE_KEY = 'sidebar-session-list-view';
-
-function readListView(): SessionListView {
-  try {
-    return localStorage.getItem(LIST_VIEW_STORAGE_KEY) === 'recent' ? 'recent' : 'groups';
-  } catch {
-    return 'groups';
-  }
 }
 
 type SessionGroupBucket = {
@@ -206,15 +190,7 @@ export default function SidebarProjectSessions({
     return messageMatches.filter((match) => !shown.has(match.sessionId));
   }, [messageMatches, visibleSessions]);
 
-  const [listView, setListView] = useState<SessionListView>(readListView);
-  const changeListView = useCallback((next: SessionListView) => {
-    setListView(next);
-    try {
-      localStorage.setItem(LIST_VIEW_STORAGE_KEY, next);
-    } catch {
-      // Приватный режим Safari — выбор просто не запомнится.
-    }
-  }, []);
+  const [listView] = useSessionListView();
 
   const { groups, ungrouped } = useMemo(
     () => (listView === 'recent'
@@ -289,39 +265,6 @@ export default function SidebarProjectSessions({
         <Plus className="h-3 w-3" />
         {t('sessions.newSession')}
       </Button>
-
-      {!isSearching && (
-        <div
-          role="radiogroup"
-          aria-label="Вид списка чатов"
-          className="mx-3 flex rounded-lg bg-muted/60 p-0.5 md:mx-0"
-        >
-          {([
-            { value: 'groups', label: 'Группы', Icon: Layers },
-            { value: 'recent', label: 'Последние', Icon: Clock },
-          ] as const).map(({ value, label, Icon }) => {
-            const active = listView === value;
-            return (
-              <button
-                key={value}
-                type="button"
-                role="radio"
-                aria-checked={active}
-                onClick={() => changeListView(value)}
-                className={
-                  'flex h-8 flex-1 items-center justify-center gap-1.5 rounded-md text-xs font-medium transition-colors ' +
-                  (active
-                    ? 'bg-background text-foreground shadow-sm'
-                    : 'text-muted-foreground hover:text-foreground')
-                }
-              >
-                <Icon className="h-3.5 w-3.5" aria-hidden />
-                {label}
-              </button>
-            );
-          })}
-        </div>
-      )}
 
       {/* Кнопки «Сгруппировать по темам» больше нет: Егор 13.09.26 обвёл её
           на снимке — «надо убрать совсем». Уже созданные темы по-прежнему

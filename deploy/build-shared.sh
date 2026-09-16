@@ -120,6 +120,16 @@ LOCK_HELD_START=$SECONDS
 
 swap() {
     cd "$SHARED" || return 1
+    # Живой коммит обязан входить в собираемый. 16.09.26 два чата выкатили
+    # сборки с разницей в 10 секунд, второй — от старого коммита, и три
+    # исправления первого молча пропали с сайта. Сначала влей живой HEAD.
+    local live
+    live="$(git rev-parse HEAD)"
+    if ! git merge-base --is-ancestor "$live" "$COMMIT"; then
+        say "ОШИБКА: на сайте $live, его нет в $COMMIT — влей живой коммит и собери заново"
+        SWAP_REFUSED=1
+        return 1
+    fi
     git checkout -q "$COMMIT" || return 1
 
     # Предыдущая сборка не удаляется, а отодвигается в *.prev — это мгновенный
@@ -138,6 +148,9 @@ if swap; then
     say "Подменено и перезапущено. Замок держался $((SECONDS - LOCK_HELD_START)) с"
     say "Копия базы: $BACKUP"
     say "Откат при необходимости: mv dist.prev dist && mv dist-server.prev dist-server && sudo -n systemctl restart claudecodeui-shared"
+elif [ "${SWAP_REFUSED:-0}" = 1 ]; then
+    # Файлы сайта не трогали — откатывать нечего.
+    exit 1
 else
     say "ОШИБКА на подмене — возвращаю предыдущую сборку"
     cd "$SHARED" && for d in dist dist-server; do

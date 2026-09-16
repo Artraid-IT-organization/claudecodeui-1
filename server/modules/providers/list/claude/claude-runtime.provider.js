@@ -24,7 +24,7 @@ import {
   normalizeImageDescriptors
 } from '@/shared/image-attachments.js';
 import { CLAUDE_PREDEFINED_MODELS } from '@/modules/providers/list/claude/claude-models.provider.js';
-import { resolveClaudeCodeExecutablePath } from '@/shared/claude-cli-path.js';
+import { resolveClaudeCodeExecutablePath, waitForClaudeCodeExecutable } from '@/shared/claude-cli-path.js';
 import {
   createNotificationEvent,
   notifyBackgroundWorkCompleted,
@@ -905,6 +905,10 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
 
       return { behavior: 'deny', message: decision.message ?? 'User denied tool use' };
     };
+
+    // Свежий Claude рядом с Node, а не случайная старая копия дальше по PATH,
+    // если npm как раз его переустанавливает (см. waitForClaudeCodeExecutable).
+    sdkOptions.pathToClaudeCodeExecutable = await waitForClaudeCodeExecutable(process.env.CLAUDE_CLI_PATH);
 
     // Процесс агента запускаем сами: так он переживает перезапуск сайта
     // (см. survivor-runs.js — там проба и причина).

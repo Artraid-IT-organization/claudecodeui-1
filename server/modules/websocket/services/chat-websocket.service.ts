@@ -32,10 +32,11 @@ import { getImageAssetsDirForUser, readRequestUserId, resolveWebUserRuntimeConte
  * chatRunRegistry.countRunningRunsForUser()'s doc comment for why this is
  * needed at all on a shared VPS). Deliberately a small in-process constant
  * rather than a config value - the actual ceiling matters far less than the
- * fact that SOME ceiling exists, and 3 is generous for one interactive user
- * while still bounding the worst case.
+ * fact that SOME ceiling exists, and 5 is generous for one interactive user
+ * while still bounding the worst case (raised from 3 to 5 on 16.09.26 - one
+ * person routinely keeps 3+ chats busy; 8 GB server has room).
  */
-const MAX_CONCURRENT_RUNS_PER_USER = 3;
+const MAX_CONCURRENT_RUNS_PER_USER = 5;
 
 
 
@@ -121,12 +122,14 @@ function sendProtocolError(
   error: string,
   sessionId?: string,
   clientMessageId?: string | null,
+  extra?: Record<string, unknown>,
 ): void {
   sendJson(ws, {
     kind: 'protocol_error',
     code,
     error,
     sessionId: sessionId ?? null,
+    ...(extra ?? {}),
     // Отказ по конкретному сообщению: телефон убирает его из очереди отправки
     // и больше не досылает (src/contexts/chatOutbox.ts).
     ...(clientMessageId ? { clientMessageId } : {}),
@@ -233,6 +236,9 @@ async function handleChatSend(
       `You already have ${MAX_CONCURRENT_RUNS_PER_USER} chats running at once. Wait for one to finish before starting another.`,
       sessionId,
       clientMessageId,
+      // Страница не выбрасывает такое сообщение, а держит в очереди и досылает,
+      // когда место освободится (src/contexts/chatOutbox.ts, «ждёт места»).
+      { limit: MAX_CONCURRENT_RUNS_PER_USER },
     );
     return;
   }
