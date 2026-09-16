@@ -1,4 +1,4 @@
-import { type MutableRefObject, useCallback, useState } from 'react';
+import { type MutableRefObject, useCallback, useEffect, useState } from 'react';
 import {
   Clipboard,
   ArrowDownToLine,
@@ -10,10 +10,18 @@ import {
   Loader2,
   Mic,
   Square,
+  TextCursorInput,
+  TextSelect,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { Terminal } from '@xterm/xterm';
 import { sendSocketMessage } from '../../utils/socket';
+import {
+  pasteOrOpenSheet,
+  TERMINAL_PASTE_SHEET_EVENT,
+  type TerminalPasteSheetDetail,
+} from '../../utils/terminalClipboard';
+import TerminalTextSheet, { type TerminalTextSheetMode } from './TerminalTextSheet';
 import { useVoiceInput } from '../../../chat/hooks/useVoiceInput';
 import { useVoiceAvailable } from '../../../chat/hooks/useVoiceAvailable';
 
@@ -109,20 +117,26 @@ export default function TerminalShortcutsPanel({
     terminalRef.current?.scrollToBottom();
   }, [terminalRef]);
 
-  const pasteFromClipboard = useCallback(async () => {
-    if (typeof navigator === 'undefined' || !navigator.clipboard?.readText) {
-      return;
-    }
+  const [sheetMode, setSheetMode] = useState<TerminalTextSheetMode | null>(null);
 
-    try {
-      const text = await navigator.clipboard.readText();
-      if (text.length > 0) {
-        sendInput(text);
+  // Буфер не дали прочитать (кнопкой здесь или из меню долгого нажатия) —
+  // открываем поле ручной вставки у своего терминала.
+  useEffect(() => {
+    const onPasteSheet = (event: Event) => {
+      const detail = (event as CustomEvent<TerminalPasteSheetDetail>).detail;
+      if (detail?.terminal && detail.terminal === terminalRef.current) {
+        setSheetMode('input');
       }
-    } catch {
-      // Ignore clipboard permission errors.
+    };
+    window.addEventListener(TERMINAL_PASTE_SHEET_EVENT, onPasteSheet);
+    return () => window.removeEventListener(TERMINAL_PASTE_SHEET_EVENT, onPasteSheet);
+  }, [terminalRef]);
+
+  const pasteFromClipboard = useCallback(() => {
+    if (terminalRef.current) {
+      pasteOrOpenSheet(terminalRef.current);
     }
-  }, [sendInput]);
+  }, [terminalRef]);
 
   const handleKeyPress = useCallback(
     (seq: string) => {
@@ -144,6 +158,14 @@ export default function TerminalShortcutsPanel({
   );
 
   return (
+    <>
+    {sheetMode && (
+      <TerminalTextSheet
+        mode={sheetMode}
+        terminal={terminalRef.current}
+        onClose={() => setSheetMode(null)}
+      />
+    )}
     <div className={`pointer-events-none fixed inset-x-0 ${bottomOffset} z-20 px-2 md:hidden`}>
       <div className="pointer-events-auto flex items-center gap-1 overflow-x-auto rounded-lg border border-gray-700/80 bg-gray-900/95 px-1.5 py-1.5 shadow-lg backdrop-blur-sm [-webkit-overflow-scrolling:touch] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         {voiceAvailable && (
@@ -181,15 +203,36 @@ export default function TerminalShortcutsPanel({
         <button
           type="button"
           onPointerDown={preventFocusSteal}
-          onClick={() => {
-            void pasteFromClipboard();
-          }}
+          onClick={pasteFromClipboard}
           disabled={!isConnected}
           className={ICON_BTN}
-          title={t('terminalShortcuts.paste', { defaultValue: 'Paste' })}
-          aria-label={t('terminalShortcuts.paste', { defaultValue: 'Paste' })}
+          title={t('terminalShortcuts.paste', { defaultValue: 'Вставить' })}
+          aria-label={t('terminalShortcuts.paste', { defaultValue: 'Вставить' })}
         >
           <Clipboard className="h-4 w-4" />
+        </button>
+
+        <button
+          type="button"
+          onPointerDown={preventFocusSteal}
+          onClick={() => setSheetMode('input')}
+          disabled={!isConnected}
+          className={ICON_BTN}
+          title={t('terminalShortcuts.inputTitle', { defaultValue: 'Вставка текста' })}
+          aria-label={t('terminalShortcuts.inputTitle', { defaultValue: 'Вставка текста' })}
+        >
+          <TextCursorInput className="h-4 w-4" />
+        </button>
+
+        <button
+          type="button"
+          onPointerDown={preventFocusSteal}
+          onClick={() => setSheetMode('view')}
+          className={ICON_BTN}
+          title={t('terminalShortcuts.viewTitle', { defaultValue: 'Текст терминала' })}
+          aria-label={t('terminalShortcuts.viewTitle', { defaultValue: 'Текст терминала' })}
+        >
+          <TextSelect className="h-4 w-4" />
         </button>
 
         {MOBILE_KEYS.map((key) => {
@@ -256,5 +299,6 @@ export default function TerminalShortcutsPanel({
         </button>
       </div>
     </div>
+    </>
   );
 }
