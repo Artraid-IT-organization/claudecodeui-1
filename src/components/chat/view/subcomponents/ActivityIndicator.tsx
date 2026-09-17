@@ -121,7 +121,14 @@ export default function ActivityIndicator({ activity, onAbort, isInputFocused = 
       }`}
     >
       <div className="flex items-end justify-between gap-2">
-        <div className={`${tabSurfaceClassName} gap-2`}>
+        {/*
+          `label` теперь может быть описанием действия («Проверяю, дошла ли
+          правка до сайта»), не только коротким словом фазы — на узком экране
+          оно без min-w-0+truncate распирало пилюлю и сдвигало кнопку Stop за
+          край (снимок критика 17.09.26). Пилюля берёт доступное место и
+          обрезает текст многоточием, кнопка не сжимается.
+        */}
+        <div className={`${tabSurfaceClassName} min-w-0 flex-1 gap-2`}>
           <PhaseIcon className={`h-4 w-4 shrink-0 animate-pulse ${phaseTone}`} aria-hidden />
           {/*
             Мерцание рисует текст своей серой заливкой и перебивает цвет фазы —
@@ -129,18 +136,18 @@ export default function ActivityIndicator({ activity, onAbort, isInputFocused = 
             цветным текстом с мягкой пульсацией, мерцает только «ожидает».
           */}
           {phaseKey === 'waiting' ? (
-            <Shimmer className="font-semibold">{`${label}…`}</Shimmer>
+            <Shimmer className="min-w-0 truncate font-semibold">{`${label}…`}</Shimmer>
           ) : (
-            <span className={`animate-pulse whitespace-nowrap font-semibold ${phaseTone}`}>{`${label}…`}</span>
+            <span className={`min-w-0 animate-pulse truncate font-semibold ${phaseTone}`}>{`${label}…`}</span>
           )}
-          <span className="tabular-nums text-muted-foreground/60">{elapsedLabel}</span>
+          <span className="shrink-0 tabular-nums text-muted-foreground/60">{elapsedLabel}</span>
         </div>
 
         {renderedActivity.canInterrupt && onAbort && (
           <button
             type="button"
             onClick={onAbort}
-            className={`${tabSurfaceClassName} pointer-events-auto gap-1.5 text-muted-foreground hover:bg-card hover:text-destructive`}
+            className={`${tabSurfaceClassName} pointer-events-auto shrink-0 gap-1.5 text-muted-foreground hover:bg-card hover:text-destructive`}
             aria-label={t('claudeStatus.stop', { defaultValue: 'Stop' })}
           >
             <svg className="h-2.5 w-2.5 fill-current" viewBox="0 0 24 24" aria-hidden>
