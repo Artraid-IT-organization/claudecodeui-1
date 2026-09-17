@@ -162,6 +162,7 @@ Claude Code для VS Code: работа свёрнута, ответ модел
 - Замер многошаговой задачи: 63% времени плашка писала «Ожидает модель». Проба SDK: ~7 с запуск процесса, ~5 с проверки/настройки до `system init`, ~4 с до `message_start`, после каждого результата команды ~2 с тишины.
 - Этапы: `starting` («Запускаю чат» — ставится явно при отправке в `useChatComposerState`), `requesting` («Модель получила запрос» — сервер шлёт `run_phase` на `system init`), `reading` («Модель читает результат» — после `tool_result`). `waiting` остаётся только для чатов с неизвестным этапом (фоновые вкладки, переживший перезапуск).
 - `run_phase` — отдельный вид события (`MessageKind` на сервере и в `useSessionStore`), в ленту не сохраняется (`shouldPersist`).
+- Фаза `tool` (17.09.26): плашка пишет не имя инструмента, а его `description` — тот же разбор, что и в свёрнутой строке «Ход работы» (`toolInputDescription` в `chat/utils/workStretch.ts`, общий с `lastStepDescription`). Нет описания — старый фолбэк «Работает: <ToolName>» в `ActivityIndicator`. `statusText` в `useSessionProtection` обнуляется ЯВНО на каждой смене фазы в `useChatRealtimeHandlers.ts` — пропущенное поле (`undefined`) не трогает старое значение (см. комментарий у `markSessionProcessing`), и без явного `null` текст прошлого шага залипал бы под новой фазой (agents/reading/thinking/writing).
 
 
 ## Расход подписки (13.09.26)
