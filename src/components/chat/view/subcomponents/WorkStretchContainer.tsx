@@ -147,7 +147,7 @@ export default function WorkStretchContainer({
     <div className="chat-message tool px-3 sm:px-0" data-message-timestamp={stretch.timestamp || undefined}>
       <button
         type="button"
-        className="group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
+        className="group flex w-full items-center gap-2 overflow-hidden rounded-md px-2 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
         onClick={() => setIsExpanded((current) => !current)}
         aria-expanded={isExpanded}
       >
