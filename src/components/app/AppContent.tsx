@@ -380,7 +380,9 @@ function AppContentInner() {
       // этот отступ (index.css).
       const keyboardOpen = isTyping() && gap > 120;
       document.documentElement.classList.toggle('keyboard-open', keyboardOpen);
-      const raw = isStandalone ? Math.max(0, gap - restingGap) : gap;
+      // Полоска «домой» (restingGap) под открытой клавиатурой не видна —
+      // низ оболочки должен совпасть с краем видимой области без вычета.
+      const raw = isStandalone && !keyboardOpen ? Math.max(0, gap - restingGap) : gap;
 
       // Ограничитель. Клавиатура физически не занимает больше двух третей
       // экрана, а вот числа от браузера в момент её появления бывают любыми:
@@ -471,15 +473,29 @@ function AppContentInner() {
     // рисует курсор на строке текста. 16.09 сброс делался при kb = 0 (ошибка
     // замера выше) — и поле ушло под клавиатуру. Не получилось сбросить —
     // раскладку держит учёт сдвига (pan), она верна в обоих состояниях.
+    // Не больше трёх сбросов на одно нажатие: если iOS упорно возвращает
+    // сдвиг, спорить с ней — дёргать экран; раскладку тогда держит pan.
     let scrollFrame = 0;
+    let scrollResetsLeft = 3;
     const scheduleScrollReset = () => {
-      if (scrollFrame) return;
+      if (scrollFrame || scrollResetsLeft <= 0) return;
       scrollFrame = window.requestAnimationFrame(() => {
         scrollFrame = 0;
         if (isTyping() && (window.scrollY !== 0 || window.scrollX !== 0)) {
+          scrollResetsLeft -= 1;
           window.scrollTo(0, 0);
         }
       });
+    };
+    // Новое нажатие на поле — снова три попытки. Уход из поля — пересчёт
+    // сразу: на iOS 26 resize после закрытия клавиатуры приходит не всегда.
+    const onFocusIn = () => {
+      scrollResetsLeft = 3;
+    };
+    let blurTimer = 0;
+    const onFocusOut = () => {
+      window.clearTimeout(blurTimer);
+      blurTimer = window.setTimeout(update, 50);
     };
 
     // Курсор ниже текста (iOS 26, снимок Егора 16.09.26: набрано «Ром»,
@@ -528,6 +544,8 @@ function AppContentInner() {
     vv.addEventListener('resize', update);
     // Сдвиг iOS меняется событием scroll видимой области, а не resize.
     vv.addEventListener('scroll', scheduleUpdate);
+    document.addEventListener('focusin', onFocusIn);
+    document.addEventListener('focusout', onFocusOut);
     // Re-measure the device's own gap only at moments when a keyboard cannot
     // be the cause: a turned phone, and coming back to the app.
     const recalibrate = () => {
@@ -541,6 +559,9 @@ function AppContentInner() {
       vv.removeEventListener('scroll', scheduleUpdate);
       window.clearTimeout(probeTimer);
       if (scrollFrame) window.cancelAnimationFrame(scrollFrame);
+      window.clearTimeout(blurTimer);
+      document.removeEventListener('focusin', onFocusIn);
+      document.removeEventListener('focusout', onFocusOut);
       document.documentElement.style.removeProperty('--app-max-h');
       if (frame) window.cancelAnimationFrame(frame);
       if (caretFrame) window.cancelAnimationFrame(caretFrame);
