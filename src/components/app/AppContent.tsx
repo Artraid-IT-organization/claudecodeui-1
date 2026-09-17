@@ -283,6 +283,29 @@ function AppContentInner() {
     return () => document.removeEventListener('visibilitychange', onVisible);
   }, []);
 
+  // Пока вкладка/приложение в фоне (свёрнут телефон, PWA в спящем режиме),
+  // сокет часто остаётся числиться открытым, но пуши по нему не идут - см.
+  // комментарий у forceReconnect в WebSocketContext. Список чатов слева в это
+  // время не получает ни одной дельты `session_upserted`, и время последней
+  // активности в нём застывает на моменте до сна, пока страницу не
+  // перезагрузят. Один тихий перезапрос списка при возврате в него чинит -
+  // без опроса по таймеру, только по событию возврата.
+  useEffect(() => {
+    const onResume = () => {
+      if (document.visibilityState === 'visible') {
+        void refreshProjectsSilently();
+      }
+    };
+    document.addEventListener('visibilitychange', onResume);
+    window.addEventListener('pageshow', onResume);
+    window.addEventListener('online', onResume);
+    return () => {
+      document.removeEventListener('visibilitychange', onResume);
+      window.removeEventListener('pageshow', onResume);
+      window.removeEventListener('online', onResume);
+    };
+  }, [refreshProjectsSilently]);
+
   useEffect(() => {
     if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) {
       return undefined;

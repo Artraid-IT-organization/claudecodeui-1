@@ -11,6 +11,7 @@ import type { ProjectSession, LLMProvider } from '../../../types/app';
 import type { SessionStore, NormalizedMessage } from '../../../stores/useSessionStore';
 import { noteRun } from '../utils/liveRunCursor';
 import { isSubagentToolName } from '../tools/configs/toolConfigs';
+import { toolInputDescription } from '../utils/workStretch';
 
 const isActionablePermissionRequest = (request: { toolName?: unknown } | null | undefined): boolean => {
   return request?.toolName !== 'ExitPlanMode' && request?.toolName !== 'exit_plan_mode';
@@ -181,6 +182,7 @@ export function useChatRealtimeHandlers({
               ? {
                 phase: msg.phase as ActivityPhase,
                 detail: typeof msg.phaseDetail === 'string' ? msg.phaseDetail : null,
+                statusText: null,
               }
               : undefined);
           } else {
@@ -326,7 +328,7 @@ export function useChatRealtimeHandlers({
         // слова по таймеру, из-за чего «думает» и «завис» выглядели одинаково.
         // Пустой delta тоже считается: сервер шлёт его в самом начале блока
         // размышления, когда текста ещё нет (он придёт пересказом в конце).
-        onSessionProcessing?.(sid, { phase: 'thinking', detail: null, canInterrupt: true });
+        onSessionProcessing?.(sid, { phase: 'thinking', detail: null, statusText: null, canInterrupt: true });
         if (!text) return;
         if (!accumulatedThinkingRef.current.has(sid)) {
           thinkingStartedAtRef.current.set(sid, Date.now());
@@ -353,7 +355,7 @@ export function useChatRealtimeHandlers({
       if (msg.kind === 'stream_delta') {
         const text = (msg.content as string) || '';
         if (!text || !sid) return;
-        onSessionProcessing?.(sid, { phase: 'writing', detail: null, canInterrupt: true });
+        onSessionProcessing?.(sid, { phase: 'writing', detail: null, statusText: null, canInterrupt: true });
         accumulatedStreamRef.current.set(sid, (accumulatedStreamRef.current.get(sid) ?? '') + text);
         if (!streamTimerRef.current.has(sid)) {
           streamTimerRef.current.set(sid, window.setTimeout(() => {
@@ -397,6 +399,7 @@ export function useChatRealtimeHandlers({
             phase: msg.text as ActivityPhase,
             // detail — имя инструмента или число помощников (переживший перезапуск чат).
             detail: typeof msg.detail === 'string' ? msg.detail : null,
+            statusText: null,
             canInterrupt: true,
           });
         }
@@ -426,9 +429,17 @@ export function useChatRealtimeHandlers({
           const running = activeAgentsRef.current.get(sid) ?? new Set<string>();
           running.add(toolId);
           activeAgentsRef.current.set(sid, running);
-          onSessionProcessing?.(sid, { phase: 'agents', detail: String(running.size), canInterrupt: true });
+          // Несколько агентов сразу — считаем их, а не пересказываем, что
+          // делает каждый: Егор 17.09.26 «если это не запущено другими
+          // агентами, то это показывается» — под своими агентами прячем.
+          onSessionProcessing?.(sid, { phase: 'agents', detail: String(running.size), statusText: null, canInterrupt: true });
         } else if (toolName) {
-          onSessionProcessing?.(sid, { phase: 'tool', detail: toolName, canInterrupt: true });
+          // Живая плашка внизу — то же русское описание действия, что ИИ сам
+          // пишет к вызову («Проверяю, дошла ли правка до сайта»), а не имя
+          // инструмента («Bash»). Нет описания — старое поведение, имя
+          // инструмента через фазу 'tool' в ActivityIndicator.
+          const description = toolInputDescription((msg as { toolInput?: unknown }).toolInput);
+          onSessionProcessing?.(sid, { phase: 'tool', detail: toolName, statusText: description, canInterrupt: true });
         }
       }
 
@@ -437,15 +448,15 @@ export function useChatRealtimeHandlers({
         const running = activeAgentsRef.current.get(sid);
         if (running && toolId && running.delete(toolId)) {
           if (running.size > 0) {
-            onSessionProcessing?.(sid, { phase: 'agents', detail: String(running.size), canInterrupt: true });
+            onSessionProcessing?.(sid, { phase: 'agents', detail: String(running.size), statusText: null, canInterrupt: true });
           } else {
             activeAgentsRef.current.delete(sid);
-            onSessionProcessing?.(sid, { phase: 'reading', detail: null, canInterrupt: true });
+            onSessionProcessing?.(sid, { phase: 'reading', detail: null, statusText: null, canInterrupt: true });
           }
         } else if (!running || running.size === 0) {
           // Инструмент отработал, ответа модели ещё нет — это честное
           // «ждём», а не «думает».
-          onSessionProcessing?.(sid, { phase: 'reading', detail: null, canInterrupt: true });
+          onSessionProcessing?.(sid, { phase: 'reading', detail: null, statusText: null, canInterrupt: true });
         }
       }
 

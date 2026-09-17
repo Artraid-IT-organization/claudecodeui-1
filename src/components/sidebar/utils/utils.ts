@@ -4,12 +4,12 @@ import type { LLMProvider, Project, ProjectSession } from '../../../types/app';
 import type { ProjectSortOrder, SettingsProject, SessionViewModel, SessionWithProvider } from '../types/types';
 
 export const formatCompactAge = (
-  dateString: string | null | undefined,
+  dateInput: string | number | null | undefined,
   currentTime: Date,
 ): string => {
-  if (!dateString) return '';
+  if (dateInput == null) return '';
 
-  const date = new Date(dateString);
+  const date = typeof dateInput === 'number' ? new Date(dateInput) : new Date(dateInput);
   if (Number.isNaN(date.getTime())) return '';
 
   const minutes = Math.floor(Math.max(0, currentTime.getTime() - date.getTime()) / 60000);

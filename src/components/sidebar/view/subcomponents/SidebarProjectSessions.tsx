@@ -204,7 +204,17 @@ export default function SidebarProjectSessions({
   // одинаковых строк не отвечал на два вопроса, ради которых в него и
   // заходят: что считается прямо сейчас и где вчерашняя работа.
   const dayBuckets = useMemo(() => {
-    const running = ungrouped.filter((session) => activeSessions.has(session.id));
+    // lastActivity — время последнего завершённого сообщения, оно не
+    // обновляется, пока сессия обрабатывает запрос, поэтому порядок внутри
+    // «Сейчас работает» берём из реального времени старта обработки
+    // (startedAt), а не из унаследованной сортировки ungrouped по lastActivity.
+    const running = ungrouped
+      .filter((session) => activeSessions.has(session.id))
+      .sort((a, b) => {
+        const aStarted = activeSessions.get(a.id)?.startedAt ?? 0;
+        const bStarted = activeSessions.get(b.id)?.startedAt ?? 0;
+        return bStarted - aStarted;
+      });
     const idle = ungrouped.filter((session) => !activeSessions.has(session.id));
     return [
       ...(running.length > 0

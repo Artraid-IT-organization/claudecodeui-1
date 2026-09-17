@@ -11,6 +11,8 @@ type SidebarAccountSwitcherProps = {
   accountEmail: string | null;
   /** Compact styling for the mobile footer row. */
   variant: 'desktop' | 'mobile';
+  /** No ACCOUNT_LABEL configured: render nothing unless an email is known. */
+  hideWithoutEmail?: boolean;
 };
 
 /**
@@ -29,6 +31,7 @@ export default function SidebarAccountSwitcher({
   accountLabel,
   accountEmail,
   variant,
+  hideWithoutEmail = false,
 }: SidebarAccountSwitcherProps) {
   const { activeSlot, accounts, pendingSlot, errorMessage, activateSlot } = useOwnerAccountSettings();
   const [isOpen, setIsOpen] = useState(false);
@@ -92,6 +95,10 @@ export default function SidebarAccountSwitcher({
     variant === 'mobile'
       ? 'flex w-full items-center gap-3 rounded-xl border border-violet-300/60 bg-violet-50/80 px-3.5 py-2 dark:border-violet-700/40 dark:bg-violet-900/15'
       : 'flex w-full items-center gap-2.5 rounded-lg border border-violet-300/60 bg-violet-50/80 px-2.5 py-2 dark:border-violet-700/40 dark:bg-violet-900/15';
+
+  if (hideWithoutEmail && !activeEmail) {
+    return null;
+  }
 
   if (!canSwitch) {
     return <div className={shell}>{badgeInner}</div>;

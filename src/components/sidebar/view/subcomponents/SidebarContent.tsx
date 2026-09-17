@@ -211,7 +211,16 @@ export default function SidebarContent({
   const starredProjects = projectListProps.projects.filter((p) =>
     projectListProps.isProjectStarred(p.projectId),
   );
-  const singleStarredProject = starredProjects.length === 1 ? starredProjects[0] : null;
+  // Ни одной звёздочки (свежая установка) — тот же плоский вид для главной
+  // папки: той, где больше всего чатов. Раньше без звёздочки новая копия
+  // показывала список папок, и выглядела «неполной и совсем другой»
+  // (Егор, 17.09.26). Две и больше звёздочек — по-прежнему список папок.
+  const mainProjectWithoutStars = starredProjects.length === 0 && projectListProps.projects.length > 0
+    ? projectListProps.projects.reduce((best, project) => (
+      (project.sessionMeta?.total ?? 0) > (best.sessionMeta?.total ?? 0) ? project : best
+    ))
+    : null;
+  const singleStarredProject = starredProjects.length === 1 ? starredProjects[0] : mainProjectWithoutStars;
 
 
   // Which project to display in the flat session list (null = show starred project).
