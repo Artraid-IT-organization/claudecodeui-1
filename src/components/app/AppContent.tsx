@@ -344,6 +344,16 @@ function AppContentInner() {
     // keyboard. Measured rather than assumed: the strip differs by model and
     // orientation, and iOS has changed what it reports between versions.
     let restingGap = 0;
+    // Высота страницы, от которой считается клавиатура. На iOS 26 в приложении
+    // с экрана «Домой» innerHeight при открытой клавиатуре сжимается вместе с
+    // видимой областью (замер с iPhone Егора 17.09.26: innerHeight 471,
+    // visualViewport.height 471, clientHeight 812, offsetTop 341). Разность
+    // innerHeight − height давала 0: приложение «не видело» клавиатуру, отступ
+    // под полоску «домой» оставался промежутком, а поле поднимала только
+    // прокрутка самой iOS — на ней Safari и рисует курсор не на строке.
+    // clientHeight корня при клавиатуре не меняется; в обычной вкладке Safari
+    // innerHeight не меньше него, поэтому там всё как раньше.
+    const layoutHeight = () => Math.max(window.innerHeight, document.documentElement.clientHeight);
     const isTyping = () => {
       const active = document.activeElement;
       return active instanceof HTMLElement
@@ -351,7 +361,7 @@ function AppContentInner() {
     };
     const calibrate = () => {
       if (isStandalone && !isTyping()) {
-        restingGap = Math.max(0, window.innerHeight - vv.height);
+        restingGap = Math.max(0, layoutHeight() - vv.height);
       }
     };
 
@@ -360,15 +370,14 @@ function AppContentInner() {
       // Do NOT listen to scroll: on iOS Safari, scrolling content changes
       // vv.offsetTop which would make --keyboard-height fluctuate during
       // normal scrolling, causing the container to bounce up and down.
-      const gap = Math.max(0, window.innerHeight - vv.height);
+      const gap = Math.max(0, layoutHeight() - vv.height);
 
       // Клавиатура открыта: идёт набор и видимая область заметно короче
       // экрана (внешняя клавиатура даёт полоску в несколько десятков точек).
       // Полоски «домой» под полем в этот момент нет — её закрывает
       // клавиатура, а отступ под неё давал пустую полосу между полем и
       // клавиатурой (снимок Егора 16.09.26). Класс keyboard-open снимает
-      // этот отступ (index.css). Вычет restingGap оставлен как был: попытка
-      // убрать его вместе со сбросом прокрутки спрятала поле под клавиатуру.
+      // этот отступ (index.css).
       const keyboardOpen = isTyping() && gap > 120;
       document.documentElement.classList.toggle('keyboard-open', keyboardOpen);
       const raw = isStandalone ? Math.max(0, gap - restingGap) : gap;
@@ -383,7 +392,7 @@ function AppContentInner() {
       //
       // Ограничение снимает целый класс таких срывов: даже если замер соврал,
       // раскладка остаётся рабочей.
-      const ceiling = Math.round(window.innerHeight * 0.7);
+      const ceiling = Math.round(layoutHeight() * 0.7);
       const kb = Math.min(raw, ceiling);
 
       // Сдвиг страницы, который iOS делает сама. Когда появляется клавиатура,
@@ -403,14 +412,20 @@ function AppContentInner() {
       lastPan = pan;
       document.documentElement.style.setProperty('--keyboard-height', `${kb}px`);
       document.documentElement.style.setProperty('--app-pan', `${pan}px`);
+      // Пол высоты по 100dvh нужен без клавиатуры (панели Safari). С
+      // клавиатурой высоту задают top/bottom, а 100dvh на iOS 26 может
+      // сжаться и сплющить оболочку до пола.
+      if (kb > 0) document.documentElement.style.setProperty('--app-max-h', 'none');
+      else document.documentElement.style.removeProperty('--app-max-h');
       if (changed) scheduleCaretRedraw();
+      if (kb > 0) scheduleScrollReset();
       if (isTyping()) scheduleProbe({ gap, kb, pan, keyboardOpen });
     };
 
     // Замер для журнала сайта: настоящие числа iPhone при открытой клавиатуре.
     // Эмулятор на сервере дважды разошёлся с телефоном (16.09.26).
     let probeTimer = 0;
-    let probesLeft = 12;
+    let probesLeft = 30;
     const scheduleProbe = (state: { gap: number; kb: number; pan: number; keyboardOpen: boolean }) => {
       if (probesLeft <= 0) return;
       window.clearTimeout(probeTimer);
@@ -429,6 +444,7 @@ function AppContentInner() {
             standalone: isStandalone,
             restingGap,
             innerHeight: window.innerHeight,
+            layoutH: layoutHeight(),
             vvHeight: vv.height,
             vvTop: vv.offsetTop,
             vvScale: vv.scale,
@@ -448,6 +464,23 @@ function AppContentInner() {
     };
     let lastKb = -1;
     let lastPan = -1;
+
+    // Сдвиг экрана, которым iOS «подтягивает» поле, возвращается в ноль, но
+    // ТОЛЬКО когда клавиатура уже измерена (kb > 0): оболочка тогда сама стоит
+    // над клавиатурой, и показывать поле сдвигом не нужно. Без сдвига Safari
+    // рисует курсор на строке текста. 16.09 сброс делался при kb = 0 (ошибка
+    // замера выше) — и поле ушло под клавиатуру. Не получилось сбросить —
+    // раскладку держит учёт сдвига (pan), она верна в обоих состояниях.
+    let scrollFrame = 0;
+    const scheduleScrollReset = () => {
+      if (scrollFrame) return;
+      scrollFrame = window.requestAnimationFrame(() => {
+        scrollFrame = 0;
+        if (isTyping() && (window.scrollY !== 0 || window.scrollX !== 0)) {
+          window.scrollTo(0, 0);
+        }
+      });
+    };
 
     // Курсор ниже текста (iOS 26, снимок Егора 16.09.26: набрано «Ром»,
     // курсор строкой ниже). Safari рисует курсор по месту поля в момент
@@ -507,6 +540,8 @@ function AppContentInner() {
       vv.removeEventListener('resize', update);
       vv.removeEventListener('scroll', scheduleUpdate);
       window.clearTimeout(probeTimer);
+      if (scrollFrame) window.cancelAnimationFrame(scrollFrame);
+      document.documentElement.style.removeProperty('--app-max-h');
       if (frame) window.cancelAnimationFrame(frame);
       if (caretFrame) window.cancelAnimationFrame(caretFrame);
       document.documentElement.classList.remove('keyboard-open');
@@ -536,7 +571,7 @@ function AppContentInner() {
         bottom: 'calc(var(--keyboard-height, 0px) - var(--app-pan, 0px))',
         // Пол на всякий случай: даже при неверном замере оболочка остаётся
         // видимой, а не сжимается в полоску.
-        maxHeight: 'max(240px, calc(100dvh - var(--keyboard-height, 0px)))',
+        maxHeight: 'var(--app-max-h, max(240px, calc(100dvh - var(--keyboard-height, 0px))))',
       }}
     >
       {!isMobile ? (
