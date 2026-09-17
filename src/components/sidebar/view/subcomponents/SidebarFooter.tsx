@@ -39,9 +39,11 @@ export default function SidebarFooter({
   t,
 }: SidebarFooterProps) {
   // Без ACCOUNT_LABEL блок аккаунта раньше не показывался вовсе, и свежая
-  // установка выглядела иначе, чем у владельца (Егор, 17.09.26). Почта
-  // известна — показываем блок с подписью «Claude».
-  const shownAccountLabel = accountLabel ?? (accountEmail ? 'Claude' : null);
+  // установка выглядела иначе, чем у владельца (Егор, 17.09.26). Теперь блок
+  // есть всегда с подписью «Claude», а переключатель сам прячется, если почта
+  // аккаунта неизвестна (не владелец площадки) — пустой плашки не бывает.
+  const shownAccountLabel = accountLabel ?? 'Claude';
+  const hideWithoutEmail = !accountLabel;
   return (
     <div className="flex-shrink-0" style={{ paddingBottom: 'env(safe-area-inset-bottom, 0)' }}>
       {/* Restart-required banner: the running server version differs from the
@@ -133,6 +135,7 @@ export default function SidebarFooter({
           <SidebarAccountSwitcher
             accountLabel={shownAccountLabel}
             accountEmail={accountEmail}
+            hideWithoutEmail={hideWithoutEmail}
             variant="desktop"
           />
           {switchAccountUrl && (
@@ -167,6 +170,7 @@ export default function SidebarFooter({
           <SidebarAccountSwitcher
             accountLabel={shownAccountLabel}
             accountEmail={accountEmail}
+            hideWithoutEmail={hideWithoutEmail}
             variant="mobile"
           />
           {switchAccountUrl && (
