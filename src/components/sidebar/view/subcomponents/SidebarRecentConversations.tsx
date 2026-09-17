@@ -100,7 +100,19 @@ export default function SidebarRecentConversations({
   // чем возвращаются в список: с телефона ответ ждут не глядя в экран, и найти
   // работающую беседу нужно одним движением, а не поиском зелёной точки по
   // всему списку.
-  const running = conversations.filter((item) => activeSessions.has(item.sessionId));
+  // Пока идёт обработка, lastActivity — это время последнего ЗАВЕРШЁННОГО
+  // сообщения, а не текущего запуска: сортировка и возраст по нему для
+  // работающих сессий врали (Егор 17.09.26: «давность запуска и очередность
+  // не всегда» точны). startedAt — серверное время начала текущей обработки
+  // из useSessionProtection (см. AppContent.refreshRunningSessions) — есть
+  // только у активных сессий, поэтому это надёжный источник для этой группы.
+  const running = conversations
+    .filter((item) => activeSessions.has(item.sessionId))
+    .sort((a, b) => {
+      const aStarted = activeSessions.get(a.sessionId)?.startedAt ?? 0;
+      const bStarted = activeSessions.get(b.sessionId)?.startedAt ?? 0;
+      return bStarted - aStarted;
+    });
   const idle = conversations.filter((item) => !activeSessions.has(item.sessionId));
   const groups = [
     ...(running.length > 0
@@ -131,7 +143,9 @@ export default function SidebarRecentConversations({
         {group.items.map((conversation) => {
           const isSelected = String(selectedSession?.id ?? '') === conversation.sessionId;
           const isRunning = activeSessions.has(conversation.sessionId);
-          const age = formatCompactAge(conversation.lastActivity, currentTime);
+          const age = isRunning
+            ? formatCompactAge(activeSessions.get(conversation.sessionId)?.startedAt, currentTime)
+            : formatCompactAge(conversation.lastActivity, currentTime);
 
           const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
             if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
