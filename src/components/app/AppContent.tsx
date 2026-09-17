@@ -427,6 +427,9 @@ function AppContentInner() {
       const changed = kb !== lastKb || pan !== lastPan;
       lastKb = kb;
       lastPan = pan;
+      // Высота видимой части экрана — от неё считается предел высоты поля
+      // ввода (--composer-max-h в index.css).
+      document.documentElement.style.setProperty('--visible-h', `${Math.round(vv.height)}px`);
       document.documentElement.style.setProperty('--keyboard-height', `${kb}px`);
       document.documentElement.style.setProperty('--app-pan', `${pan}px`);
       // Пол высоты по 100dvh нужен без клавиатуры (панели Safari). С
