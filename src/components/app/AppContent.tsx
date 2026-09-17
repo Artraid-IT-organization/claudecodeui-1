@@ -353,7 +353,22 @@ function AppContentInner() {
     // прокрутка самой iOS — на ней Safari и рисует курсор не на строке.
     // clientHeight корня при клавиатуре не меняется; в обычной вкладке Safari
     // innerHeight не меньше него, поэтому там всё как раньше.
-    const layoutHeight = () => Math.max(window.innerHeight, document.documentElement.clientHeight);
+    //
+    // Но и эти числа на iOS 26 «плавают» без событий: замеры 17.09 08:09 —
+    // innerHeight то 812, то 874 (с полосой часов), и расчёт, попавший на 812,
+    // уводил низ поля под панель клавиатуры ровно на 62 точки. Поэтому высота
+    // берётся не у браузера, а у невидимого закреплённого элемента с
+    // top: 0; bottom: 0 — это тот самый прямоугольник, от низа которого
+    // отсчитывается bottom оболочки, какой бы он ни был в этот момент. Высота
+    // прямоугольника не зависит от того, от какого края iOS считает координаты.
+    const sentinel = document.createElement('div');
+    sentinel.setAttribute('aria-hidden', 'true');
+    sentinel.style.cssText = 'position:fixed;top:0;bottom:0;left:0;width:0;visibility:hidden;pointer-events:none;';
+    document.body.appendChild(sentinel);
+    const layoutHeight = () => {
+      const height = sentinel.getBoundingClientRect().height;
+      return height > 0 ? height : Math.max(window.innerHeight, document.documentElement.clientHeight);
+    };
     const isTyping = () => {
       const active = document.activeElement;
       return active instanceof HTMLElement
@@ -447,6 +462,7 @@ function AppContentInner() {
             restingGap,
             innerHeight: window.innerHeight,
             layoutH: layoutHeight(),
+            clientH: document.documentElement.clientHeight,
             vvHeight: vv.height,
             vvTop: vv.offsetTop,
             vvScale: vv.scale,
@@ -489,8 +505,13 @@ function AppContentInner() {
     };
     // Новое нажатие на поле — снова три попытки. Уход из поля — пересчёт
     // сразу: на iOS 26 resize после закрытия клавиатуры приходит не всегда.
+    // Пока выезжает клавиатура, iOS меняет размеры не всегда с событием —
+    // несколько контрольных пересчётов до конца анимации.
+    let settleTimers: number[] = [];
     const onFocusIn = () => {
       scrollResetsLeft = 3;
+      settleTimers.forEach((timer) => window.clearTimeout(timer));
+      settleTimers = [80, 250, 500, 900].map((delay) => window.setTimeout(scheduleUpdate, delay));
     };
     let blurTimer = 0;
     const onFocusOut = () => {
@@ -546,6 +567,10 @@ function AppContentInner() {
     vv.addEventListener('scroll', scheduleUpdate);
     document.addEventListener('focusin', onFocusIn);
     document.addEventListener('focusout', onFocusOut);
+    // Прямоугольник закреплённых элементов сменил высоту — пересчёт, даже если
+    // браузер не прислал resize.
+    const sentinelObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(scheduleUpdate);
+    sentinelObserver?.observe(sentinel);
     // Re-measure the device's own gap only at moments when a keyboard cannot
     // be the cause: a turned phone, and coming back to the app.
     const recalibrate = () => {
@@ -562,6 +587,9 @@ function AppContentInner() {
       window.clearTimeout(blurTimer);
       document.removeEventListener('focusin', onFocusIn);
       document.removeEventListener('focusout', onFocusOut);
+      settleTimers.forEach((timer) => window.clearTimeout(timer));
+      sentinelObserver?.disconnect();
+      sentinel.remove();
       document.documentElement.style.removeProperty('--app-max-h');
       if (frame) window.cancelAnimationFrame(frame);
       if (caretFrame) window.cancelAnimationFrame(caretFrame);
