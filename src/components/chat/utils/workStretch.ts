@@ -62,23 +62,34 @@ export function isMostlyRussian(text: string): boolean {
  * Показывается прямо в свёрнутой строке: Егор 14.09.26 «я не видел размышлений
  * минут 15, я должен понимать, на каких ты этапах». Раскрывать свёртку ради
  * этого не нужно, и перевод не требуется — описания и так по-русски.
+ *
+ * Тот же разбор `description` из входа инструмента нужен и для живой плашки
+ * статуса, пока действие ещё выполняется (см. `toolInputDescription` ниже,
+ * используется в useChatRealtimeHandlers) — Егор 17.09.26: строка внизу должна
+ * показывать «прям название, что ты в данный момент производишь», а не имя
+ * инструмента.
  */
+export function toolInputDescription(rawInput: unknown): string | null {
+  let input: unknown = rawInput;
+  if (typeof input === 'string') {
+    try {
+      input = JSON.parse(input);
+    } catch {
+      return null;
+    }
+  }
+  const description = input && typeof input === 'object'
+    ? (input as { description?: unknown }).description
+    : undefined;
+  return typeof description === 'string' && description.trim() ? description.trim() : null;
+}
+
 export function lastStepDescription(messages: ChatMessage[]): string | null {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (!message.isToolUse) continue;
-    let input: unknown = message.toolInput;
-    if (typeof input === 'string') {
-      try {
-        input = JSON.parse(input);
-      } catch {
-        continue;
-      }
-    }
-    const description = input && typeof input === 'object'
-      ? (input as { description?: unknown }).description
-      : undefined;
-    if (typeof description === 'string' && description.trim()) return description.trim();
+    const description = toolInputDescription(message.toolInput);
+    if (description) return description;
   }
   return null;
 }
