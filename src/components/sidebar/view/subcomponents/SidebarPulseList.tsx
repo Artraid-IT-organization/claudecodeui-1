@@ -71,10 +71,18 @@ export default function SidebarPulseList({
     }
 
     // Busy sessions first (they're the ones actively doing work), then most
-    // recently active within each group.
+    // recently active within each group. For busy rows, lastActivity is the
+    // last COMPLETED message and goes stale mid-run, so order by the real
+    // processing-start time (startedAt) instead — same fix as
+    // SidebarRecentConversations' "Сейчас работает" group.
     rows.sort((a, b) => {
       if (a.isProcessing !== b.isProcessing) {
         return a.isProcessing ? -1 : 1;
+      }
+      if (a.isProcessing && b.isProcessing) {
+        const aStarted = activeSessions.get(a.session.id)?.startedAt ?? 0;
+        const bStarted = activeSessions.get(b.session.id)?.startedAt ?? 0;
+        return bStarted - aStarted;
       }
       return getSessionDate(b.session).getTime() - getSessionDate(a.session).getTime();
     });
@@ -139,7 +147,9 @@ export default function SidebarPulseList({
         {visibleRows.map(({ project, session, isProcessing, needsAttention }) => {
           const isSelected = selectedSession?.id === session.id;
           const title = getSessionTitle(session);
-          const age = formatCompactAge(session.lastActivity, currentTime);
+          const age = isProcessing
+            ? formatCompactAge(activeSessions.get(session.id)?.startedAt, currentTime)
+            : formatCompactAge(session.lastActivity, currentTime);
 
           return (
             <button
