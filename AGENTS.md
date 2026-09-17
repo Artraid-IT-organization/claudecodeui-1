@@ -254,3 +254,11 @@ CLI отдаёт модели отказ стоп-хука (`decision: block`) �
 - 16.09 сброс прокрутки при kb = 0 спрятал поле под клавиатуру; эмулятор тогда показывал «на месте», потому что не сжимал innerHeight. Эмулятор под iOS 26: `~/tmp-ccui/keyboard/emulate_ios26.py`. Верить только замеру с телефона.
 - Курсор: ещё `setSelectionRange` после смены kb/pan и нет `transition` у `textarea.chat-input-placeholder` (jeffpaul/daymark#353, unoplatform/uno#24526).
 - Замер телефона: клиент при наборе шлёт `POST /api/user/viewport-probe` (до 30 раз за загрузку) → `journalctl -u claudecodeui-shared | grep viewport-probe`.
+
+## Вид боковой панели по умолчанию (17.09.26)
+
+Плоский вид (чаты по темам, без шапок папок) включается при ровно одной звёздочке
+И при нуле звёздочек — тогда для папки с наибольшим `sessionMeta.total`
+(`SidebarContent.tsx`, `mainProjectWithoutStars`). Список папок — только при 2+ звёздочках.
+Блок аккаунта внизу виден и без `ACCOUNT_LABEL`, если сервер знает почту (подпись «Claude»).
+Причина: копии с GitHub выглядели «неполными и совсем другими», чем у владельца.

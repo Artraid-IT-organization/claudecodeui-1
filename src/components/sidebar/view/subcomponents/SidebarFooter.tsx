@@ -38,6 +38,10 @@ export default function SidebarFooter({
   onShowSettings,
   t,
 }: SidebarFooterProps) {
+  // Без ACCOUNT_LABEL блок аккаунта раньше не показывался вовсе, и свежая
+  // установка выглядела иначе, чем у владельца (Егор, 17.09.26). Почта
+  // известна — показываем блок с подписью «Claude».
+  const shownAccountLabel = accountLabel ?? (accountEmail ? 'Claude' : null);
   return (
     <div className="flex-shrink-0" style={{ paddingBottom: 'env(safe-area-inset-bottom, 0)' }}>
       {/* Restart-required banner: the running server version differs from the
@@ -120,14 +124,14 @@ export default function SidebarFooter({
 
       {/* Desktop account indicator: only rendered when the server was started with
           ACCOUNT_LABEL set (multi-instance setup, one instance per account). */}
-      {accountLabel && (
+      {shownAccountLabel && (
         <div className="hidden px-2 pb-1.5 md:block">
           {/* The badge doubles as the account switcher when this user has more
               than one real Claude account wired up - see
               SidebarAccountSwitcher for why it lives here and not only in
               Settings. With a single account it renders exactly as before. */}
           <SidebarAccountSwitcher
-            accountLabel={accountLabel}
+            accountLabel={shownAccountLabel}
             accountEmail={accountEmail}
             variant="desktop"
           />
@@ -158,10 +162,10 @@ export default function SidebarFooter({
 
       {/* Mobile account indicator: only rendered when the server was started with
           ACCOUNT_LABEL set (multi-instance setup, one instance per account). */}
-      {accountLabel && (
+      {shownAccountLabel && (
         <div className="px-3 pb-3 md:hidden">
           <SidebarAccountSwitcher
-            accountLabel={accountLabel}
+            accountLabel={shownAccountLabel}
             accountEmail={accountEmail}
             variant="mobile"
           />
