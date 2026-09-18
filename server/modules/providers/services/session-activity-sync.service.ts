@@ -35,8 +35,13 @@ type ActivityRow = {
   updated_at: string | null;
 };
 
-/** session_id → «mtime:size» файла на прошлой проверке. */
-const seenFileState = new Map<string, string>();
+/**
+ * session_id → «mtime:size» файла и найденное в нём время. Файл перечитывается
+ * только при смене «mtime:size», а сверка с базой идёт на каждом проходе:
+ * `updated_at` пишут и другие (синхронизатор при загрузке списка ставит
+ * mtime, веб — время запуска), и без неё их значение оставалось бы навсегда.
+ */
+const seenFiles = new Map<string, { fileState: string; lastMessageAt: string | null }>();
 let timer: ReturnType<typeof setInterval> | null = null;
 let running = false;
 
@@ -107,15 +112,18 @@ export async function syncSessionActivityOnce(): Promise<number> {
     } catch {
       continue;
     }
-    if (seenFileState.get(row.session_id) === fileState) continue;
-
     let lastMessageAt: string | null;
-    try {
-      lastMessageAt = await readLastMessageTimestamp(row.jsonl_path);
-    } catch {
-      continue;
+    const seen = seenFiles.get(row.session_id);
+    if (seen && seen.fileState === fileState) {
+      lastMessageAt = seen.lastMessageAt;
+    } else {
+      try {
+        lastMessageAt = await readLastMessageTimestamp(row.jsonl_path);
+      } catch {
+        continue;
+      }
+      seenFiles.set(row.session_id, { fileState, lastMessageAt });
     }
-    seenFileState.set(row.session_id, fileState);
     if (!lastMessageAt) continue;
 
     const storedMs = parseStoredTimestamp(row.updated_at);
