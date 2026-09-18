@@ -11,3 +11,4 @@ export { initializeSessionsWatcher } from './services/sessions-watcher.service.j
 export { closeSessionsWatcher } from './services/sessions-watcher.service.js';
 export { broadcastSessionUpserted } from './services/sessions-watcher.service.js';
 export { autoGroupProjectSessions } from './services/session-auto-group.service.js';
+export { startSessionActivitySync, stopSessionActivitySync } from './services/session-activity-sync.service.js';

@@ -288,8 +288,8 @@ function AppContentInner() {
   // комментарий у forceReconnect в WebSocketContext. Список чатов слева в это
   // время не получает ни одной дельты `session_upserted`, и время последней
   // активности в нём застывает на моменте до сна, пока страницу не
-  // перезагрузят. Один тихий перезапрос списка при возврате в него чинит -
-  // без опроса по таймеру, только по событию возврата.
+  // перезагрузят. Тихий перезапрос списка при возврате в него чинит это, а
+  // пока список на экране — ещё и раз в минуту (см. ниже).
   useEffect(() => {
     const onResume = () => {
       if (document.visibilityState === 'visible') {
@@ -299,7 +299,14 @@ function AppContentInner() {
     document.addEventListener('visibilitychange', onResume);
     window.addEventListener('pageshow', onResume);
     window.addEventListener('online', onResume);
+    // На общем экземпляре дельт `session_upserted` о новых сообщениях нет
+    // вовсе (наблюдатель за файлами выключен), и время у чатов, пока список
+    // открыт, не менялось. Сервер сверяет его по перепискам раз в 15 секунд
+    // (session-activity-sync.service.ts); список забирает свежее раз в минуту
+    // — так же часто тикает и само «N мин» в строке (useSidebarController).
+    const timer = window.setInterval(onResume, 60_000);
     return () => {
+      window.clearInterval(timer);
       document.removeEventListener('visibilitychange', onResume);
       window.removeEventListener('pageshow', onResume);
       window.removeEventListener('online', onResume);

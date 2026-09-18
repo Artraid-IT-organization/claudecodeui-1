@@ -17,6 +17,7 @@ import {
 } from '@/shared/utils.js';
 import type { IProviderSessionSynchronizer } from '@/shared/interfaces.js';
 import type { SessionTitleSource } from '@/shared/types.js';
+import { readLastMessageTimestamp } from '@/modules/providers/services/session-activity-sync.service.js';
 
 type ParsedSession = {
   sessionId: string;
@@ -180,6 +181,19 @@ function extractUserMessageText(data: Record<string, unknown>): string | undefin
 }
 
 /**
+ * Время создания — из файла, время обновления — последнего сообщения
+ * переписки, а не mtime: Claude дописывает служебные строки без времени, и
+ * молчащий с 13.09 чат по mtime выглядел «изменённым час назад». Так же время
+ * сверяет session-activity-sync.service.ts; разные правила у двух писателей
+ * перетягивали бы `updated_at` туда-сюда.
+ */
+async function readTranscriptTimestamps(filePath: string): Promise<{ createdAt?: string; updatedAt?: string }> {
+  const timestamps = await readFileTimestamps(filePath);
+  const lastMessageAt = await readLastMessageTimestamp(filePath).catch(() => null);
+  return lastMessageAt ? { ...timestamps, updatedAt: lastMessageAt } : timestamps;
+}
+
+/**
  * Session indexer for Claude transcript artifacts.
  */
 export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
@@ -236,7 +250,7 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
         continue;
       }
 
-      const timestamps = await readFileTimestamps(filePath);
+      const timestamps = await readTranscriptTimestamps(filePath);
       sessionsDb.createSession(
         parsed.sessionId,
         this.provider,
@@ -279,7 +293,7 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
       return null;
     }
 
-    const timestamps = await readFileTimestamps(filePath);
+    const timestamps = await readTranscriptTimestamps(filePath);
     return sessionsDb.createSession(
       parsed.sessionId,
       this.provider,
