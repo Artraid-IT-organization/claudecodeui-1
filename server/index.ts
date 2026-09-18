@@ -20,6 +20,8 @@ import {
     initializeSessionsWatcher,
     broadcastSessionUpserted,
     providerRuntimeService,
+    startSessionActivitySync,
+    stopSessionActivitySync,
 } from '@/modules/providers/index.js';
 import { userDb, initializeDatabase, sessionsDb  } from '@/modules/database/index.js';
 import { createWebSocketServer } from '@/modules/websocket/index.js';
@@ -483,6 +485,11 @@ async function startServer() {
             // live, not that their own sessions stop working.
             if (!OPEN_REGISTRATION) {
                 await initializeSessionsWatcher();
+            } else {
+                // Без наблюдателя время последнего сообщения в списке чатов
+                // стояло на месте часами — сверяем его по файлам известных
+                // чатов (session-activity-sync.service.ts).
+                startSessionActivitySync();
             }
 
             // Раскладка чатов человека по группам моделью — в фоне, раз в
@@ -549,6 +556,7 @@ async function startServer() {
         });
 
         await closeSessionsWatcher();
+        stopSessionActivitySync();
         // Clean up plugin processes on shutdown
         const shutdownRuntimeServices = async () => {
             // Первым делом: агенты не должны умереть вместе с сервером.
