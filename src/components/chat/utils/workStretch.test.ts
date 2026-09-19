@@ -112,8 +112,8 @@ test('реплика помощника — работа, а не ответ ч�
   const stretch = items[1] as Stretch;
   assert.equal(stretch.actionCount, 1, 'после перечитывания переписки шагов помощника нет — число не должно прыгать');
   const rows = workStretchRows(stretch, new Set());
-  assert.ok(rows.every((row) => isToolGroupItem(row) || !(row as ChatMessage).parentToolUseId || (row as ChatMessage).isToolUse),
-    'в раскрытой свёртке реплики помощника не рисуются пузырём');
+  assert.ok(rows.some((row) => !isToolGroupItem(row) && (row as ChatMessage).content === 'Устойчиво 3/3. Запускаю полный прогон.'),
+    'в раскрытой свёртке реплика помощника видна');
 });
 
 test('живой хвост: этапы мысли по-русски, шаги с именем помощника, последний — идущий', () => {

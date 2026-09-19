@@ -209,8 +209,9 @@ export function workStretchRows(
   shownThoughts: ReadonlySet<ChatMessage>,
 ): MessageListItem[] {
   const visible = stretch.messages.filter((message) => {
-    // Реплики и мысли помощника — только в живом хвосте; его действия видны.
-    if (isHelperMessage(message) && !message.isToolUse) return false;
+    // Мысли помощника не показываются (без перевода и разбора); его действия и
+    // реплики видны — реплику WorkStretchContainer рисует строкой, не пузырём.
+    if (isHelperMessage(message) && message.isThinking) return false;
     return !message.isThinking || shownThoughts.has(message);
   });
   return groupConsecutiveTools(visible, true);

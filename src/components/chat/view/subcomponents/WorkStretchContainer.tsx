@@ -287,6 +287,15 @@ export default function WorkStretchContainer({
                 </div>
               );
             }
+            if (item.parentToolUseId) {
+              // Реплика помощника — строкой хода работы, не пузырём ответа.
+              return (
+                <p key={getMessageKey(item)} className="text-[12px] leading-[1.45] text-muted-foreground" data-helper-note>
+                  <span className="text-muted-foreground/70">Помощник: </span>
+                  {String(item.content ?? '')}
+                </p>
+              );
+            }
             return (
               <MessageComponent
                 key={getMessageKey(item)}
