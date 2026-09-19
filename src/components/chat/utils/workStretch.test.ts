@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import type { ChatMessage } from '../types/types';
 import { isToolGroupItem } from './toolGrouping';
-import { describeWorkStretch, groupWorkStretches, isMostlyRussian, isWorkStretchItem, lastStepDescription, workStretchRows } from './workStretch';
+import { describeWorkStretch, groupWorkStretches, isMostlyRussian, isWorkStretchItem, lastStepDescription, workStretchLiveTail, workStretchRows } from './workStretch';
 
 const at = (n: number) => `2026-09-13T10:00:${String(n).padStart(2, '0')}Z`;
 const user = (text: string, n = 0): ChatMessage => ({ type: 'user', content: text, timestamp: at(n) });
@@ -88,4 +88,46 @@ test('текущий шаг — описание последнего дейст
   assert.equal(lastStepDescription([withDesc('Bash', 'Собираю сайт', 1), think(LONG, 2), withDesc('Bash', 'Проверяю, дошла ли правка', 3)]), 'Проверяю, дошла ли правка');
   assert.equal(lastStepDescription([withDesc('Bash', 'Собираю сайт', 1), tool('Read', 2)]), 'Собираю сайт', 'действие без описания пропускается');
   assert.equal(lastStepDescription([think(LONG, 1)]), null);
+});
+
+// Живой хвост и шаги помощника (19.09.26): Егор хочет видеть, на чём ИИ думает
+// во время работы, но чтобы по окончании всё было свёрнуто.
+const agentCall = (id: string, description: string, done = false): ChatMessage => ({
+  type: 'assistant', isToolUse: true, toolName: 'Agent', toolId: id,
+  toolInput: JSON.stringify({ description }), toolResult: done ? { content: 'итог', isError: false } : null, timestamp: at(10),
+});
+const helperStep = (parent: string, description: string, done = true, isError = false): ChatMessage => ({
+  type: 'assistant', isToolUse: true, toolName: 'Bash', parentToolUseId: parent,
+  toolInput: JSON.stringify({ description }), toolResult: done ? { content: 'ok', isError } : null, timestamp: at(11),
+});
+const helperNote = (parent: string, text: string): ChatMessage => ({ type: 'assistant', content: text, parentToolUseId: parent, timestamp: at(12) });
+
+test('реплика помощника — работа, а не ответ чата; его шаги не входят в число действий', () => {
+  const items = groupWorkStretches([
+    user('проверь', 1), agentCall('t1', 'Проверяющий, круг 2'),
+    helperStep('t1', 'Смотрю итог прогона'), helperNote('t1', 'Устойчиво 3/3. Запускаю полный прогон.'),
+    helperStep('t1', 'Гоняю ловушки', false),
+  ]);
+  assert.equal(items.length, 2, 'реплика помощника не рвёт свёртку и не встаёт ответом');
+  const stretch = items[1] as Stretch;
+  assert.equal(stretch.actionCount, 1, 'после перечитывания переписки шагов помощника нет — число не должно прыгать');
+  const rows = workStretchRows(stretch, new Set());
+  assert.ok(rows.every((row) => isToolGroupItem(row) || !(row as ChatMessage).parentToolUseId || (row as ChatMessage).isToolUse),
+    'в раскрытой свёртке реплики помощника не рисуются пузырём');
+});
+
+test('живой хвост: этапы мысли по-русски, шаги с именем помощника, последний — идущий', () => {
+  const stretch = groupWorkStretches([
+    user('проверь', 1), think(EN, 2), think(LONG, 3), agentCall('t1', 'Проверяющий, круг 2'),
+    helperStep('t1', 'Смотрю итог прогона'), helperNote('t1', 'Устойчиво 3/3.'), helperStep('t1', 'Гоняю ловушки', false),
+  ])[1] as Stretch;
+  const tail = workStretchLiveTail(stretch, (m) => (m.content === EN ? 'Сделал ветку от чистой головы' : null));
+  assert.deepEqual(tail.map((line) => [line.kind, line.helper, line.text, line.running]), [
+    ['stage', null, 'Сделал ветку от чистой головы', false],
+    ['step', null, 'Проверяющий, круг 2', true],
+    ['step', 'Проверяющий, круг 2', 'Смотрю итог прогона', false],
+    ['note', 'Проверяющий, круг 2', 'Устойчиво 3/3.', false],
+    ['step', 'Проверяющий, круг 2', 'Гоняю ловушки', true],
+  ], 'неразобранная или неважная мысль в хвост не идёт');
+  assert.equal(workStretchLiveTail(stretch, () => null, 2).length, 2, 'хвост ограничен последними строками');
 });

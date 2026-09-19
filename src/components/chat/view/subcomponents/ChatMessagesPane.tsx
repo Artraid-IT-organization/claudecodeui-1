@@ -312,6 +312,9 @@ function ChatMessagesPane({
                     showRawParameters={showRawParameters}
                     selectedProject={selectedProject}
                     provider={provider}
+                    // Живой хвост — только у идущей сейчас работы: последняя
+                    // строка ленты и чат ещё работает. Закончил — свёрнуто.
+                    isLive={isProcessing && index === groupedVisibleMessages.length - 1}
                   />
                   </div>
                 );

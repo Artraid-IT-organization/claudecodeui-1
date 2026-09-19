@@ -5,7 +5,13 @@ import type { ChatMessage, ClaudePermissionSuggestion, PermissionGrantResult, Pr
 import type { Project } from '../../../../types/app';
 import { api } from '../../../../utils/api';
 import { isToolGroupItem } from '../../utils/toolGrouping';
-import { describeWorkStretch, lastStepDescription, workStretchRows, type WorkStretchItem } from '../../utils/workStretch';
+import {
+  describeWorkStretch,
+  lastStepDescription,
+  workStretchLiveTail,
+  workStretchRows,
+  type WorkStretchItem,
+} from '../../utils/workStretch';
 import { Markdown } from './Markdown';
 
 import MessageComponent from './MessageComponent';
@@ -28,6 +34,12 @@ interface WorkStretchContainerProps {
   showRawParameters?: boolean;
   selectedProject?: Project | null;
   provider: Provider | string;
+  /**
+   * Это свёртка идущей сейчас работы: под строкой виден живой хвост —
+   * последние этапы мысли и шаги, в том числе помощников. Работа закончилась —
+   * хвост исчезает, остаётся свёрнутая строка.
+   */
+  isLive?: boolean;
 }
 
 type ThoughtDigest = { keep: boolean; ru: string | null };
@@ -35,8 +47,32 @@ type DigestState = 'idle' | 'loading' | 'done' | 'failed';
 
 /** Итоги разбора на время жизни вкладки: повторное раскрытие не ходит на сервер. */
 const digestByText = new Map<string, ThoughtDigest>();
+/**
+ * Мысли, разбор которых уже запрошен. Пока чат работает, лента пересобирается
+ * на каждое событие; без этого каждый пересбор отменял и заново слал тот же
+ * запрос на перевод.
+ */
+const inflightByText = new Map<string, Promise<void>>();
 /** Столько мыслей уходит на сервер за один запрос (там же и потолок). */
 const DIGEST_PAGE_SIZE = 60;
+/** Столько последних мыслей разбирается для живого хвоста. */
+const LIVE_THOUGHTS = 3;
+
+async function requestDigestPage(page: string[]): Promise<void> {
+  try {
+    const response = await api.user.thoughtDigest(page);
+    const data = response.ok ? ((await response.json()) as { items?: Array<ThoughtDigest | null> }) : null;
+    const items = data?.items ?? [];
+    page.forEach((text, index) => {
+      const item = items[index];
+      if (item && typeof item.keep === 'boolean') {
+        digestByText.set(text, { keep: item.keep, ru: typeof item.ru === 'string' ? item.ru : null });
+      }
+    });
+  } catch {
+    // Не вышло — мысли покажутся как есть (см. `state === 'failed'`).
+  }
+}
 
 /**
  * Какие мысли — важные этапы, и их русский текст.
@@ -44,52 +80,48 @@ const DIGEST_PAGE_SIZE = 60;
  * Модель размышляет по-английски — так она сильнее. Показ отбирает этапы
  * (закончено исследование, запущена критика, вывод, решение) и переводит их;
  * рабочие мелочи не показывает. Потолка по числу нет: долгая работа — много
- * этапов (Егор 14.09.26). Разбор запрашивается только при раскрытии. Не вышло
- * — видны все мысли как есть с пометкой: ничего не пропадает.
+ * этапов (Егор 14.09.26). Разбор запрашивается при раскрытии и для последних
+ * мыслей живого хвоста. Не вышло — видны все мысли как есть с пометкой:
+ * ничего не пропадает.
  */
 function useThoughtDigest(thoughts: ChatMessage[], enabled: boolean) {
-  const texts = useMemo(() => thoughts.map((message) => String(message.content ?? '')), [thoughts]);
+  const texts = thoughts.map((message) => String(message.content ?? ''));
+  // Ключ по тексту, а не по массиву: массив новый на каждый пересбор ленты.
+  const textsKey = texts.join('\u0000');
   const [state, setState] = useState<DigestState>('idle');
   const [, setVersion] = useState(0);
 
   useEffect(() => {
     if (!enabled) return;
-    const missing = [...new Set(texts.filter((text) => !digestByText.has(text)))];
-    if (missing.length === 0) {
+    const need = [...new Set(textsKey ? textsKey.split('\u0000') : [])].filter((text) => !digestByText.has(text));
+    if (need.length === 0) {
       setState('done');
       return;
     }
     let cancelled = false;
     setState('loading');
-    void (async () => {
-      let failed = false;
-      for (let start = 0; start < missing.length; start += DIGEST_PAGE_SIZE) {
-        const page = missing.slice(start, start + DIGEST_PAGE_SIZE);
-        try {
-          const response = await api.user.thoughtDigest(page);
-          const data = response.ok ? ((await response.json()) as { items?: Array<ThoughtDigest | null> }) : null;
-          const items = data?.items ?? [];
-          page.forEach((text, index) => {
-            const item = items[index];
-            if (item && typeof item.keep === 'boolean') {
-              digestByText.set(text, { keep: item.keep, ru: typeof item.ru === 'string' ? item.ru : null });
-            } else {
-              failed = true;
-            }
-          });
-        } catch {
-          failed = true;
-        }
-        if (cancelled) return;
-        // Долгая работа разбирается страницами — этапы появляются по мере готовности.
-        setVersion((value) => value + 1);
-      }
-      if (!cancelled) setState(failed ? 'failed' : 'done');
-    })();
+    const fresh = need.filter((text) => !inflightByText.has(text));
+    for (let start = 0; start < fresh.length; start += DIGEST_PAGE_SIZE) {
+      const page = fresh.slice(start, start + DIGEST_PAGE_SIZE);
+      const request = requestDigestPage(page).finally(() => {
+        page.forEach((text) => inflightByText.delete(text));
+      });
+      page.forEach((text) => inflightByText.set(text, request));
+    }
+    const waits = [...new Set(need.map((text) => inflightByText.get(text)).filter(Boolean))] as Promise<void>[];
+    // Долгая работа разбирается страницами — этапы появляются по мере готовности.
+    waits.forEach((wait) => {
+      void wait.then(() => {
+        if (!cancelled) setVersion((value) => value + 1);
+      });
+    });
+    void Promise.all(waits).then(() => {
+      if (!cancelled) setState(need.every((text) => digestByText.has(text)) ? 'done' : 'failed');
+    });
     return () => {
       cancelled = true;
     };
-  }, [enabled, texts]);
+  }, [enabled, textsKey]);
 
   const known = thoughts.every((message) => digestByText.has(String(message.content ?? '')));
   const shown = new Set<ChatMessage>();
@@ -105,6 +137,11 @@ function useThoughtDigest(thoughts: ChatMessage[], enabled: boolean) {
     textFor: (message: ChatMessage): string => {
       const digest = digestByText.get(String(message.content ?? ''));
       return digest?.keep && digest.ru ? digest.ru : String(message.content ?? '');
+    },
+    /** Русский текст мысли, только если она — важный этап и уже разобрана. */
+    stageText: (message: ChatMessage): string | null => {
+      const digest = digestByText.get(String(message.content ?? ''));
+      return digest?.keep && digest.ru ? digest.ru : null;
     },
   };
 }
@@ -129,9 +166,14 @@ export default function WorkStretchContainer({
   showRawParameters,
   selectedProject,
   provider,
+  isLive = false,
 }: WorkStretchContainerProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const digest = useThoughtDigest(stretch.thoughts, isExpanded);
+  const showLiveTail = isLive && !isExpanded;
+  const liveThoughts = useMemo(() => stretch.thoughts.slice(-LIVE_THOUGHTS), [stretch.thoughts]);
+  const liveDigest = useThoughtDigest(liveThoughts, showLiveTail);
+  const liveTail = showLiveTail ? workStretchLiveTail(stretch, liveDigest.stageText) : [];
   const label = describeWorkStretch({
     actionCount: stretch.actionCount,
     errorCount: stretch.errorCount,
@@ -157,10 +199,45 @@ export default function WorkStretchContainer({
         />
         <span className="flex-shrink-0">{label}</span>
         {/* Текущий шаг прямо в свёрнутой строке — видно этап, не раскрывая. */}
-        {!isExpanded && currentStep && (
+        {!isExpanded && currentStep && liveTail.length === 0 && (
           <span className="min-w-0 flex-1 truncate text-foreground/70">— {currentStep}</span>
         )}
       </button>
+
+      {liveTail.length > 0 && (
+        <div className="ml-2 mt-0.5 space-y-1 border-l border-border/60 pl-3" data-live-tail>
+          {liveTail.map((line, index) => {
+            const isNewest = index === liveTail.length - 1;
+            return (
+              <div
+                key={line.key}
+                className={`flex min-w-0 items-start gap-1.5 text-[12px] leading-[1.45] ${
+                  line.kind === 'stage' ? 'text-foreground/80' : 'text-muted-foreground'
+                }`}
+              >
+                <span
+                  className={`mt-[5px] h-1.5 w-1.5 flex-shrink-0 rounded-full ${
+                    line.isError
+                      ? 'bg-red-500/80'
+                      : line.running && isNewest
+                        ? 'animate-pulse bg-blue-500'
+                        : line.kind === 'stage'
+                          ? 'bg-amber-500/70'
+                          : 'bg-muted-foreground/40'
+                  }`}
+                  aria-hidden
+                />
+                <span className={`min-w-0 flex-1 ${line.kind === 'stage' ? 'line-clamp-3' : 'line-clamp-2'}`}>
+                  {line.helper && (
+                    <span className="text-muted-foreground/70">Помощник «{line.helper}»: </span>
+                  )}
+                  {line.text}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {isExpanded && (
         <div className="ml-2 mt-1 space-y-2 border-l border-border/60 pl-3">

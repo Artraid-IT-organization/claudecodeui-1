@@ -104,8 +104,17 @@ export function isWorkStretchItem(item: unknown): item is WorkStretchItem {
  */
 const ALWAYS_VISIBLE_TOOLS = new Set(['ExitPlanMode', 'exit_plan_mode', 'AskUserQuestion']);
 
+/** Шаг помощника — всё, что пришло с пометкой вызова Agent/Task. */
+export function isHelperMessage(message: ChatMessage): boolean {
+  return typeof message.parentToolUseId === 'string' && message.parentToolUseId.length > 0;
+}
+
 function isWorkMessage(message: ChatMessage): boolean {
   if (message.isThinking) return true;
+  // Всё, что делает и пишет помощник, — работа, а не ответ чата: его реплика
+  // «Устойчиво 3/3, запускаю полный прогон» раньше рвала «Ход работы» и
+  // стояла в ленте как ответ ИИ.
+  if (isHelperMessage(message)) return true;
   // Запрос разрешения требует действия человека — он не прячется в свёртку.
   if (message.isToolUse && !message.isInteractivePrompt && !ALWAYS_VISIBLE_TOOLS.has(String(message.toolName ?? ''))) {
     return true;
@@ -119,11 +128,14 @@ export function groupWorkStretches<T extends ChatMessage>(messages: T[]): Array<
 
   const flush = () => {
     if (run.length === 0) return;
-    const actionCount = run.filter((message) => message.isToolUse).length;
-    const errorCount = run.filter((message) => message.isToolUse && message.toolResult?.isError).length;
-    const thoughts = run.filter(isReadableThought);
+    // Считаются только шаги самого чата: шаги помощника приходят лишь живьём
+    // и после перечитывания переписки пропадают, число «прыгало» бы.
+    const own = run.filter((message) => !isHelperMessage(message));
+    const actionCount = own.filter((message) => message.isToolUse).length;
+    const errorCount = own.filter((message) => message.isToolUse && message.toolResult?.isError).length;
+    const thoughts = own.filter(isReadableThought);
     // Только пустые размышления — показывать нечего, ни строки, ни свёртки.
-    if (actionCount > 0 || thoughts.length > 0) {
+    if (actionCount > 0 || thoughts.length > 0 || own.length < run.length) {
       items.push({
         _isStretch: true,
         messages: run,
@@ -196,6 +208,84 @@ export function workStretchRows(
   stretch: Pick<WorkStretchItem, 'messages'>,
   shownThoughts: ReadonlySet<ChatMessage>,
 ): MessageListItem[] {
-  const visible = stretch.messages.filter((message) => !message.isThinking || shownThoughts.has(message));
+  const visible = stretch.messages.filter((message) => {
+    // Реплики и мысли помощника — только в живом хвосте; его действия видны.
+    if (isHelperMessage(message) && !message.isToolUse) return false;
+    return !message.isThinking || shownThoughts.has(message);
+  });
   return groupConsecutiveTools(visible, true);
+}
+
+export interface LiveTailLine {
+  key: string;
+  kind: 'stage' | 'step' | 'note';
+  text: string;
+  /** Название помощника («Проверяющий, круг 2»), если шаг его. */
+  helper: string | null;
+  /** Действие ещё выполняется. */
+  running: boolean;
+  isError: boolean;
+}
+
+const LIVE_NOTE_MAX_CHARS = 220;
+
+function isAgentCall(message: ChatMessage): boolean {
+  const name = String(message.toolName ?? '');
+  return Boolean(message.isToolUse) && (name === 'Agent' || name === 'Task');
+}
+
+/**
+ * Живой хвост «Хода работы», пока чат работает: последние этапы мысли и шаги,
+ * включая шаги помощников, — чтобы было видно, на чём ИИ думает сейчас.
+ *
+ * Егор 19.09.26: «в процессе я бы видел больше размышлений, чтобы понимать, на
+ * чём он думает. Но так, чтобы потом чат не засорялся — всё сжималось в папки
+ * как сейчас». Хвост есть только у последней свёртки и только пока идёт
+ * работа; закончилась — остаётся одна свёрнутая строка.
+ *
+ * `stageText` — русский текст мысли, если разбор счёл её важным этапом; мелочи
+ * и ещё не разобранные мысли в хвост не попадают.
+ */
+export function workStretchLiveTail(
+  stretch: Pick<WorkStretchItem, 'messages'>,
+  stageText: (message: ChatMessage) => string | null,
+  limit = 6,
+): LiveTailLine[] {
+  const helperNames = new Map<string, string>();
+  for (const message of stretch.messages) {
+    if (isAgentCall(message) && message.toolId) {
+      helperNames.set(message.toolId, toolInputDescription(message.toolInput) ?? 'помощник');
+    }
+  }
+
+  const lines: LiveTailLine[] = [];
+  stretch.messages.forEach((message, index) => {
+    const helper = isHelperMessage(message) ? helperNames.get(message.parentToolUseId as string) ?? 'помощник' : null;
+    const key = `${message.toolId ?? message.id ?? ''}-${index}`;
+    if (message.isThinking) {
+      if (helper) return;
+      const text = stageText(message);
+      if (text) lines.push({ key, kind: 'stage', text, helper: null, running: false, isError: false });
+      return;
+    }
+    if (message.isToolUse) {
+      const text = toolInputDescription(message.toolInput) ?? String(message.toolName ?? 'Действие');
+      lines.push({
+        key,
+        kind: 'step',
+        text,
+        helper,
+        running: !message.toolResult,
+        isError: Boolean(message.toolResult?.isError),
+      });
+      return;
+    }
+    if (helper && message.type === 'assistant') {
+      const raw = String(message.content ?? '').replace(/\s+/g, ' ').trim();
+      if (!raw) return;
+      const text = raw.length > LIVE_NOTE_MAX_CHARS ? `${raw.slice(0, LIVE_NOTE_MAX_CHARS - 1)}…` : raw;
+      lines.push({ key, kind: 'note', text, helper, running: false, isError: false });
+    }
+  });
+  return lines.slice(-limit);
 }
