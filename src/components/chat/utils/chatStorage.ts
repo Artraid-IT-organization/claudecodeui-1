@@ -11,7 +11,10 @@ export const safeLocalStorage = {
         console.warn('localStorage quota exceeded, clearing old data');
 
         const keys = Object.keys(localStorage);
-        const draftKeys = keys.filter((k) => k.startsWith('draft_input_') || k.startsWith('queued_message_'));
+        // Без завершающего подчёркивания: под это же условие попадает и
+        // `queued_messages_<id>` — ключ очереди из нескольких сообщений, то
+        // самое, что теперь растёт. С `queued_message_` он не совпадает.
+        const draftKeys = keys.filter((k) => k.startsWith('draft_input_') || k.startsWith('queued_message'));
         draftKeys.forEach((k) => {
           localStorage.removeItem(k);
         });
@@ -52,6 +55,8 @@ export const safeLocalStorage = {
 export type QueuedSendOptions = Record<string, unknown>;
 
 export type StoredQueuedMessage = {
+  /** Устойчивый ключ строки очереди: нужен, чтобы двигать и править конкретное сообщение. */
+  id?: string;
   content: string;
   options?: QueuedSendOptions;
   /** Legacy image-only descriptors retained for queued draft compatibility. */
@@ -101,6 +106,137 @@ export function writeQueuedMessage(sessionId: string, message: StoredQueuedMessa
 
 export function clearQueuedMessage(sessionId: string): void {
   safeLocalStorage.removeItem(queuedMessageKey(sessionId));
+}
+
+/**
+ * Очередь из нескольких сообщений лежит под ОТДЕЛЬНЫМ ключом, а не дописывается
+ * в старый `queued_message_<id>`. Причина не в красоте: старый читатель, увидев
+ * массив, не узнаёт ни объект, ни «сырой текст» — и отправляет в чат JSON
+ * строкой. Ровно это случилось бы при откате выкатки назад. Отдельный ключ
+ * делает откат безобидным: прежняя сборка просто не увидит очередь.
+ */
+export const queuedMessagesKey = (sessionId: string) => `queued_messages_${sessionId}`;
+
+const newQueuedId = (): string => {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+  } catch {
+    // Небезопасный контекст (http://) — randomUUID недоступен.
+  }
+  return `q_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+};
+
+const normalizeQueuedMessage = (value: unknown): StoredQueuedMessage | null => {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const { id, content, options, images, attachments } = value as StoredQueuedMessage;
+  if (typeof content !== 'string') {
+    return null;
+  }
+  const normalizedAttachments = Array.isArray(attachments)
+    ? attachments
+    : Array.isArray(images)
+      ? images
+      : [];
+  if (!content.trim() && normalizedAttachments.length === 0) {
+    return null;
+  }
+  return {
+    id: typeof id === 'string' && id ? id : newQueuedId(),
+    content,
+    options,
+    attachments: normalizedAttachments,
+  };
+};
+
+/**
+ * Читает очередь чата. Понимает новый массив и обе старые формы одного
+ * сообщения; старое переносится в новый ключ при первом чтении, поэтому
+ * сообщение, поставленное в очередь до обновления страницы, не теряется.
+ */
+export function readQueuedMessages(sessionId: string): StoredQueuedMessage[] {
+  const raw = safeLocalStorage.getItem(queuedMessagesKey(sessionId));
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed)) {
+        return parsed
+          .map(normalizeQueuedMessage)
+          .filter((item): item is StoredQueuedMessage => item !== null);
+      }
+    } catch {
+      // Битая запись — ниже пробуем старый ключ.
+    }
+  }
+
+  const legacy = normalizeQueuedMessage(readQueuedMessage(sessionId));
+  if (!legacy) {
+    clearQueuedMessage(sessionId);
+    return [];
+  }
+  writeQueuedMessages(sessionId, [legacy]);
+  clearQueuedMessage(sessionId);
+  return [legacy];
+}
+
+export function writeQueuedMessages(sessionId: string, messages: StoredQueuedMessage[]): void {
+  const cleaned = messages
+    .map(normalizeQueuedMessage)
+    .filter((item): item is StoredQueuedMessage => item !== null);
+  if (cleaned.length === 0) {
+    clearQueuedMessages(sessionId);
+    return;
+  }
+  safeLocalStorage.setItem(queuedMessagesKey(sessionId), JSON.stringify(cleaned));
+}
+
+export function clearQueuedMessages(sessionId: string): void {
+  safeLocalStorage.removeItem(queuedMessagesKey(sessionId));
+  clearQueuedMessage(sessionId);
+}
+
+export function appendQueuedMessage(
+  sessionId: string,
+  message: StoredQueuedMessage,
+): StoredQueuedMessage[] {
+  const next = [...readQueuedMessages(sessionId), { ...message, id: message.id || newQueuedId() }];
+  writeQueuedMessages(sessionId, next);
+  return next;
+}
+
+/**
+ * Снимает с очереди первое сообщение и тут же записывает остаток. Это «талон»:
+ * кто снял, тот и отправляет — так составитель сообщения и общеприложенческая
+ * автоотправка не посылают одно и то же дважды.
+ */
+/**
+ * Снимает с очереди ИМЕННО ту строку, которую собрались отправить. Нужна там,
+ * где отправитель держит собственную копию сообщения (в открытом чате у неё
+ * ещё и браузерные File-объекты): «снять первое» отправило бы копию одного
+ * сообщения, а вычеркнуло другое, если очередь успела измениться.
+ */
+export function claimQueuedMessage(sessionId: string, id: string): StoredQueuedMessage | null {
+  const all = readQueuedMessages(sessionId);
+  const index = all.findIndex((item) => item.id === id);
+  if (index === -1) {
+    return null;
+  }
+  const [claimed] = all.splice(index, 1);
+  writeQueuedMessages(sessionId, all);
+  return claimed;
+}
+
+export function shiftQueuedMessage(sessionId: string): StoredQueuedMessage | null {
+  const all = readQueuedMessages(sessionId);
+  if (all.length === 0) {
+    return null;
+  }
+  const [head, ...rest] = all;
+  writeQueuedMessages(sessionId, rest);
+  return head;
 }
 
 /**

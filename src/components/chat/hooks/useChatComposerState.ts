@@ -15,10 +15,13 @@ import { authenticatedFetch } from '../../../utils/api';
 import type { MarkSessionProcessing, SessionActivityMap } from '../../../hooks/useSessionProtection';
 import { grantClaudeToolPermission } from '../utils/chatPermissions';
 import {
-  clearQueuedMessage,
-  readQueuedMessage,
+  appendQueuedMessage,
+  claimQueuedMessage,
+  clearQueuedMessages,
+  readQueuedMessages,
   safeLocalStorage,
-  writeQueuedMessage,
+  shiftQueuedMessage,
+  writeQueuedMessages,
   type QueuedSendOptions,
   adoptLegacyProjectDraft,
   clearDraftInput,
@@ -206,6 +209,8 @@ const uploadAttachmentFiles = async (files: File[]): Promise<unknown[]> => {
 };
 
 export type QueuedDraft = {
+  /** Устойчивый ключ строки: по нему очередь двигают, правят и удаляют. */
+  id: string;
   content: string;
   /** Browser files retained while this composer stays mounted, for editing. */
   attachments: File[];
@@ -219,17 +224,32 @@ export type QueuedDraft = {
   options?: QueuedSendOptions;
 };
 
-const restoreQueuedDraft = (sessionKey: string): QueuedDraft | null => {
-  const saved = readQueuedMessage(sessionKey);
-  return saved
-    ? {
-        content: saved.content,
-        attachments: [],
-        uploadedAttachments: saved.attachments ?? saved.images,
-        options: saved.options,
-      }
-    : null;
+const newDraftId = (): string => {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+  } catch {
+    // Небезопасный контекст (http://) — randomUUID недоступен.
+  }
+  return `q_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 };
+
+const restoreQueuedDrafts = (sessionKey: string): QueuedDraft[] =>
+  readQueuedMessages(sessionKey).map((saved) => ({
+    id: saved.id || newDraftId(),
+    content: saved.content,
+    attachments: [],
+    uploadedAttachments: saved.attachments ?? saved.images,
+    options: saved.options,
+  }));
+
+const toStoredQueuedMessage = (draft: QueuedDraft) => ({
+  id: draft.id,
+  content: draft.content,
+  options: draft.options,
+  attachments: draft.uploadedAttachments,
+});
 
 const getNotificationSessionSummary = (
   selectedSession: ProjectSession | null,
@@ -319,15 +339,16 @@ export function useChatComposerState({
   draftScopeRef.current = draftScope;
   const draftOwnerRef = useRef<string | null>(draftScope);
 
-  const [queuedDraft, setQueuedDraft] = useState<QueuedDraft | null>(() => {
+  // Очередь целиком, по порядку отправки. Первый элемент уйдёт следующим.
+  const [queuedDrafts, setQueuedDrafts] = useState<QueuedDraft[]>(() => {
     if (typeof window === 'undefined' || !sessionKey) {
-      return null;
+      return [];
     }
-    return restoreQueuedDraft(sessionKey);
+    return restoreQueuedDrafts(sessionKey);
   });
-  // Which session the in-memory `queuedDraft` belongs to. On a session switch
+  // Which session the in-memory queue belongs to. On a session switch
   // there is one commit where `sessionKey` already points at the new session
-  // while `queuedDraft` still holds the old session's draft; the persistence
+  // while the queue still holds the old session's drafts; the persistence
   // effect must not write across that gap.
   const queuedDraftSessionRef = useRef<string | null>(sessionKey);
 
@@ -850,7 +871,11 @@ export function useChatComposerState({
         // its files again.
         if (queuedSubmission) {
           queuedDraftSessionRef.current = sessionKey;
-          setQueuedDraft(queuedSubmission);
+          // Возврат в НАЧАЛО очереди: это сообщение уже было первым, файлы у
+          // него загружены, и повторная загрузка ему не нужна.
+          setQueuedDrafts((prev) => (
+            prev.some((item) => item.id === queuedSubmission.id) ? prev : [queuedSubmission, ...prev]
+          ));
           return;
         }
 
@@ -871,6 +896,7 @@ export function useChatComposerState({
         }
 
         const durableDraft: QueuedDraft = {
+          id: newDraftId(),
           content: currentInput,
           attachments: currentAttachments,
           uploadedAttachments,
@@ -878,12 +904,9 @@ export function useChatComposerState({
         };
         if (queuedSessionKey) {
           // Write the claim ticket synchronously after upload; this closes the
-          // gap before React's persistence effect runs.
-          writeQueuedMessage(queuedSessionKey, {
-            content: durableDraft.content,
-            options: durableDraft.options,
-            attachments: durableDraft.uploadedAttachments,
-          });
+          // gap before React's persistence effect runs. Дописываем В КОНЕЦ:
+          // новое сообщение встаёт за уже стоящими, а не затирает их.
+          appendQueuedMessage(queuedSessionKey, toStoredQueuedMessage(durableDraft));
         }
 
         // The upload is asynchronous. If the user changed sessions while it
@@ -894,14 +917,19 @@ export function useChatComposerState({
             processingSessionsRef.current
             && !processingSessionsRef.current.has(queuedSessionKey)
           ) {
-            clearQueuedMessage(queuedSessionKey);
+            // Чат уже свободен — отправляем ПЕРВОЕ из очереди (а не то, что
+            // сейчас дописали): порядок важнее, чем кто нажал последним.
+            const head = shiftQueuedMessage(queuedSessionKey);
+            if (!head) {
+              return;
+            }
             sendMessage({
               type: 'chat.send',
               sessionId: queuedSessionKey,
-              content: durableDraft.content,
+              content: head.content,
               options: {
-                ...(durableDraft.options ?? {}),
-                attachments: durableDraft.uploadedAttachments ?? [],
+                ...(head.options ?? {}),
+                attachments: head.attachments ?? [],
               },
             });
             onSessionProcessing?.(queuedSessionKey, { statusText: null, phase: 'starting', detail: null, canInterrupt: true });
@@ -910,7 +938,7 @@ export function useChatComposerState({
         }
 
         queuedDraftSessionRef.current = queuedSessionKey;
-        setQueuedDraft(durableDraft);
+        setQueuedDrafts((prev) => [...prev, durableDraft]);
         setInput('');
         inputValueRef.current = '';
         setAttachedFiles([]);
@@ -1147,9 +1175,12 @@ export function useChatComposerState({
       return;
     }
 
-    if (isLoading || !queuedDraft) {
+    if (isLoading || queuedDrafts.length === 0) {
       return;
     }
+    // Уходит ровно одно — первое. Остальные ждут: следующий слив произойдёт,
+    // когда закончится ход, который начнётся прямо сейчас.
+    const head = queuedDrafts[0];
 
     // Turn just ended in this session: flush immediately. Otherwise this is a
     // saved draft restored into an apparently idle session — hold it briefly
@@ -1160,32 +1191,78 @@ export function useChatComposerState({
       // The saved key is the claim ticket shared with the app-level auto-send
       // (which handles sessions that finish while not viewed). If it's gone,
       // the message was already dispatched — don't send it twice.
-      if (sessionKey && !readQueuedMessage(sessionKey)) {
-        setQueuedDraft(null);
+      // Талон общий с автоотправкой чатов, которые не открыты: кто снял
+      // сообщение с хранилища, тот и отправляет. Нет талона — уже отправлено.
+      const claimed = sessionKey ? claimQueuedMessage(sessionKey, head.id) : head;
+      setQueuedDrafts((prev) => prev.filter((item) => item.id !== head.id));
+      if (!claimed) {
         return;
       }
-      setQueuedDraft(null);
-      setInput(queuedDraft.content);
-      inputValueRef.current = queuedDraft.content;
-      setAttachedFiles(queuedDraft.attachments);
-      handleSubmitRef.current?.(createFakeSubmitEvent(), queuedDraft);
+      setInput(head.content);
+      inputValueRef.current = head.content;
+      setAttachedFiles(head.attachments);
+      handleSubmitRef.current?.(createFakeSubmitEvent(), head);
     }, delay);
     return () => clearTimeout(timer);
-  }, [isLoading, queuedDraft, sessionKey, setInput]);
+  }, [isLoading, queuedDrafts, sessionKey, setInput]);
 
-  const editQueuedDraft = useCallback(() => {
-    if (!queuedDraft) {
+  // Взять сообщение из очереди обратно в поле ввода. Текст, уже набранный в
+  // поле, не выбрасывается: он встаёт на освободившееся место в очереди —
+  // иначе правка второго сообщения стирала бы третье, набранное рядом.
+  const editQueuedDraft = useCallback((id: string) => {
+    const target = queuedDrafts.find((item) => item.id === id);
+    if (!target) {
       return;
     }
-    setQueuedDraft(null);
-    setInput(queuedDraft.content);
-    inputValueRef.current = queuedDraft.content;
-    setAttachedFiles(queuedDraft.attachments);
+    const carried = inputValueRef.current;
+    setQueuedDrafts((prev) => {
+      const index = prev.findIndex((item) => item.id === id);
+      if (index === -1) {
+        return prev;
+      }
+      const next = [...prev];
+      if (carried.trim() || attachedFiles.length > 0) {
+        // Вместе с текстом на освободившееся место переезжают и файлы, уже
+        // прикреплённые к полю, — иначе прикреплённый снимок исчезал молча.
+        next[index] = {
+          id: newDraftId(),
+          content: carried,
+          attachments: attachedFiles,
+          uploadedAttachments: [],
+          options: buildSendOptions(carried),
+        };
+      } else {
+        next.splice(index, 1);
+      }
+      return next;
+    });
+    setInput(target.content);
+    inputValueRef.current = target.content;
+    setAttachedFiles(target.attachments);
     textareaRef.current?.focus();
-  }, [queuedDraft]);
+  }, [attachedFiles, buildSendOptions, queuedDrafts, setInput]);
 
-  const deleteQueuedDraft = useCallback(() => {
-    setQueuedDraft(null);
+  const deleteQueuedDraft = useCallback((id: string) => {
+    setQueuedDrafts((prev) => prev.filter((item) => item.id !== id));
+  }, []);
+
+  // Перенос на одну позицию. Стрелки, а не перетаскивание: очередь живёт на
+  // телефоне, внутри прокручиваемой ленты, и палец в такой драг не попадает.
+  const moveQueuedDraft = useCallback((id: string, direction: -1 | 1) => {
+    setQueuedDrafts((prev) => {
+      const index = prev.findIndex((item) => item.id === id);
+      const target = index + direction;
+      if (index === -1 || target < 0 || target >= prev.length) {
+        return prev;
+      }
+      const next = [...prev];
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  }, []);
+
+  const clearQueuedDrafts = useCallback(() => {
+    setQueuedDrafts([]);
   }, []);
 
   // A voice transcript either fills the input (to edit before sending) or, when the
@@ -1261,19 +1338,12 @@ export function useChatComposerState({
     if (!sessionKey || queuedDraftSessionRef.current !== sessionKey) {
       return;
     }
-    if (
-      queuedDraft
-      && (queuedDraft.content.trim() || (queuedDraft.uploadedAttachments?.length ?? 0) > 0)
-    ) {
-      writeQueuedMessage(sessionKey, {
-        content: queuedDraft.content,
-        options: queuedDraft.options,
-        attachments: queuedDraft.uploadedAttachments,
-      });
+    if (queuedDrafts.length > 0) {
+      writeQueuedMessages(sessionKey, queuedDrafts.map(toStoredQueuedMessage));
     } else {
-      clearQueuedMessage(sessionKey);
+      clearQueuedMessages(sessionKey);
     }
-  }, [queuedDraft, sessionKey]);
+  }, [queuedDrafts, sessionKey]);
 
   // Switching sessions swaps in that session's queued draft. Browser File
   // objects are local to the mounted composer, while their already-uploaded
@@ -1281,10 +1351,10 @@ export function useChatComposerState({
   useEffect(() => {
     queuedDraftSessionRef.current = sessionKey;
     if (!sessionKey) {
-      setQueuedDraft(null);
+      setQueuedDrafts([]);
       return;
     }
-    setQueuedDraft(restoreQueuedDraft(sessionKey));
+    setQueuedDrafts(restoreQueuedDrafts(sessionKey));
   }, [sessionKey]);
 
   useEffect(() => {
@@ -1506,9 +1576,11 @@ export function useChatComposerState({
     isDragActive,
     openAttachmentPicker: open,
     handleSubmit,
-    queuedDraft,
+    queuedDrafts,
     editQueuedDraft,
     deleteQueuedDraft,
+    moveQueuedDraft,
+    clearQueuedDrafts,
     handleVoiceTranscript,
     handleInputChange,
     handleKeyDown,
