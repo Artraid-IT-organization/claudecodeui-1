@@ -225,6 +225,8 @@ export interface LiveTailLine {
   /** Действие ещё выполняется. */
   running: boolean;
   isError: boolean;
+  /** Строка — сам запуск помощника (его шаги идут ниже с отступом). */
+  isAgentCall?: boolean;
 }
 
 const LIVE_NOTE_MAX_CHARS = 220;
@@ -277,6 +279,7 @@ export function workStretchLiveTail(
         helper,
         running: !message.toolResult,
         isError: Boolean(message.toolResult?.isError),
+        isAgentCall: !helper && isAgentCall(message),
       });
       return;
     }

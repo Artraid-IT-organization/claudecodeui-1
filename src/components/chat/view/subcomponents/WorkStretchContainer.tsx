@@ -208,12 +208,18 @@ export default function WorkStretchContainer({
         <div className="ml-2 mt-0.5 space-y-1 border-l border-border/60 pl-3" data-live-tail>
           {liveTail.map((line, index) => {
             const isNewest = index === liveTail.length - 1;
+            // Имя помощника — один раз на подряд идущие его шаги, дальше отступ:
+            // на телефоне повтор «Помощник «…»:» в каждой строке съедал место.
+            const previous = index > 0 ? liveTail[index - 1] : null;
+            const sameHelperAsAbove = Boolean(
+              line.helper && previous && (previous.helper === line.helper || (previous.isAgentCall && previous.text === line.helper)),
+            );
             return (
               <div
                 key={line.key}
                 className={`flex min-w-0 items-start gap-1.5 text-[12px] leading-[1.45] ${
                   line.kind === 'stage' ? 'text-foreground/80' : 'text-muted-foreground'
-                }`}
+                } ${line.helper ? 'pl-3' : ''}`}
               >
                 <span
                   className={`mt-[5px] h-1.5 w-1.5 flex-shrink-0 rounded-full ${
@@ -228,9 +234,10 @@ export default function WorkStretchContainer({
                   aria-hidden
                 />
                 <span className={`min-w-0 flex-1 ${line.kind === 'stage' ? 'line-clamp-3' : 'line-clamp-2'}`}>
-                  {line.helper && (
+                  {line.helper && !sameHelperAsAbove && (
                     <span className="text-muted-foreground/70">Помощник «{line.helper}»: </span>
                   )}
+                  {line.isAgentCall && <span className="text-muted-foreground/70">Помощник: </span>}
                   {line.text}
                 </span>
               </div>
