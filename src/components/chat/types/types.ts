@@ -65,6 +65,8 @@ export interface ChatMessage {
   isLocalCommand?: boolean;
   isLocalCommandStdout?: boolean;
   isCompactSummary?: boolean;
+  /** Шаг помощника: id вызова Agent/Task в главном чате (приходит только живьём). */
+  parentToolUseId?: string;
   isSubagentContainer?: boolean;
   subagentState?: {
     childTools: SubagentChildTool[];
