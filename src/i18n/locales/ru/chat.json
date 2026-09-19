@@ -122,7 +122,7 @@
       "ctrlEnter": "Ctrl+Enter для отправки • Shift+Enter для новой строки • Tab для смены режима • / для команд",
       "enter": "Enter для отправки • Shift+Enter для новой строки • Tab для смены режима • / для команд",
       "queue": "Enter — поставить следующее сообщение в очередь",
-      "updateQueued": "Enter — изменить сообщение в очереди"
+      "queueMore": "Enter — добавить в очередь: станет {{position}}-м"
     },
     "clickToChangeMode": "Нажмите для смены режима разрешений (или нажмите Tab в поле ввода)",
     "showAllCommands": "Показать все команды",
@@ -130,11 +130,22 @@
     "scrollToBottom": "Прокрутить вниз",
     "queue": {
       "sendNext": "Поставить в очередь",
-      "update": "Изменить сообщение в очереди",
       "label": "В очереди",
       "willSend": "Отправится, когда закончится текущий ответ",
       "edit": "Изменить сообщение в очереди",
-      "delete": "Удалить из очереди"
+      "delete": "Удалить из очереди",
+      "willSendMany": "Уйдут по очереди, в этом порядке",
+      "next": "Следующее",
+      "clear": "Очистить",
+      "expandDock": "Показать очередь",
+      "collapseDock": "Свернуть очередь",
+      "toggleText": "Показать сообщение целиком",
+      "moveUp": "Поднять выше",
+      "moveDown": "Опустить ниже",
+      "attachments_one": "{{count}} вложение",
+      "attachments_few": "{{count}} вложения",
+      "attachments_many": "{{count}} вложений",
+      "attachments_other": "{{count}} вложений"
     },
     "tokensShort": "токенов",
     "tokensUsed": "Израсходовано токенов: {{count}}"

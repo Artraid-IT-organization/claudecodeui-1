@@ -35,7 +35,7 @@ import ComposerAttachment from './ComposerAttachment';
 import VoiceInputButton from './VoiceInputButton';
 import PermissionRequestsBanner from './PermissionRequestsBanner';
 import TokenUsageSummary from './TokenUsageSummary';
-import QueuedMessageCard from './QueuedMessageCard';
+import MessageQueueDock from './MessageQueueDock';
 import ComposerModelMenu from './ComposerModelMenu';
 import ComposerPermissionMenu from './ComposerPermissionMenu';
 
@@ -79,9 +79,11 @@ interface ChatComposerProps {
   onShowTokenUsage: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement> | MouseEvent<HTMLButtonElement> | TouchEvent<HTMLButtonElement>) => void;
   isDragActive: boolean;
-  queuedDraft: QueuedDraft | null;
-  onEditQueuedDraft: () => void;
-  onDeleteQueuedDraft: () => void;
+  queuedDrafts: QueuedDraft[];
+  onEditQueuedDraft: (id: string) => void;
+  onDeleteQueuedDraft: (id: string) => void;
+  onMoveQueuedDraft: (id: string, direction: -1 | 1) => void;
+  onClearQueuedDrafts: () => void;
   attachedFiles: File[];
   onRemoveAttachment: (index: number) => void;
   uploadingFiles: Map<string, number>;
@@ -139,9 +141,11 @@ export default function ChatComposer({
   onShowTokenUsage,
   onSubmit,
   isDragActive,
-  queuedDraft,
+  queuedDrafts,
   onEditQueuedDraft,
   onDeleteQueuedDraft,
+  onMoveQueuedDraft,
+  onClearQueuedDrafts,
   attachedFiles,
   onRemoveAttachment,
   uploadingFiles,
@@ -240,11 +244,14 @@ export default function ChatComposer({
   const hasPendingPermissions = pendingPermissionRequests.length > 0;
   const hasActivityIndicator = Boolean(activity && !hasPendingPermissions);
 
-  const hasQueuedDraft = Boolean(queuedDraft);
+  const hasQueuedDraft = queuedDrafts.length > 0;
   const canQueueDraft = isLoading && Boolean(input.trim() || attachedFiles.length > 0);
   const submitHint = canQueueDraft
     ? hasQueuedDraft
-      ? t('input.hintText.updateQueued', { defaultValue: 'Enter to update queued message' })
+      ? t('input.hintText.queueMore', {
+          defaultValue: 'Enter to add this to the queue ({{position}} in line)',
+          position: queuedDrafts.length + 1,
+        })
       : t('input.hintText.queue', { defaultValue: 'Enter to queue your next message' })
     : sendByCtrlEnter
       ? t('input.hintText.ctrlEnter')
@@ -272,9 +279,7 @@ export default function ChatComposer({
   }, [submitHint]);
 
   const submitAriaLabel = canQueueDraft
-    ? hasQueuedDraft
-      ? t('input.queue.update', { defaultValue: 'Update queued message' })
-      : t('input.queue.sendNext', { defaultValue: 'Queue next message' })
+    ? t('input.queue.sendNext', { defaultValue: 'Queue next message' })
     : isLoading
       ? t('input.stop')
       : t('input.send');
@@ -317,16 +322,17 @@ export default function ChatComposer({
         </div>
       )}
 
-      {queuedDraft && (
-        <QueuedMessageCard
-          content={queuedDraft.content}
-          attachmentCount={
-            queuedDraft.uploadedAttachments?.length ?? queuedDraft.attachments.length
-          }
-          onEdit={onEditQueuedDraft}
-          onDelete={onDeleteQueuedDraft}
-        />
-      )}
+      <MessageQueueDock
+        items={queuedDrafts.map((draft) => ({
+          id: draft.id,
+          content: draft.content,
+          attachmentCount: draft.uploadedAttachments?.length ?? draft.attachments.length,
+        }))}
+        onEdit={onEditQueuedDraft}
+        onDelete={onDeleteQueuedDraft}
+        onMove={onMoveQueuedDraft}
+        onClear={onClearQueuedDrafts}
+      />
 
       {!hasQuestionPanel && <div className="relative mx-auto max-w-[54.25rem]">
         {showFileDropdown && filteredFiles.length > 0 && (

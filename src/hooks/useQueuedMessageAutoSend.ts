@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 
-import { clearQueuedMessage, readQueuedMessage } from '../components/chat/utils/chatStorage';
+import { shiftQueuedMessage } from '../components/chat/utils/chatStorage';
 
 import type { MarkSessionProcessing, SessionActivityMap } from './useSessionProtection';
 
@@ -20,12 +20,13 @@ interface UseQueuedMessageAutoSendArgs {
 /**
  * Dispatches queued messages for sessions the user is NOT currently viewing.
  *
- * The composer persists each queued draft (text + send options snapshotted at
- * queue time) under `queued_message_<sessionId>`. When a session's run leaves
+ * The composer persists the whole queue (text + send options snapshotted at
+ * queue time) under `queued_messages_<sessionId>`. When a session's run leaves
  * the processing map — its previous response completed — this hook sends that
- * session's queued message immediately instead of waiting for the user to
- * open the session again. Removing the storage key before sending is the
- * claim that keeps the composer's own flush from double-sending.
+ * session's FIRST queued message immediately instead of waiting for the user
+ * to open the session again; the rest stay in line and go out the same way as
+ * each run ends. Removing the item from storage before sending is the claim
+ * that keeps the composer's own flush from double-sending.
  */
 export function useQueuedMessageAutoSend({
   processingSessions,
@@ -45,7 +46,11 @@ export function useQueuedMessageAutoSend({
         continue;
       }
 
-      const queued = readQueuedMessage(sessionId);
+      // Снимаем с очереди ОДНО, первое: остальные дождутся своей очереди —
+      // этот же эффект сработает ещё раз, когда закончится запущенный ход.
+      // Снятие до отправки — талон, который не даёт составителю послать то же
+      // самое второй раз.
+      const queued = shiftQueuedMessage(sessionId);
       if (!queued) {
         continue;
       }
@@ -53,7 +58,6 @@ export function useQueuedMessageAutoSend({
       // Проверки «сокет открыт» здесь больше нет: на iPhone она врёт в обе
       // стороны, а chat.send теперь не выбрасывается — WebSocketContext держит
       // его в очереди до расписки сервера и досылает сам (contexts/chatOutbox.ts).
-      clearQueuedMessage(sessionId);
       sendMessage({
         type: 'chat.send',
         sessionId,
