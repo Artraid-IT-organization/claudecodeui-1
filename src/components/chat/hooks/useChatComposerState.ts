@@ -41,6 +41,11 @@ import { escapeRegExp } from '../utils/chatFormatting';
 import { useFileMentions } from './useFileMentions';
 import { type SlashCommand, useSlashCommands } from './useSlashCommands';
 
+// Полоска ленты, которая остаётся видимой над полем ввода, и нижний предел
+// высоты поля (четыре строки), см. updateComposerRoom.
+const COMPOSER_FEED_MIN_PX = 80;
+const COMPOSER_ROOM_FLOOR_PX = 96;
+
 interface UseChatComposerStateArgs {
   selectedProject: Project | null;
   selectedSession: ProjectSession | null;
@@ -562,7 +567,29 @@ export function useChatComposerState({
     inputHighlightRef.current.scrollLeft = target.scrollLeft;
   }, []);
 
+  // Сколько поле ввода может занять, не выдавив карточку за край экрана.
+  //
+  // Лента и карточка поля делят один столбец: лента забирает остаток. Поэтому
+  // «лента + поле» не зависит от того, что ещё стоит в карточке — превью
+  // фотографии, очередь, запрос разрешения, — и предел поля = эта сумма минус
+  // полоска ленты, которую оставляем видимой. Фиксированный запас (250 точек,
+  // 17.09) не знал про превью фото: с ним карточка снова уходила под
+  // клавиатуру, и последние слова было не достать (снимок Егора 19.09.26).
+  // Мерить до сброса высоты — в согласованном состоянии раскладки.
+  const updateComposerRoom = useCallback((target: HTMLTextAreaElement) => {
+    let node: HTMLElement | null = target.parentElement;
+    let pane: HTMLElement | null = null;
+    for (let depth = 0; node && depth < 8 && !pane; depth += 1) {
+      pane = node.querySelector<HTMLElement>('.chat-messages-pane');
+      node = node.parentElement;
+    }
+    if (!pane) return;
+    const room = pane.clientHeight + target.offsetHeight - COMPOSER_FEED_MIN_PX;
+    target.style.setProperty('--composer-room', `${Math.max(COMPOSER_ROOM_FLOOR_PX, Math.round(room))}px`);
+  }, []);
+
   const resizeTextarea = useCallback((target: HTMLTextAreaElement) => {
+    updateComposerRoom(target);
     target.style.height = 'auto';
     const nextHeight = Math.max(22, target.scrollHeight);
     target.style.height = `${nextHeight}px`;
@@ -576,7 +603,46 @@ export function useChatComposerState({
     const expanded = nextHeight > (textareaLineHeightRef.current || 24) * 2;
     setIsTextareaExpanded((previous) => previous === expanded ? previous : expanded);
     lastAutosizedInputRef.current = target.value;
-  }, []);
+    // Курсор в конце текста — держать конец видимым: после смены предела
+    // высоты поле иначе остаётся прокрученным на прежнее место.
+    if (target.selectionStart === target.value.length && target.scrollHeight > target.clientHeight) {
+      target.scrollTop = target.scrollHeight;
+    }
+  }, [updateComposerRoom]);
+
+  // Место меняется не только от набора: открылась клавиатура, добавилось
+  // фото, пришла очередь или запрос разрешения — лента меняет высоту. Следим
+  // за ней и пересчитываем предел; цикла нет: поле ужалось — лента выросла
+  // ровно на столько же, сумма и предел те же.
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea || typeof ResizeObserver === 'undefined') return;
+    let node: HTMLElement | null = textarea.parentElement;
+    let pane: HTMLElement | null = null;
+    for (let depth = 0; node && depth < 8 && !pane; depth += 1) {
+      pane = node.querySelector<HTMLElement>('.chat-messages-pane');
+      node = node.parentElement;
+    }
+    if (!pane) return;
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      if (frame) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = 0;
+        const current = textareaRef.current;
+        if (!current) return;
+        updateComposerRoom(current);
+        if (current.selectionStart === current.value.length && current.scrollHeight > current.clientHeight) {
+          current.scrollTop = current.scrollHeight;
+        }
+      });
+    });
+    observer.observe(pane);
+    return () => {
+      observer.disconnect();
+      if (frame) window.cancelAnimationFrame(frame);
+    };
+  }, [selectedSession?.id, updateComposerRoom]);
 
   const handleAttachmentFiles = useCallback(async (files: File[]) => {
     const accepted: File[] = [];
