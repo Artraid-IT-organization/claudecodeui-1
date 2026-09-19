@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronDownIcon, ChevronUpIcon, PencilIcon, XIcon } from 'lucide-react';
 
@@ -45,6 +45,31 @@ export default function MessageQueueDock({
   const [isDockCollapsed, setIsDockCollapsed] = useState(
     () => safeLocalStorage.getItem(DOCK_COLLAPSED_KEY) === '1',
   );
+  // «Очистить» стирает до пяти подготовленных сообщений, а стоит вплотную к
+  // заголовку — один промах пальцем не должен уносить всю работу. Поэтому
+  // первое касание только переспрашивает и само гаснет через три секунды.
+  const [isClearArmed, setIsClearArmed] = useState(false);
+  const clearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (clearTimerRef.current) {
+      clearTimeout(clearTimerRef.current);
+    }
+  }, []);
+
+  const handleClear = useCallback(() => {
+    if (clearTimerRef.current) {
+      clearTimeout(clearTimerRef.current);
+      clearTimerRef.current = null;
+    }
+    if (isClearArmed) {
+      setIsClearArmed(false);
+      onClear();
+      return;
+    }
+    setIsClearArmed(true);
+    clearTimerRef.current = setTimeout(() => setIsClearArmed(false), 3000);
+  }, [isClearArmed, onClear]);
 
   const toggleDock = useCallback(() => {
     setIsDockCollapsed((prev) => {
@@ -94,10 +119,16 @@ export default function MessageQueueDock({
         {many && (
           <button
             type="button"
-            onClick={onClear}
-            className="shrink-0 rounded-md px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+            onClick={handleClear}
+            className={`shrink-0 rounded-md px-2 py-1.5 text-[11px] transition-colors ${
+              isClearArmed
+                ? 'bg-destructive/15 font-medium text-destructive'
+                : 'text-muted-foreground hover:bg-destructive/10 hover:text-destructive'
+            }`}
           >
-            {t('input.queue.clear', { defaultValue: 'Clear all' })}
+            {isClearArmed
+              ? t('input.queue.clearConfirm', { defaultValue: 'Tap again to clear' })
+              : t('input.queue.clear', { defaultValue: 'Clear all' })}
           </button>
         )}
         <button
@@ -164,7 +195,7 @@ export default function MessageQueueDock({
                     )}
                   </button>
 
-                  <div className="flex shrink-0 items-center gap-0.5">
+                  <div className="flex shrink-0 items-center">
                     {many && (
                       <>
                         <button
@@ -173,7 +204,7 @@ export default function MessageQueueDock({
                           disabled={isFirst}
                           aria-label={t('input.queue.moveUp', { defaultValue: 'Move up' })}
                           title={t('input.queue.moveUp', { defaultValue: 'Move up' })}
-                          className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-25"
+                          className="rounded-md p-2 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-25"
                         >
                           <ChevronUpIcon className="h-4 w-4" />
                         </button>
@@ -183,7 +214,7 @@ export default function MessageQueueDock({
                           disabled={isLast}
                           aria-label={t('input.queue.moveDown', { defaultValue: 'Move down' })}
                           title={t('input.queue.moveDown', { defaultValue: 'Move down' })}
-                          className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-25"
+                          className="rounded-md p-2 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-25"
                         >
                           <ChevronDownIcon className="h-4 w-4" />
                         </button>
@@ -194,7 +225,7 @@ export default function MessageQueueDock({
                       onClick={() => onEdit(item.id)}
                       aria-label={t('input.queue.edit', { defaultValue: 'Edit queued message' })}
                       title={t('input.queue.edit', { defaultValue: 'Edit queued message' })}
-                      className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                      className="rounded-md p-2 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                     >
                       <PencilIcon className="h-4 w-4" />
                     </button>
@@ -203,7 +234,7 @@ export default function MessageQueueDock({
                       onClick={() => onDelete(item.id)}
                       aria-label={t('input.queue.delete', { defaultValue: 'Delete queued message' })}
                       title={t('input.queue.delete', { defaultValue: 'Delete queued message' })}
-                      className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+                      className="rounded-md p-2 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
                     >
                       <XIcon className="h-4 w-4" />
                     </button>

@@ -145,7 +145,8 @@
       "attachments_one": "{{count}} вложение",
       "attachments_few": "{{count}} вложения",
       "attachments_many": "{{count}} вложений",
-      "attachments_other": "{{count}} вложений"
+      "attachments_other": "{{count}} вложений",
+      "clearConfirm": "Нажмите ещё раз"
     },
     "tokensShort": "токенов",
     "tokensUsed": "Израсходовано токенов: {{count}}"

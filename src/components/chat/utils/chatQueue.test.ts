@@ -15,6 +15,7 @@ const memory = new Map<string, string>();
 
 const {
   appendQueuedMessage,
+  claimQueuedMessage,
   clearQueuedMessages,
   queuedMessageKey,
   queuedMessagesKey,
@@ -106,4 +107,22 @@ test('пустое сообщение без вложений в очередь 
   memory.clear();
   writeQueuedMessages('chat-a', [{ content: '   ' }, { content: 'настоящее' }]);
   assert.deepEqual(readQueuedMessages('chat-a').map((m) => m.content), ['настоящее']);
+});
+
+test('снятие по номеру строки берёт именно её, а не первую попавшуюся', () => {
+  memory.clear();
+  appendQueuedMessage('chat-a', { content: 'первое' });
+  appendQueuedMessage('chat-a', { content: 'второе' });
+  const second = readQueuedMessages('chat-a')[1];
+
+  const claimed = claimQueuedMessage('chat-a', second.id!);
+  assert.equal(claimed?.content, 'второе');
+  assert.deepEqual(readQueuedMessages('chat-a').map((m) => m.content), ['первое']);
+});
+
+test('снять несуществующую строку нельзя — очередь остаётся нетронутой', () => {
+  memory.clear();
+  appendQueuedMessage('chat-a', { content: 'первое' });
+  assert.equal(claimQueuedMessage('chat-a', 'нет-такого'), null);
+  assert.deepEqual(readQueuedMessages('chat-a').map((m) => m.content), ['первое']);
 });

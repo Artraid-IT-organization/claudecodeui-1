@@ -16,6 +16,7 @@ import type { MarkSessionProcessing, SessionActivityMap } from '../../../hooks/u
 import { grantClaudeToolPermission } from '../utils/chatPermissions';
 import {
   appendQueuedMessage,
+  claimQueuedMessage,
   clearQueuedMessages,
   readQueuedMessages,
   safeLocalStorage,
@@ -1192,7 +1193,7 @@ export function useChatComposerState({
       // the message was already dispatched — don't send it twice.
       // Талон общий с автоотправкой чатов, которые не открыты: кто снял
       // сообщение с хранилища, тот и отправляет. Нет талона — уже отправлено.
-      const claimed = sessionKey ? shiftQueuedMessage(sessionKey) : head;
+      const claimed = sessionKey ? claimQueuedMessage(sessionKey, head.id) : head;
       setQueuedDrafts((prev) => prev.filter((item) => item.id !== head.id));
       if (!claimed) {
         return;
@@ -1220,11 +1221,13 @@ export function useChatComposerState({
         return prev;
       }
       const next = [...prev];
-      if (carried.trim()) {
+      if (carried.trim() || attachedFiles.length > 0) {
+        // Вместе с текстом на освободившееся место переезжают и файлы, уже
+        // прикреплённые к полю, — иначе прикреплённый снимок исчезал молча.
         next[index] = {
           id: newDraftId(),
           content: carried,
-          attachments: [],
+          attachments: attachedFiles,
           uploadedAttachments: [],
           options: buildSendOptions(carried),
         };
@@ -1237,7 +1240,7 @@ export function useChatComposerState({
     inputValueRef.current = target.content;
     setAttachedFiles(target.attachments);
     textareaRef.current?.focus();
-  }, [buildSendOptions, queuedDrafts, setInput]);
+  }, [attachedFiles, buildSendOptions, queuedDrafts, setInput]);
 
   const deleteQueuedDraft = useCallback((id: string) => {
     setQueuedDrafts((prev) => prev.filter((item) => item.id !== id));

@@ -151,7 +151,8 @@
       "moveUp": "Move up",
       "moveDown": "Move down",
       "attachments_one": "{{count}} file attached",
-      "attachments_other": "{{count}} files attached"
+      "attachments_other": "{{count}} files attached",
+      "clearConfirm": "Tap again to clear"
     }
   },
   "composer": {

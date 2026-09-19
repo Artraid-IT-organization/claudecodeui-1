@@ -11,7 +11,10 @@ export const safeLocalStorage = {
         console.warn('localStorage quota exceeded, clearing old data');
 
         const keys = Object.keys(localStorage);
-        const draftKeys = keys.filter((k) => k.startsWith('draft_input_') || k.startsWith('queued_message_'));
+        // Без завершающего подчёркивания: под это же условие попадает и
+        // `queued_messages_<id>` — ключ очереди из нескольких сообщений, то
+        // самое, что теперь растёт. С `queued_message_` он не совпадает.
+        const draftKeys = keys.filter((k) => k.startsWith('draft_input_') || k.startsWith('queued_message'));
         draftKeys.forEach((k) => {
           localStorage.removeItem(k);
         });
@@ -209,6 +212,23 @@ export function appendQueuedMessage(
  * кто снял, тот и отправляет — так составитель сообщения и общеприложенческая
  * автоотправка не посылают одно и то же дважды.
  */
+/**
+ * Снимает с очереди ИМЕННО ту строку, которую собрались отправить. Нужна там,
+ * где отправитель держит собственную копию сообщения (в открытом чате у неё
+ * ещё и браузерные File-объекты): «снять первое» отправило бы копию одного
+ * сообщения, а вычеркнуло другое, если очередь успела измениться.
+ */
+export function claimQueuedMessage(sessionId: string, id: string): StoredQueuedMessage | null {
+  const all = readQueuedMessages(sessionId);
+  const index = all.findIndex((item) => item.id === id);
+  if (index === -1) {
+    return null;
+  }
+  const [claimed] = all.splice(index, 1);
+  writeQueuedMessages(sessionId, all);
+  return claimed;
+}
+
 export function shiftQueuedMessage(sessionId: string): StoredQueuedMessage | null {
   const all = readQueuedMessages(sessionId);
   if (all.length === 0) {
