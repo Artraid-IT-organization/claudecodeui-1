@@ -9,6 +9,7 @@ import type {
   LLMProvider,
   LoadingProgress,
   Project,
+  ServerScope,
   ProjectSession,
 } from '../types/app';
 
@@ -41,6 +42,7 @@ type SessionUpsertedEvent = ServerEvent & {
     fullPath: string;
     displayName: string;
     isStarred: boolean;
+    serverScope?: ServerScope;
   } | null;
 };
 
@@ -329,6 +331,9 @@ const projectFromRegistration = (project: Project): Project => ({
   fullPath: project.fullPath || project.path || '',
   displayName: project.displayName,
   isStarred: project.isStarred,
+  // Блок верхней панели папки: без него папка второго блока, появившаяся от
+  // живого события, уехала бы в «Проекты» до перезагрузки страницы.
+  serverScope: project.serverScope ?? 'main',
   sessions: project.sessions ?? [],
   sessionMeta: project.sessionMeta ?? { hasMore: false, total: countLoadedProjectSessions(project) },
   taskmaster: project.taskmaster,
@@ -559,6 +564,7 @@ export function useProjectsState({
         fullPath: project.fullPath || project.path || '',
         displayName: project.displayName,
         isStarred: Boolean(project.isStarred),
+        serverScope: project.serverScope ?? 'main',
       },
       timestamp: now,
     };

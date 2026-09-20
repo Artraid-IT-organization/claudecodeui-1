@@ -179,6 +179,9 @@ async function buildSessionUpsertedEvent(updatedProviderSessionId: string): Prom
       lastActivity: row.updated_at ?? row.created_at ?? new Date().toISOString(),
       groupId: groupedRow.group_id ?? null,
       groupLabel: groupedRow.group_label ?? null,
+      // Блок верхней панели у чата. Без него живое обновление списка
+      // возвращало бы перенесённый чат обратно в «Проекты» до перезагрузки.
+      serverScope: groupedRow.server_scope ?? null,
     },
     project: project
       ? {
@@ -187,6 +190,7 @@ async function buildSessionUpsertedEvent(updatedProviderSessionId: string): Prom
         fullPath: project.project_path,
         displayName,
         isStarred: Boolean(project.isStarred),
+        serverScope: project.server_scope ?? 'main',
       }
       : null,
     timestamp: new Date().toISOString(),
