@@ -170,6 +170,7 @@ function decorateAndRecordEvent(run: ChatRun, message: NormalizedMessage): Norma
     run.status = 'completed';
     run.completedAt = Date.now();
     evictRunLater(run.appSessionId);
+    notifyRunCompleted(run.appSessionId);
   }
 
   run.events.push(outbound);
@@ -178,6 +179,32 @@ function decorateAndRecordEvent(run: ChatRun, message: NormalizedMessage): Norma
   }
 
   return outbound;
+}
+
+/**
+ * Слушатели конца хода.
+ *
+ * Пока их не было, «ход закончился» знала только страница — и очередь
+ * следующих сообщений отправлял браузер. Теперь по этому сигналу сервер сам
+ * снимает с очереди следующее сообщение чата (chat-queue.service), поэтому он
+ * нужен здесь, в единственном месте, где ход становится завершённым.
+ */
+const runCompletionListeners = new Set<(appSessionId: string) => void>();
+
+/** Подписка на конец хода. Используется websocket-модулем при поднятии сервера. */
+export function onChatRunCompleted(listener: (appSessionId: string) => void): void {
+  runCompletionListeners.add(listener);
+}
+
+function notifyRunCompleted(appSessionId: string): void {
+  for (const listener of runCompletionListeners) {
+    try {
+      listener(appSessionId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('[ChatRunRegistry] Run completion listener failed', { appSessionId, error: message });
+    }
+  }
 }
 
 /**

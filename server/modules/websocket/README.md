@@ -17,6 +17,20 @@ Creates and wires the shared `ws` server.
 2. `connectedClients` and `WS_OPEN_STATE`  
 Shared chat client registry and open-state constant used by other modules.
 
+## Message Queue (server-owned)
+
+A `chat.send` into a session that is already running is **not** rejected: the message is stored in the
+`chat_message_queue` table and sent by the server itself when the run completes (`onChatRunCompleted`
+in `chat-run-registry.service.ts`, plus a once-a-minute safety sweep and the survivor `onGone` hook in
+`server/index.ts`). The browser only displays and edits the queue (`chat_subscribed.queue`, the
+`chat_queue` broadcast, and `chat.queue.remove|reorder|clear`).
+
+Why it matters: the queue used to live in the tab's `localStorage` and was dispatched by the page, so
+nothing left the queue while the site was closed. Queue dispatch must therefore never depend on a
+connected client — runs started from the queue write to every connected socket (`broadcastConnection`)
+and emit the user's own message into the transcript stream so an open tab shows the question that the
+server asked on the user's behalf.
+
 ## Why Dependency Injection Is Used
 
 The module receives runtime-specific functions from `server/index.ts` instead of importing legacy runtime files directly.
@@ -33,7 +47,8 @@ Benefits:
 |---|---|
 | `services/websocket-server.service.ts` | Creates `WebSocketServer`, binds `verifyClient`, routes connection by pathname |
 | `services/websocket-auth.service.ts` | Authenticates upgrade requests and attaches `request.user` |
-| `services/chat-websocket.service.ts` | Handles the `/ws` chat protocol (`chat.send` / `chat.abort` / `chat.subscribe` / `chat.permission-response`) |
+| `services/chat-websocket.service.ts` | Handles the `/ws` chat protocol (`chat.send` / `chat.abort` / `chat.subscribe` / `chat.permission-response` / `chat.queue.*`) |
+| `services/chat-queue.service.ts` | Server-owned queue of chat messages: stores them in `chat_message_queue`, broadcasts the queue to every client, and dispatches the next one when a run completes |
 | `services/chat-run-registry.service.ts` | Tracks live provider runs per app session id: seq numbering, event replay buffer, provider-id mapping, completion state |
 | `services/chat-session-writer.service.ts` | Gateway writer handed to provider runtimes: remaps provider session ids to app ids, swallows `session_created`, assigns `seq` |
 | `services/shell-websocket.service.ts` | Handles `/shell` PTY lifecycle, reconnect buffering, auth URL detection |

@@ -2,9 +2,19 @@ import path from 'node:path';
 
 import type { WebSocket } from 'ws';
 
-import { sessionsDb } from '@/modules/database/index.js';
+import { sessionsDb, type StoredQueuedChatMessage } from '@/modules/database/index.js';
 import { providerModelsService } from '@/modules/providers/index.js';
-import { chatRunRegistry } from '@/modules/websocket/services/chat-run-registry.service.js';
+import { chatRunRegistry, onChatRunCompleted } from '@/modules/websocket/services/chat-run-registry.service.js';
+import {
+  clearChatQueue,
+  dispatchChatQueues,
+  listChatQueue,
+  queueChatMessage,
+  removeChatQueueItem,
+  reorderChatQueue,
+  setQueuedChatMessageRunner,
+  startChatQueueHeartbeat,
+} from '@/modules/websocket/services/chat-queue.service.js';
 import {
   hasAcceptedSend,
   readClientMessageId,
@@ -21,8 +31,10 @@ import type {
   AnyRecord,
   AuthenticatedWebSocketRequest,
   LLMProvider,
+  NormalizedMessage,
   ProviderPermissionDecision,
   ProviderRuntimeWriter,
+  RealtimeClientConnection,
 } from '@/shared/types.js';
 import { isPlatformOwnerWebUser, OPEN_REGISTRATION, parseIncomingJsonObject } from '@/shared/utils.js';
 import { getImageAssetsDirForUser, readRequestUserId, resolveWebUserRuntimeContext } from '@/shared/web-user-runtime.js';
@@ -243,6 +255,9 @@ async function handleChatSend(
     return;
   }
 
+  const clientOptions = (data.options ?? {}) as AnyRecord;
+  const command = typeof data.content === 'string' ? data.content : '';
+
   const run = chatRunRegistry.startRun({
     appSessionId: sessionId,
     provider,
@@ -252,13 +267,37 @@ async function handleChatSend(
   });
 
   if (!run) {
-    sendProtocolError(
-      ws,
-      'RUN_IN_PROGRESS',
-      `Session "${sessionId}" already has a run in progress.`,
+    /*
+     * Чат сейчас занят — это не отказ, а ОЧЕРЕДЬ.
+     *
+     * Раньше сюда возвращался `RUN_IN_PROGRESS`, а очередь следующих сообщений
+     * вела сама вкладка и отправляла их, когда замечала конец хода. Пока сайт
+     * закрыт, замечать некому: Егор 20.09.26 — «сообщение выложилось только
+     * тогда, когда я вошёл в сайт». Теперь строка ложится в базу, а отправит
+     * её сервер, как только ход закончится (chat-queue.service).
+     */
+    const queueId = clientMessageId || `q_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+    queueChatMessage({
+      id: queueId,
       sessionId,
-      clientMessageId,
-    );
+      userId: userId === null ? null : String(userId),
+      content: command,
+      options: clientOptions,
+    });
+    console.log(`[Очередь чата] сообщение ${queueId} ждёт своего хода (чат ${sessionId})`);
+
+    if (clientMessageId) {
+      // Расписка нужна и здесь: без неё телефон считает сообщение недошедшим и
+      // досылает его снова (src/contexts/chatOutbox.ts).
+      rememberAcceptedSend(sessionId, clientMessageId);
+      sendJson(ws, {
+        kind: 'chat_send_ack',
+        sessionId,
+        clientMessageId,
+        queued: true,
+        timestamp: new Date().toISOString(),
+      });
+    }
     return;
   }
 
@@ -277,9 +316,41 @@ async function handleChatSend(
     });
   }
 
-  const clientOptions = (data.options ?? {}) as AnyRecord;
-  const command = typeof data.content === 'string' ? data.content : '';
+  await runProviderTurn({
+    run,
+    sessionId,
+    provider,
+    userId,
+    projectPath: session.project_path ?? null,
+    content: command,
+    clientOptions,
+    dependencies,
+  });
+}
 
+/** Заведённый запуск: и обычная отправка, и отправка из очереди ведут его одинаково. */
+type StartedChatRun = NonNullable<ReturnType<typeof chatRunRegistry.startRun>>;
+
+/**
+ * Ведёт один ход: разбирает настройки составителя, проверяет вложения и
+ * отдаёт запрос провайдеру.
+ *
+ * Общая часть двух путей — сообщения, отправленного человеком прямо сейчас, и
+ * снятого сервером с очереди. Раньше эта работа жила внутри `chat.send`, и
+ * очередь пришлось бы повторять построчно.
+ */
+async function runProviderTurn(input: {
+  run: StartedChatRun;
+  sessionId: string;
+  provider: LLMProvider;
+  userId: string | number | null;
+  projectPath: string | null;
+  content: string;
+  clientOptions: AnyRecord;
+  dependencies: ChatWebSocketDependencies;
+}): Promise<void> {
+  const { run, sessionId, provider, userId, projectPath, content, clientOptions, dependencies } = input;
+  const runtimeContext = resolveWebUserRuntimeContext(userId);
   // Record what this turn runs with so reopening the session later restores the
   // same model and reasoning effort, and so the resume path has a
   // session-scoped model answer to use.
@@ -327,17 +398,17 @@ async function handleChatSend(
     images: uniqueAttachments.filter(isImageAttachmentDescriptor),
     files: uniqueAttachments.filter((descriptor) => !isImageAttachmentDescriptor(descriptor)),
     sessionId,
-    cwd: clientOptions.cwd ?? session.project_path ?? undefined,
-    projectPath: session.project_path ?? clientOptions.projectPath,
+    cwd: clientOptions.cwd ?? projectPath ?? undefined,
+    projectPath: projectPath ?? clientOptions.projectPath,
     // Per-user Claude SDK env override (claude-runtime.provider.js). Both are
     // null outside OPEN_REGISTRATION, so the runtime falls back to
     // process.env exactly as it always has for Account 1/2.
-    claudeConfigDir: openRegistrationContext.claudeConfigDir ?? undefined,
-    anthropicApiKey: openRegistrationContext.anthropicApiKey ?? undefined,
+    claudeConfigDir: runtimeContext.claudeConfigDir ?? undefined,
+    anthropicApiKey: runtimeContext.anthropicApiKey ?? undefined,
   };
 
   try {
-    await dependencies.runtime.run(provider, command, runtimeOptions, run.writer);
+    await dependencies.runtime.run(provider, content, runtimeOptions, run.writer);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`[Chat] Provider runtime "${provider}" failed`, { sessionId, error: message });
@@ -349,6 +420,162 @@ async function handleChatSend(
     // settles, and the session-keyed completeRun would kill that new run.
     chatRunRegistry.completeRunIfCurrent(run, { exitCode: 1 });
   }
+}
+
+/**
+ * Соединение-рассылка для запусков, заведённых САМИМ сервером (очередь).
+ *
+ * У обычной отправки есть сокет того, кто её послал; у сообщения из очереди
+ * его может не быть вовсе — сайт закрыт. Поэтому события такого хода уходят
+ * всем открытым вкладкам сразу: кто смотрит на этот чат, видит работу вживую,
+ * остальные — плашку «работает» в списке. Как только вкладка подпишется на
+ * чат (`chat.subscribe`), поток переключится на неё обычным порядком.
+ */
+const broadcastConnection: RealtimeClientConnection = {
+  readyState: WS_OPEN_STATE,
+  send(data: string): void {
+    connectedClients.forEach((client) => {
+      if (client.readyState === WS_OPEN_STATE) {
+        client.send(data);
+      }
+    });
+  },
+};
+
+function broadcastJson(payload: unknown): void {
+  broadcastConnection.send(JSON.stringify(payload));
+}
+
+/**
+ * Отправляет сообщение, снятое с очереди: заводит запуск без участия браузера.
+ *
+ * Возвращает `false`, если запуск завести нельзя ПРЯМО СЕЙЧАС (чат успел
+ * заняться, исчерпан предел одновременных чатов) — вызывающий вернёт строку в
+ * начало очереди. `true` означает «строку больше не хранить»: либо ход
+ * запущен, либо отправлять её некуда (чат удалён, провайдер отключён) и
+ * держать её вечно бессмысленно.
+ */
+async function runQueuedChatMessage(
+  message: StoredQueuedChatMessage,
+  dependencies: ChatWebSocketDependencies,
+): Promise<boolean> {
+  const sessionId = message.sessionId;
+  const session = sessionsDb.getSessionById(sessionId);
+  if (!session) {
+    console.warn(`[Очередь чата] чат ${sessionId} не найден — сообщение ${message.id} отброшено`);
+    return true;
+  }
+
+  const provider = session.provider as LLMProvider;
+  if (!dependencies.runtime.hasRuntime(provider)) {
+    console.warn(`[Очередь чата] провайдер "${provider}" недоступен — сообщение ${message.id} отброшено`);
+    return true;
+  }
+
+  const userId = message.userId;
+  const runtimeContext = resolveWebUserRuntimeContext(userId);
+  const numericUserId = userId !== null ? Number(userId) : NaN;
+  if (
+    OPEN_REGISTRATION
+    && provider === 'claude'
+    && !runtimeContext.anthropicApiKey
+    && !isPlatformOwnerWebUser(numericUserId)
+  ) {
+    console.warn(`[Очередь чата] у пользователя ${String(userId)} нет ключа — сообщение ${message.id} отброшено`);
+    return true;
+  }
+
+  // Предел одновременных чатов: место освободится — строку заберёт следующий
+  // обход очередей, поэтому здесь именно «вернуть в очередь», а не «отбросить».
+  if (OPEN_REGISTRATION && userId !== null && chatRunRegistry.countRunningRunsForUser(userId) >= MAX_CONCURRENT_RUNS_PER_USER) {
+    return false;
+  }
+
+  const run = chatRunRegistry.startRun({
+    appSessionId: sessionId,
+    provider,
+    providerSessionId: session.provider_session_id,
+    connection: broadcastConnection,
+    userId,
+  });
+  if (!run) {
+    return false;
+  }
+
+  const clientOptions = (message.options ?? {}) as AnyRecord;
+  console.log(`[Очередь чата] отправляю сообщение ${message.id} (чат ${sessionId})`);
+
+  // Плашка «работает» во всех вкладках: ход начался не по нажатию человека,
+  // и узнать о нём странице больше неоткуда.
+  broadcastJson({
+    kind: 'chat_run_started',
+    sessionId,
+    provider,
+    timestamp: new Date().toISOString(),
+  });
+
+  // Само сообщение человека — в ленту: писал его человек, отправил сервер, и
+  // без этого в переписке ответ появлялся бы без вопроса. Строка уходит через
+  // запуск, поэтому она же попадает в досылку вкладке, открытой посреди хода.
+  const attachments = filterAttachmentsToUploadStore(
+    [
+      ...normalizeAttachmentDescriptors(clientOptions.attachments),
+      ...normalizeAttachmentDescriptors(clientOptions.images),
+      ...normalizeAttachmentDescriptors(clientOptions.files),
+    ],
+    undefined,
+    userId,
+  );
+  const uniqueAttachments = attachments.filter(
+    (descriptor, index, all) => all.findIndex((candidate) => candidate.path === descriptor.path) === index,
+  );
+  run.writer.send({
+    id: `queued_${message.id}`,
+    sessionId,
+    timestamp: new Date().toISOString(),
+    provider,
+    kind: 'text',
+    role: 'user',
+    content: message.content,
+    images: uniqueAttachments.filter(isImageAttachmentDescriptor),
+    files: uniqueAttachments.filter((descriptor) => !isImageAttachmentDescriptor(descriptor)),
+  } as NormalizedMessage);
+
+  // Ход ведём в фоне: обход очередей ждать его конца не должен — он длится
+  // минутами, а за ним стоят очереди других чатов.
+  void runProviderTurn({
+    run,
+    sessionId,
+    provider,
+    userId,
+    projectPath: session.project_path ?? null,
+    content: message.content,
+    clientOptions,
+    dependencies,
+  }).catch((error) => {
+    const text = error instanceof Error ? error.message : String(error);
+    console.error('[Очередь чата] ход из очереди завершился ошибкой', { sessionId, error: text });
+  });
+
+  return true;
+}
+
+/**
+ * Поднимает серверную очередь сообщений: кто её отправляет и когда.
+ *
+ * Вызывается один раз при создании websocket-сервера. С этого момента очередь
+ * живёт без браузера: конец любого хода — сигнал обойти очереди и отправить
+ * первое сообщение каждого освободившегося чата.
+ */
+export function initChatQueueDispatch(dependencies: ChatWebSocketDependencies): void {
+  setQueuedChatMessageRunner((message) => runQueuedChatMessage(message, dependencies));
+  onChatRunCompleted(() => {
+    dispatchChatQueues();
+  });
+  // Перезапуск сайта (выкатка, перезагрузка) не должен задерживать очередь:
+  // ход, за которым она стояла, к этому моменту уже оборван.
+  dispatchChatQueues();
+  startChatQueueHeartbeat();
 }
 
 /**
@@ -475,6 +702,9 @@ function handleChatSubscribe(
       lastSeq: run?.lastSeq ?? 0,
       runStartedAt: run?.startedAt ?? null,
       pendingPermissions,
+      // Очередь приходит вместе с состоянием чата: вкладка её только
+      // показывает, хранит и отправляет сервер.
+      queue: listChatQueue(sessionId),
       timestamp: new Date().toISOString(),
     });
 
@@ -488,6 +718,44 @@ function handleChatSubscribe(
       }
     }
   }
+}
+
+/**
+ * Правка очереди с любого устройства: убрать строку, переставить порядок,
+ * очистить. Очередь общая и лежит на сервере, поэтому изменение тут же
+ * рассылается всем вкладкам (chat-queue.service).
+ */
+function handleChatQueueEdit(ws: WebSocket, messageType: string, data: AnyRecord): void {
+  const sessionId = readRequiredSessionId(data);
+  if (!sessionId) {
+    sendProtocolError(ws, 'SESSION_ID_REQUIRED', `${messageType} requires a sessionId.`);
+    return;
+  }
+
+  if (messageType === 'chat.queue.remove') {
+    const id = typeof data.id === 'string' ? data.id.trim() : '';
+    if (!id) {
+      sendProtocolError(ws, 'QUEUE_ITEM_ID_REQUIRED', 'chat.queue.remove requires an id.', sessionId);
+      return;
+    }
+    removeChatQueueItem(sessionId, id);
+    return;
+  }
+
+  if (messageType === 'chat.queue.clear') {
+    clearChatQueue(sessionId);
+    return;
+  }
+
+  // chat.queue.reorder
+  const ids = Array.isArray(data.ids)
+    ? data.ids.filter((id): id is string => typeof id === 'string' && id.length > 0)
+    : [];
+  if (ids.length === 0) {
+    sendProtocolError(ws, 'QUEUE_ORDER_REQUIRED', 'chat.queue.reorder requires ids.', sessionId);
+    return;
+  }
+  reorderChatQueue(sessionId, ids);
 }
 
 /**
@@ -516,6 +784,13 @@ function handlePermissionResponse(data: AnyRecord, dependencies: ChatWebSocketDe
  * - `chat.abort`               { sessionId }
  * - `chat.subscribe`           { sessions: [{ sessionId, lastSeq? }] }
  * - `chat.permission-response` { requestId, allow, updatedInput?, message?, rememberEntry? }
+ * - `chat.queue.remove`        { sessionId, id }
+ * - `chat.queue.reorder`       { sessionId, ids }
+ * - `chat.queue.clear`         { sessionId }
+ *
+ * `chat.send` в занятый чат не отказ, а очередь: сообщение ложится в базу и
+ * уходит само по концу хода (chat-queue.service). Очередь чата приходит
+ * вкладке в ответе `chat_subscribed` и в рассылке `chat_queue`.
  *
  * Outbound protocol (server to client): every frame is `kind`-based — either
  * a provider `NormalizedMessage` (with `seq`) or a gateway event
@@ -565,6 +840,11 @@ export function handleChatConnection(
           return;
         case 'chat.permission-response':
           handlePermissionResponse(data, dependencies);
+          return;
+        case 'chat.queue.remove':
+        case 'chat.queue.reorder':
+        case 'chat.queue.clear':
+          handleChatQueueEdit(ws, messageType, data);
           return;
         default:
           sendProtocolError(ws, 'UNKNOWN_MESSAGE_TYPE', `Unknown message type "${messageType}".`);

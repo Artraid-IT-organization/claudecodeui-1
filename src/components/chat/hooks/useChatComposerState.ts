@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   ChangeEvent,
   ClipboardEvent,
@@ -14,14 +14,9 @@ import { useDropzone } from 'react-dropzone';
 import { authenticatedFetch } from '../../../utils/api';
 import type { MarkSessionProcessing, SessionActivityMap } from '../../../hooks/useSessionProtection';
 import { grantClaudeToolPermission } from '../utils/chatPermissions';
+import { useSessionMessageQueue } from './useSessionMessageQueue';
 import {
-  appendQueuedMessage,
-  claimQueuedMessage,
-  clearQueuedMessages,
-  readQueuedMessages,
   safeLocalStorage,
-  shiftQueuedMessage,
-  writeQueuedMessages,
   type QueuedSendOptions,
   adoptLegacyProjectDraft,
   clearDraftInput,
@@ -235,22 +230,6 @@ const newDraftId = (): string => {
   return `q_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 };
 
-const restoreQueuedDrafts = (sessionKey: string): QueuedDraft[] =>
-  readQueuedMessages(sessionKey).map((saved) => ({
-    id: saved.id || newDraftId(),
-    content: saved.content,
-    attachments: [],
-    uploadedAttachments: saved.attachments ?? saved.images,
-    options: saved.options,
-  }));
-
-const toStoredQueuedMessage = (draft: QueuedDraft) => ({
-  id: draft.id,
-  content: draft.content,
-  options: draft.options,
-  attachments: draft.uploadedAttachments,
-});
-
 const getNotificationSessionSummary = (
   selectedSession: ProjectSession | null,
   fallbackInput: string,
@@ -318,7 +297,6 @@ export function useChatComposerState({
   const handleSubmitRef = useRef<
     ((
       event: FormEvent<HTMLFormElement> | MouseEvent | TouchEvent | KeyboardEvent<HTMLTextAreaElement>,
-      queuedSubmission?: QueuedDraft,
     ) => Promise<void>) | null
   >(null);
   const inputValueRef = useRef(input);
@@ -340,17 +318,33 @@ export function useChatComposerState({
   const draftOwnerRef = useRef<string | null>(draftScope);
 
   // Очередь целиком, по порядку отправки. Первый элемент уйдёт следующим.
-  const [queuedDrafts, setQueuedDrafts] = useState<QueuedDraft[]>(() => {
-    if (typeof window === 'undefined' || !sessionKey) {
-      return [];
-    }
-    return restoreQueuedDrafts(sessionKey);
-  });
-  // Which session the in-memory queue belongs to. On a session switch
-  // there is one commit where `sessionKey` already points at the new session
-  // while the queue still holds the old session's drafts; the persistence
-  // effect must not write across that gap.
-  const queuedDraftSessionRef = useRef<string | null>(sessionKey);
+  /*
+   * Очередь берётся с СЕРВЕРА и там же живёт.
+   *
+   * Раньше она лежала в localStorage вкладки, и отправляла её сама страница —
+   * поэтому при закрытом сайте следующее сообщение не уходило (Егор 20.09.26).
+   * Теперь вкладка очередь только показывает и правит, а снимает и запускает
+   * её сервер по концу хода (server/.../chat-queue.service.ts).
+   */
+  const { queue: serverQueue, removeQueued, reorderQueued, clearQueued } = useSessionMessageQueue(sessionKey);
+  // Браузерные File-объекты сообщений, поставленных в очередь В ЭТОЙ вкладке.
+  // Нужны только для правки: вернуть сообщение в поле вместе с картинкой.
+  // На другом устройстве их нет — там правка опирается на уже загруженные
+  // вложения (`uploadedAttachments`), и снимок всё равно не теряется.
+  const queuedFilesRef = useRef<Map<string, File[]>>(new Map());
+  // Уже загруженные вложения сообщения, которое взяли из очереди обратно в
+  // поле ввода. File-объектов может не быть (очередь пришла с другого
+  // устройства) — тогда при отправке уходят эти описания, и снимок не теряется.
+  const carriedUploadedRef = useRef<unknown[]>([]);
+  const queuedDrafts = useMemo<QueuedDraft[]>(
+    () => serverQueue.map((item) => ({
+      id: item.id,
+      content: item.content,
+      attachments: queuedFilesRef.current.get(item.id) ?? [],
+      uploadedAttachments: Array.isArray(item.attachments) ? item.attachments : [],
+    })),
+    [serverQueue],
+  );
 
   const handleBuiltInCommand = useCallback(
     (result: CommandExecutionResult) => {
@@ -842,15 +836,14 @@ export function useChatComposerState({
   const handleSubmit = useCallback(
     async (
       event: FormEvent<HTMLFormElement> | MouseEvent | TouchEvent | KeyboardEvent<HTMLTextAreaElement>,
-      queuedSubmission?: QueuedDraft,
     ) => {
       event.preventDefault();
-      const currentInput = queuedSubmission?.content ?? inputValueRef.current;
+      const currentInput = inputValueRef.current;
       // Черновик какого чата отправляется: пока грузятся вложения, человек может
       // открыть другой чат, и стирать надо текст исходного, а не того, что на экране.
       const submitDraftScope = draftScopeRef.current;
-      const currentAttachments = queuedSubmission?.attachments ?? attachedFiles;
-      const previouslyUploadedAttachments = queuedSubmission?.uploadedAttachments ?? [];
+      const currentAttachments = attachedFiles;
+      const previouslyUploadedAttachments = carriedUploadedRef.current;
       if (
         (
           !currentInput.trim()
@@ -862,83 +855,54 @@ export function useChatComposerState({
         return;
       }
 
-      // A turn is already in flight: stash this message instead of sending it.
-      // Upload attached files now so the queued record contains durable image
-      // descriptors that can be sent even if another session is open later.
+      /*
+       * Ход ещё идёт — сообщение уходит на сервер и встаёт в очередь ТАМ.
+       *
+       * Раньше оно оставалось в localStorage вкладки, и отправляла его сама
+       * страница, заметив конец хода. Пока сайт закрыт, замечать некому, и
+       * сообщение ждало входа человека на сайт (Егор 20.09.26). Теперь сервер
+       * кладёт его в очередь сам и сам же отправляет по концу хода.
+       */
       if (isLoading) {
-        // A run can restart in the tiny gap between scheduling and flushing a
-        // queued submission. Put the same durable draft back without uploading
-        // its files again.
-        if (queuedSubmission) {
-          queuedDraftSessionRef.current = sessionKey;
-          // Возврат в НАЧАЛО очереди: это сообщение уже было первым, файлы у
-          // него загружены, и повторная загрузка ему не нужна.
-          setQueuedDrafts((prev) => (
-            prev.some((item) => item.id === queuedSubmission.id) ? prev : [queuedSubmission, ...prev]
-          ));
-          return;
-        }
-
-        const queuedOptions = buildSendOptions(currentInput);
         const queuedSessionKey = sessionKey;
-        let uploadedAttachments: unknown[] = [];
-        try {
-          uploadedAttachments = await uploadAttachmentFiles(currentAttachments);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : 'Unknown error';
-          console.error('Queued file upload failed:', error);
-          addMessage({
-            type: 'error',
-            content: `Failed to upload files: ${message}`,
-            timestamp: new Date(),
-          });
+        if (!queuedSessionKey) {
           return;
         }
 
-        const durableDraft: QueuedDraft = {
-          id: newDraftId(),
-          content: currentInput,
-          attachments: currentAttachments,
-          uploadedAttachments,
-          options: queuedOptions,
-        };
-        if (queuedSessionKey) {
-          // Write the claim ticket synchronously after upload; this closes the
-          // gap before React's persistence effect runs. Дописываем В КОНЕЦ:
-          // новое сообщение встаёт за уже стоящими, а не затирает их.
-          appendQueuedMessage(queuedSessionKey, toStoredQueuedMessage(durableDraft));
-        }
-
-        // The upload is asynchronous. If the user changed sessions while it
-        // was running, persist/send against the session where Queue was
-        // pressed rather than putting the draft into the newly opened chat.
-        if (queuedSessionKey && sessionKeyRef.current !== queuedSessionKey) {
-          if (
-            processingSessionsRef.current
-            && !processingSessionsRef.current.has(queuedSessionKey)
-          ) {
-            // Чат уже свободен — отправляем ПЕРВОЕ из очереди (а не то, что
-            // сейчас дописали): порядок важнее, чем кто нажал последним.
-            const head = shiftQueuedMessage(queuedSessionKey);
-            if (!head) {
-              return;
-            }
-            sendMessage({
-              type: 'chat.send',
-              sessionId: queuedSessionKey,
-              content: head.content,
-              options: {
-                ...(head.options ?? {}),
-                attachments: head.attachments ?? [],
-              },
+        // Вложения загружаем сейчас: в очереди должны лежать долговечные
+        // описания файлов, а не браузерные объекты этой вкладки.
+        let uploadedAttachments: unknown[] = previouslyUploadedAttachments;
+        if (uploadedAttachments.length === 0 && currentAttachments.length > 0) {
+          try {
+            uploadedAttachments = await uploadAttachmentFiles(currentAttachments);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : 'Unknown error';
+            console.error('Queued file upload failed:', error);
+            addMessage({
+              type: 'error',
+              content: `Failed to upload files: ${message}`,
+              timestamp: new Date(),
             });
-            onSessionProcessing?.(queuedSessionKey, { statusText: null, phase: 'starting', detail: null, canInterrupt: true });
+            return;
           }
-          return;
         }
 
-        queuedDraftSessionRef.current = queuedSessionKey;
-        setQueuedDrafts((prev) => [...prev, durableDraft]);
+        // Номер сообщения придумываем здесь: он же становится ключом строки в
+        // серверной очереди (и защитой от двойной постановки при досылке), и
+        // по нему вкладка узнаёт свои File-объекты при правке.
+        const queuedMessageId = newDraftId();
+        queuedFilesRef.current.set(queuedMessageId, currentAttachments);
+        sendMessage({
+          type: 'chat.send',
+          clientMessageId: queuedMessageId,
+          sessionId: queuedSessionKey,
+          content: currentInput,
+          options: {
+            ...buildSendOptions(currentInput),
+            attachments: uploadedAttachments,
+          },
+        });
+
         setInput('');
         inputValueRef.current = '';
         setAttachedFiles([]);
@@ -1108,11 +1072,12 @@ export function useChatComposerState({
         sessionId: targetSessionId,
         content: messageContent,
         options: {
-          ...(queuedSubmission?.options ?? buildSendOptions(messageContent)),
+          ...buildSendOptions(messageContent),
           attachments: uploadedAttachments,
         },
       });
 
+      carriedUploadedRef.current = [];
       clearDraftInput(submitDraftScope);
       // Поле очищается, только если человек всё ещё в том чате, откуда
       // отправил. Новый чат к этому моменту уже получил свой id — это тот же
@@ -1157,113 +1122,86 @@ export function useChatComposerState({
     handleSubmitRef.current = handleSubmit;
   }, [handleSubmit]);
 
-  // Once the in-flight turn ends, replay the queued draft through the normal
-  // submit path. The draft itself is passed directly so submission never
-  // depends on React committing restored attachment state first.
-  const wasLoadingRef = useRef(isLoading);
-  const flushSessionKeyRef = useRef(sessionKey);
-  useEffect(() => {
-    const wasLoading = wasLoadingRef.current;
-    wasLoadingRef.current = isLoading;
-
-    // A session switch changes which session `isLoading` describes, so this
-    // transition says nothing about the queued draft's own session. Never
-    // flush across it — the swap effect below replaces `queuedDraft` with the
-    // new session's saved draft right after this.
-    if (flushSessionKeyRef.current !== sessionKey) {
-      flushSessionKeyRef.current = sessionKey;
-      return;
-    }
-
-    if (isLoading || queuedDrafts.length === 0) {
-      return;
-    }
-    // Уходит ровно одно — первое. Остальные ждут: следующий слив произойдёт,
-    // когда закончится ход, который начнётся прямо сейчас.
-    const head = queuedDrafts[0];
-
-    // Turn just ended in this session: flush immediately. Otherwise this is a
-    // saved draft restored into an apparently idle session — hold it briefly
-    // so the `chat_subscribed` ack can flip `isLoading` if a run is actually
-    // still live (the cleanup below cancels the send in that case).
-    const delay = wasLoading ? 0 : 750;
-    const timer = setTimeout(() => {
-      // The saved key is the claim ticket shared with the app-level auto-send
-      // (which handles sessions that finish while not viewed). If it's gone,
-      // the message was already dispatched — don't send it twice.
-      // Талон общий с автоотправкой чатов, которые не открыты: кто снял
-      // сообщение с хранилища, тот и отправляет. Нет талона — уже отправлено.
-      const claimed = sessionKey ? claimQueuedMessage(sessionKey, head.id) : head;
-      setQueuedDrafts((prev) => prev.filter((item) => item.id !== head.id));
-      if (!claimed) {
-        return;
-      }
-      setInput(head.content);
-      inputValueRef.current = head.content;
-      setAttachedFiles(head.attachments);
-      handleSubmitRef.current?.(createFakeSubmitEvent(), head);
-    }, delay);
-    return () => clearTimeout(timer);
-  }, [isLoading, queuedDrafts, sessionKey, setInput]);
+  /*
+   * Слив очереди страницей убран.
+   *
+   * Кто отправляет следующее сообщение — теперь решает сервер по концу хода
+   * (server/modules/websocket/services/chat-queue.service.ts). Вкладке это
+   * знать не нужно, и именно её участие делало очередь зависимой от того,
+   * открыт ли сайт.
+   */
 
   // Взять сообщение из очереди обратно в поле ввода. Текст, уже набранный в
-  // поле, не выбрасывается: он встаёт на освободившееся место в очереди —
-  // иначе правка второго сообщения стирала бы третье, набранное рядом.
+  // поле, не выбрасывается: он тут же встаёт в очередь сам — иначе правка
+  // второго сообщения стирала бы третье, набранное рядом.
   const editQueuedDraft = useCallback((id: string) => {
     const target = queuedDrafts.find((item) => item.id === id);
     if (!target) {
       return;
     }
     const carried = inputValueRef.current;
-    setQueuedDrafts((prev) => {
-      const index = prev.findIndex((item) => item.id === id);
-      if (index === -1) {
-        return prev;
-      }
-      const next = [...prev];
-      if (carried.trim() || attachedFiles.length > 0) {
-        // Вместе с текстом на освободившееся место переезжают и файлы, уже
-        // прикреплённые к полю, — иначе прикреплённый снимок исчезал молча.
-        next[index] = {
-          id: newDraftId(),
+    const carriedFiles = attachedFiles;
+    const carriedUploaded = carriedUploadedRef.current;
+
+    removeQueued(id);
+    queuedFilesRef.current.delete(id);
+
+    if (carried.trim() || carriedFiles.length > 0 || carriedUploaded.length > 0) {
+      const carriedId = newDraftId();
+      queuedFilesRef.current.set(carriedId, carriedFiles);
+      void (async () => {
+        let uploaded: unknown[] = carriedUploaded;
+        if (uploaded.length === 0 && carriedFiles.length > 0) {
+          try {
+            uploaded = await uploadAttachmentFiles(carriedFiles);
+          } catch (error) {
+            console.error('Queued file upload failed:', error);
+            return;
+          }
+        }
+        sendMessage({
+          type: 'chat.send',
+          clientMessageId: carriedId,
+          sessionId: sessionKeyRef.current,
           content: carried,
-          attachments: attachedFiles,
-          uploadedAttachments: [],
-          options: buildSendOptions(carried),
-        };
-      } else {
-        next.splice(index, 1);
-      }
-      return next;
-    });
+          options: { ...buildSendOptions(carried), attachments: uploaded },
+        });
+      })();
+    }
+
+    // Вложения правимого сообщения не теряются: свои File-объекты вернутся в
+    // поле, чужие (поставленные с другого устройства) уйдут теми же
+    // загруженными описаниями при следующей отправке.
+    carriedUploadedRef.current = target.uploadedAttachments ?? [];
     setInput(target.content);
     inputValueRef.current = target.content;
     setAttachedFiles(target.attachments);
     textareaRef.current?.focus();
-  }, [attachedFiles, buildSendOptions, queuedDrafts, setInput]);
+  }, [attachedFiles, buildSendOptions, queuedDrafts, removeQueued, sendMessage, setInput]);
 
   const deleteQueuedDraft = useCallback((id: string) => {
-    setQueuedDrafts((prev) => prev.filter((item) => item.id !== id));
-  }, []);
+    queuedFilesRef.current.delete(id);
+    removeQueued(id);
+  }, [removeQueued]);
 
   // Перенос на одну позицию. Стрелки, а не перетаскивание: очередь живёт на
   // телефоне, внутри прокручиваемой ленты, и палец в такой драг не попадает.
+  // Порядок хранит сервер — отправляем ему новый список целиком.
   const moveQueuedDraft = useCallback((id: string, direction: -1 | 1) => {
-    setQueuedDrafts((prev) => {
-      const index = prev.findIndex((item) => item.id === id);
-      const target = index + direction;
-      if (index === -1 || target < 0 || target >= prev.length) {
-        return prev;
-      }
-      const next = [...prev];
-      [next[index], next[target]] = [next[target], next[index]];
-      return next;
-    });
-  }, []);
+    const ids = queuedDrafts.map((item) => item.id);
+    const index = ids.indexOf(id);
+    const target = index + direction;
+    if (index === -1 || target < 0 || target >= ids.length) {
+      return;
+    }
+    [ids[index], ids[target]] = [ids[target], ids[index]];
+    reorderQueued(ids);
+  }, [queuedDrafts, reorderQueued]);
 
   const clearQueuedDrafts = useCallback(() => {
-    setQueuedDrafts([]);
-  }, []);
+    queuedFilesRef.current.clear();
+    clearQueued();
+  }, [clearQueued]);
 
   // A voice transcript either fills the input (to edit before sending) or, when the
   // user tapped "stop and send", is submitted straight away. Mirror the value into
@@ -1329,33 +1267,6 @@ export function useChatComposerState({
     setInput(saved);
   }, [draftScope, selectedProjectId]);
 
-  // Persist the queued draft under its session's key. Must be defined BEFORE
-  // the swap effect below: on a session switch there is one commit where
-  // `sessionKey` already points at the new session while `queuedDraft` (and
-  // the owner ref) still describe the old one — the ref mismatch makes this
-  // effect skip that commit instead of writing/clearing across sessions.
-  useEffect(() => {
-    if (!sessionKey || queuedDraftSessionRef.current !== sessionKey) {
-      return;
-    }
-    if (queuedDrafts.length > 0) {
-      writeQueuedMessages(sessionKey, queuedDrafts.map(toStoredQueuedMessage));
-    } else {
-      clearQueuedMessages(sessionKey);
-    }
-  }, [queuedDrafts, sessionKey]);
-
-  // Switching sessions swaps in that session's queued draft. Browser File
-  // objects are local to the mounted composer, while their already-uploaded
-  // descriptors restore from storage and remain sendable.
-  useEffect(() => {
-    queuedDraftSessionRef.current = sessionKey;
-    if (!sessionKey) {
-      setQueuedDrafts([]);
-      return;
-    }
-    setQueuedDrafts(restoreQueuedDrafts(sessionKey));
-  }, [sessionKey]);
 
   useEffect(() => {
     if (!textareaRef.current) {

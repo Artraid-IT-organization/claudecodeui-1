@@ -281,6 +281,19 @@ export function useChatRealtimeHandlers({
           return;
         }
 
+        case 'chat_run_started': {
+          // Ход, заведённый сервером из очереди: нажатия человека не было, и
+          // узнать о начале работы странице больше неоткуда.
+          if (!sid) return;
+          onSessionProcessing?.(sid);
+          return;
+        }
+
+        // Очередь сообщений чата ведёт useSessionMessageQueue — в ленту это
+        // событие не попадает.
+        case 'chat_queue':
+          return;
+
         // Sidebar/global events — owned by useProjectsState.
         case 'session_upserted':
         case 'loading_progress':

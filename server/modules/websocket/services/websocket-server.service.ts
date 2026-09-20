@@ -2,7 +2,7 @@ import type { Server as HttpServer } from 'node:http';
 
 import { WebSocket, WebSocketServer, type VerifyClientCallbackSync } from 'ws';
 
-import { handleChatConnection } from '@/modules/websocket/services/chat-websocket.service.js';
+import { handleChatConnection, initChatQueueDispatch } from '@/modules/websocket/services/chat-websocket.service.js';
 import { verifyWebSocketClient } from '@/modules/websocket/services/websocket-auth.service.js';
 import { handlePluginWsProxy } from '@/modules/websocket/services/plugin-websocket-proxy.service.js';
 import { handleShellConnection } from '@/modules/websocket/services/shell-websocket.service.js';
@@ -84,6 +84,10 @@ export function createWebSocketServer(
   server: HttpServer,
   dependencies: WebSocketServerDependencies
 ): WebSocketServer {
+  // Очередь сообщений чата отправляется сервером, без участия браузера:
+  // подписываемся на конец хода до первого подключения (chat-queue.service).
+  initChatQueueDispatch(dependencies.chat);
+
   const wss = new WebSocketServer({
     server,
     verifyClient: ((
