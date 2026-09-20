@@ -272,7 +272,11 @@ export const api = {
   // `serverScope` — блок верхней панели («Проекты» / «2-й сервер»). Отбор
   // делает сервер: страница берётся по 40 чатов, и отбор после выдачи
   // оставлял бы второй блок почти пустым.
-  recentConversations: ({ limit = 40, offset = 0, serverScope } = {}) => {
+  /**
+   * @param {{ limit?: number, offset?: number, serverScope?: 'main' | 'second' }} [options]
+   */
+  recentConversations: (options = {}) => {
+    const { limit = 40, offset = 0, serverScope } = options;
     const params = new URLSearchParams({
       limit: String(limit),
       offset: String(offset),
