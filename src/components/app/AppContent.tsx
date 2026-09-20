@@ -14,7 +14,6 @@ import { useSessionProtection } from '../../hooks/useSessionProtection';
 import { useProjectsState } from '../../hooks/useProjectsState';
 import { useOpenSessionTabs } from '../../hooks/useOpenSessionTabs';
 import { useTerminalTabs } from '../../hooks/useTerminalTabs';
-import { useQueuedMessageAutoSend } from '../../hooks/useQueuedMessageAutoSend';
 import { useBrowserUseEnabled } from '../../hooks/useBrowserUseEnabled';
 import { ensureLatestBuild, watchServiceWorkerUpdates } from '../../lib/appUpdate';
 import { api, authenticatedFetch } from '../../utils/api';
@@ -211,16 +210,14 @@ function AppContentInner() {
     [handleSessionDelete, removeTabsForSessions],
   );
 
-  // Queued messages for sessions that finish while another session (or none)
-  // is being viewed are sent from here; the viewed session's composer handles
-  // its own queue.
-  useQueuedMessageAutoSend({
-    processingSessions,
-    activeSessionId,
-    ws,
-    sendMessage,
-    markSessionProcessing,
-  });
+  /*
+   * Отправка очереди со страницы убрана.
+   *
+   * Очередь сообщений теперь хранит и отправляет сервер по концу хода
+   * (server/modules/websocket/services/chat-queue.service.ts) — она работает и
+   * при закрытом сайте, и для чатов, которые сейчас не открыты. Этот хук
+   * отправлял её из браузера, и без открытой вкладки она стояла.
+   */
 
   const refreshRunningSessions = useCallback(async () => {
     try {

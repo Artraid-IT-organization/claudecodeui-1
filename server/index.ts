@@ -24,7 +24,7 @@ import {
     stopSessionActivitySync,
 } from '@/modules/providers/index.js';
 import { userDb, initializeDatabase, sessionsDb  } from '@/modules/database/index.js';
-import { createWebSocketServer } from '@/modules/websocket/index.js';
+import { createWebSocketServer, dispatchChatQueues } from '@/modules/websocket/index.js';
 
 import { getConnectableHost } from '../shared/networkHosts.js';
 
@@ -552,6 +552,9 @@ async function startServer() {
                     connectedClients.forEach((client) => {
                         if (client.readyState === WS_OPEN_STATE) client.send(idle);
                     });
+                    // Агент, переживший перезапуск сайта, закончил — значит и
+                    // очередь этого чата может идти дальше.
+                    dispatchChatQueues();
                 },
             });
 

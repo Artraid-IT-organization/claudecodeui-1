@@ -205,6 +205,10 @@ export type MessageKind =
  */
 export type GatewayEventKind =
   | 'chat_subscribed'
+  // Очередь сообщений чата: её вид (`chat_queue`) и начало хода, заведённого
+  // сервером из очереди (`chat_run_started`) — см. chat-queue.service.
+  | 'chat_queue'
+  | 'chat_run_started'
   | 'session_upserted'
   | 'loading_progress'
   | 'protocol_error';
