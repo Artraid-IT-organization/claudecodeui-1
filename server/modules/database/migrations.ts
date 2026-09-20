@@ -502,6 +502,33 @@ const addSessionGroupColumns = (db: Database): void => {
 };
 
 /**
+ * Добавляет `server_scope` папкам и чатам — признак «какому серверу
+ * принадлежит дело» для второго блока верхней панели («2-й сервер»).
+ *
+ * У папки значение обязательное со значением по умолчанию 'main': все уже
+ * заведённые папки остаются на этом сервере. У чата столбец необязательный:
+ * NULL значит «как у папки», а заполненное значение переносит один чат в
+ * другой блок, не трогая его файл на диске.
+ */
+const addServerScopeColumns = (db: Database): void => {
+  if (tableExists(db, 'projects')) {
+    const projectColumnNames = getTableInfo(db, 'projects').map((column) => column.name);
+    addColumnToTableIfNotExists(
+      db,
+      'projects',
+      projectColumnNames,
+      'server_scope',
+      "TEXT NOT NULL DEFAULT 'main'"
+    );
+  }
+
+  if (tableExists(db, 'sessions')) {
+    const sessionColumnNames = getTableInfo(db, 'sessions').map((column) => column.name);
+    addColumnToTableIfNotExists(db, 'sessions', sessionColumnNames, 'server_scope', 'TEXT');
+  }
+};
+
+/**
  * Adds `account_dir` (which Claude account a transcript belongs to) and
  * `origin` (terminal / web / auto — see server/shared/session-scope.ts).
  *
@@ -620,6 +647,7 @@ export const runMigrations = (db: Database) => {
     addSessionTitleSourceColumn(db);
     addSessionGroupColumns(db);
     addSessionAccountAndOriginColumns(db);
+    addServerScopeColumns(db);
     ensureProjectsForSessionPaths(db);
 
     db.exec('CREATE INDEX IF NOT EXISTS idx_session_ids_lookup ON sessions(session_id)');
@@ -629,6 +657,7 @@ export const runMigrations = (db: Database) => {
     db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_account_scope ON sessions(project_path, account_dir, isArchived)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_projects_is_starred ON projects(isStarred)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_projects_is_archived ON projects(isArchived)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_server_scope ON sessions(server_scope)');
 
     db.exec('DROP INDEX IF EXISTS idx_session_names_lookup');
     db.exec('DROP INDEX IF EXISTS idx_sessions_workspace_path');

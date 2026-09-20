@@ -22,6 +22,7 @@ import {
   readProjectSortOrder,
   sortProjects,
 } from '../utils/utils';
+import { useServerScope } from './useServerScope';
 
 type SnippetHighlight = {
   start: number;
@@ -134,6 +135,8 @@ export function useSidebarController({
   sidebarVisible,
 }: UseSidebarControllerArgs) {
   const paletteOps = usePaletteOps();
+  // Открытый блок верхней панели: по нему делится и архив.
+  const [serverScope] = useServerScope();
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set());
   const [editingProject, setEditingProject] = useState<string | null>(null);
   const [showNewProject, setShowNewProject] = useState(false);
@@ -324,7 +327,8 @@ export function useSidebarController({
     setRecentConversationsError(false);
 
     try {
-      const response = await api.recentConversations({ limit: 40, offset });
+      // Лента отбирается сервером по открытому блоку верхней панели.
+      const response = await api.recentConversations({ limit: 40, offset, serverScope });
       if (!response.ok) {
         throw new Error(`Failed to load recent conversations: ${response.status}`);
       }
@@ -363,7 +367,7 @@ export function useSidebarController({
         setIsLoadingMoreRecentConversations(false);
       }
     }
-  }, []);
+  }, [serverScope]);
 
   const reloadRecentConversations = useCallback(() => {
     void fetchRecentConversationsPage(0, false);
@@ -643,13 +647,26 @@ export function useSidebarController({
     [debouncedSearchQuery, sortedProjects],
   );
 
+  // Архив тоже принадлежит блоку верхней панели: иначе убранные в архив дела
+  // второго сервера всплывали бы среди архива обычных «Проектов» — ровно то
+  // перемешивание, ради которого блоки и разделяли.
+  const scopedArchivedSessions = useMemo(
+    () => archivedSessions.filter((session) => (session.serverScope ?? 'main') === serverScope),
+    [archivedSessions, serverScope],
+  );
+
+  const scopedArchivedProjects = useMemo(
+    () => archivedProjects.filter((project) => (project.serverScope ?? 'main') === serverScope),
+    [archivedProjects, serverScope],
+  );
+
   const filteredArchivedSessions = useMemo(() => {
     const normalizedSearch = debouncedSearchQuery.trim().toLowerCase();
     if (!normalizedSearch) {
-      return archivedSessions;
+      return scopedArchivedSessions;
     }
 
-    return archivedSessions.filter((session) => {
+    return scopedArchivedSessions.filter((session) => {
       const searchableFields = [
         session.sessionTitle,
         session.projectDisplayName,
@@ -659,15 +676,15 @@ export function useSidebarController({
 
       return searchableFields.some((value) => value.toLowerCase().includes(normalizedSearch));
     });
-  }, [archivedSessions, debouncedSearchQuery]);
+  }, [scopedArchivedSessions, debouncedSearchQuery]);
 
   const filteredArchivedProjects = useMemo(() => {
     const normalizedSearch = debouncedSearchQuery.trim().toLowerCase();
     if (!normalizedSearch) {
-      return archivedProjects;
+      return scopedArchivedProjects;
     }
 
-    return archivedProjects.filter((project) => {
+    return scopedArchivedProjects.filter((project) => {
       const projectMatches = [
         project.displayName,
         project.fullPath || '',
@@ -691,7 +708,7 @@ export function useSidebarController({
         ].some((value) => value.toLowerCase().includes(normalizedSearch));
       });
     });
-  }, [archivedProjects, debouncedSearchQuery]);
+  }, [scopedArchivedProjects, debouncedSearchQuery]);
 
   const startEditing = useCallback((project: Project) => {
     // `editingProject` is keyed by projectId so it stays stable across
@@ -973,7 +990,7 @@ export function useSidebarController({
     filteredProjects,
     archivedProjects: filteredArchivedProjects,
     archivedSessions: filteredArchivedSessions,
-    archivedSessionsCount: archivedProjects.length + archivedSessions.length,
+    archivedSessionsCount: scopedArchivedProjects.length + scopedArchivedSessions.length,
     isArchivedSessionsLoading,
     recentConversations,
     recentConversationsTotal,

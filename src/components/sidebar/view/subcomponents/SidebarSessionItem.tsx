@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, Copy, Edit2, Loader2, MoreHorizontal, Trash2, X } from 'lucide-react';
+import { Check, Copy, Edit2, Loader2, MoreHorizontal, Server, Trash2, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
 import { ActionMenu, Badge, Dialog, DialogContent, DialogTitle, Tooltip, buttonVariants } from '../../../../shared/view/ui';
 import { cn } from '../../../../lib/utils';
-import type { Project, ProjectSession, LLMProvider } from '../../../../types/app';
+import type { Project, ProjectSession, LLMProvider, ServerScope } from '../../../../types/app';
 import { api } from '../../../../utils/api';
 import { copyTextToClipboard } from '../../../../utils/clipboard';
+import { usePaletteOps } from '../../../../contexts/PaletteOpsContext';
+import { effectiveScope, useSecondServerLabel } from '../../hooks/useServerScope';
 import type { SessionWithProvider } from '../../types/types';
 import { createSessionViewModel, formatCompactAge } from '../../utils/utils';
 import LLMProviderLogo from '../../../llm-provider-logo/LLMProviderLogo';
@@ -61,6 +63,9 @@ export default function SidebarSessionItem({
   onDeleteSession,
   t,
 }: SidebarSessionItemProps) {
+  const paletteOps = usePaletteOps();
+  // Пункт «перенести» есть только когда второй блок панели вообще заведён.
+  const secondServerLabel = useSecondServerLabel();
   const sessionView = createSessionViewModel(session, currentTime, t);
   const isSelected = selectedSession?.id === session.id;
   const isEditing = editingSession === session.id;
@@ -90,8 +95,35 @@ export default function SidebarSessionItem({
     };
 
     document.addEventListener('mousedown', handlePointerDown);
-    return () => document.removeEventListener('mousedown', handlePointerDown);
+
+  return () => document.removeEventListener('mousedown', handlePointerDown);
   }, [isEditing, isMobileOptionsOpen, onCancelEditingSession]);
+
+  // Перенос чата между блоками верхней панели. Файл переписки не двигается:
+  // меняется признак в базе, поэтому чат можно продолжить как обычно и
+  // вернуть обратно тем же пунктом меню.
+  const currentScope = effectiveScope(
+    session.serverScope as ServerScope | null | undefined,
+    (project.serverScope as ServerScope | undefined) ?? 'main',
+  );
+  const moveToScope: ServerScope = currentScope === 'second' ? 'main' : 'second';
+  const moveLabel = currentScope === 'second'
+    ? t('sessions.moveToMainServer', { defaultValue: 'Вернуть в «Проекты»' })
+    : t('sessions.moveToSecondServer', {
+      label: secondServerLabel ?? '',
+      defaultValue: `Перенести в «${secondServerLabel ?? ''}»`,
+    });
+  const handleMoveServerScope = async () => {
+    try {
+      // null — «как у папки»: если чат и так лежит в папке нужного блока,
+      // лишний признак только мешал бы переносу самой папки.
+      const projectScope = (project.serverScope as ServerScope | undefined) ?? 'main';
+      await api.setSessionServerScope(session.id, moveToScope === projectScope ? null : moveToScope);
+      await paletteOps.refreshProjects();
+    } catch (error) {
+      console.error('[Sidebar] Не удалось перенести чат в другой блок:', error);
+    }
+  };
 
   // Sessions are owned by a project identified by `projectId` (DB primary key)
   // after the projectName → projectId migration.
@@ -563,6 +595,13 @@ export default function SidebarSessionItem({
                     closeOnSelect: false,
                     onSelect: handleCopyAction,
                   },
+                  ...(secondServerLabel ? [{
+                    key: 'server-scope',
+                    label: moveLabel,
+                    icon: Server,
+                    showDividerBefore: true,
+                    onSelect: () => { void handleMoveServerScope(); },
+                  }] : []),
                   ...(!isProcessing ? [{
                     key: 'delete',
                     label: 'Archive or delete session',

@@ -104,7 +104,10 @@ CREATE TABLE IF NOT EXISTS projects (
     project_path TEXT NOT NULL UNIQUE,
     custom_project_name TEXT DEFAULT NULL,
     isStarred BOOLEAN DEFAULT 0,
-    isArchived BOOLEAN DEFAULT 0
+    isArchived BOOLEAN DEFAULT 0,
+    -- Какому серверу принадлежит папка: 'main' (этот) или 'second' (второй
+    -- блок верхней панели). Значение по умолчанию для чатов внутри папки.
+    server_scope TEXT NOT NULL DEFAULT 'main'
 );
 `;
 
@@ -139,6 +142,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     -- their own lifecycle. NULL group_id means "ungrouped".
     group_id TEXT,
     group_label TEXT,
+    -- Переопределение сервера у одного чата: NULL — как у папки, иначе
+    -- 'main'/'second'. Так чат переносится во второй блок панели, не
+    -- переезжая файлом в другую папку.
+    server_scope TEXT,
     isArchived BOOLEAN DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,

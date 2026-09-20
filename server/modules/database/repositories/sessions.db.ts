@@ -2,7 +2,7 @@ import { getConnection } from '@/modules/database/connection.js';
 import { appConfigDb } from '@/modules/database/repositories/app-config.js';
 import { getActiveAccountDir, type SessionOrigin } from '@/shared/session-scope.js';
 import { projectsDb } from '@/modules/database/repositories/projects.db.js';
-import type { SessionTitleSource } from '@/shared/types.js';
+import type { ServerScope, SessionTitleSource } from '@/shared/types.js';
 import { normalizeProjectPath } from '@/shared/utils.js';
 
 const TITLE_SOURCE_RANK: Record<SessionTitleSource, number> = {
@@ -26,6 +26,11 @@ type SessionRow = {
   /** Topic group this session was placed in (manual or auto); NULL = ungrouped. */
   group_id: string | null;
   group_label: string | null;
+  /**
+   * Переопределение сервера у одного чата: NULL — как у папки ('main' по
+   * умолчанию), 'second' — чат живёт во втором блоке верхней панели.
+   */
+  server_scope: ServerScope | null;
   isArchived: number;
   created_at: string;
   updated_at: string;
@@ -37,7 +42,7 @@ type RecentSessionsPage = {
 };
 
 const SESSION_ROW_COLUMNS =
-  'session_id, provider, provider_session_id, project_path, jsonl_path, custom_name, title_source, model, effort, group_id, group_label, isArchived, created_at, updated_at';
+  'session_id, provider, provider_session_id, project_path, jsonl_path, custom_name, title_source, model, effort, group_id, group_label, server_scope, isArchived, created_at, updated_at';
 
 /**
  * Decides whether a freshly-derived title candidate should replace the
@@ -429,6 +434,19 @@ export const sessionsDb = {
    * Assigns a topic group (manual or auto) to one session. Passing
    * `groupId: null` clears the session back to ungrouped.
    */
+  /**
+   * Переносит один чат в блок верхней панели ('main' / 'second') или
+   * возвращает его к значению папки (null).
+   */
+  setSessionServerScope(sessionId: string, serverScope: ServerScope | null): void {
+    const db = getConnection();
+    db.prepare(
+      `UPDATE sessions
+       SET server_scope = ?
+       WHERE session_id = ?`
+    ).run(serverScope, sessionId);
+  },
+
   setSessionGroup(sessionId: string, groupId: string | null, groupLabel: string | null): void {
     const db = getConnection();
     db.prepare(
@@ -578,14 +596,22 @@ export const sessionsDb = {
    * and correctly ordered across projects instead of flattening only the
    * per-project slices already loaded by the client.
    */
-  getRecentSessionsPage(limit: number, offset: number): RecentSessionsPage {
+  getRecentSessionsPage(limit: number, offset: number, serverScope?: ServerScope): RecentSessionsPage {
     const db = getConnection();
+    // Лента отдаётся по одному блоку верхней панели за раз. Отбирать на
+    // клиенте нельзя: страница берётся по 40 чатов, и при отборе после
+    // выдачи страница второго сервера почти всегда оказывалась бы пустой,
+    // а «показать ещё» не находило бы конца.
+    const scopeClause = serverScope
+      ? ` AND COALESCE(sessions.server_scope, projects.server_scope, 'main') = ?`
+      : '';
     const visibilityClause = `
       sessions.isArchived = 0
       AND (projects.isArchived IS NULL OR projects.isArchived = 0)
       AND (sessions.account_dir IS NULL OR sessions.account_dir = ?)
-    `;
+    ` + scopeClause;
     const accountDir = getActiveAccountDir();
+    const scopeParams = serverScope ? [serverScope] : [];
     const rows = db
       .prepare(
         `SELECT sessions.*
@@ -596,7 +622,7 @@ export const sessionsDb = {
                   sessions.session_id DESC
          LIMIT ? OFFSET ?`
       )
-      .all(accountDir, limit, offset) as SessionRow[];
+      .all(accountDir, ...scopeParams, limit, offset) as SessionRow[];
     const countRow = db
       .prepare(
         `SELECT COUNT(*) AS count
@@ -604,7 +630,7 @@ export const sessionsDb = {
          LEFT JOIN projects ON projects.project_path = sessions.project_path
          WHERE ${visibilityClause}`
       )
-      .get(accountDir) as { count: number } | undefined;
+      .get(accountDir, ...scopeParams) as { count: number } | undefined;
 
     return {
       sessions: normalizeSessionRows(rows),

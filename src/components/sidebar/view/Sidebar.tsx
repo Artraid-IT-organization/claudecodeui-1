@@ -7,10 +7,11 @@ import { useUiPreferences } from '../../../hooks/useUiPreferences';
 import { useAuth } from '../../auth/context/AuthContext';
 import { authenticatedFetch } from '../../../utils/api';
 import { useSidebarController } from '../hooks/useSidebarController';
+import { effectiveScope, setSecondServerLabel, useSecondServerLabel, useServerScope } from '../hooks/useServerScope';
 import { useTaskMaster } from '../../../contexts/TaskMasterContext';
 import { usePaletteOps } from '../../../contexts/PaletteOpsContext';
 import { useTasksSettings } from '../../../contexts/TasksSettingsContext';
-import type { Project, LLMProvider } from '../../../types/app';
+import type { Project, LLMProvider, ServerScope } from '../../../types/app';
 import type { MCPServerStatus, SidebarProps } from '../types/types';
 
 import SidebarCollapsed from './subcomponents/SidebarCollapsed';
@@ -60,6 +61,7 @@ function Sidebar({
     accountLabel,
     switchAccountUrl,
     accountEmail: singleTenantAccountEmail,
+    secondServerLabel: healthSecondServerLabel,
   } = useVersionCheck();
   // Multi-tenant (OPEN_REGISTRATION) equivalent of the accountEmail above:
   // useVersionCheck reads it from the unauthenticated /health endpoint,
@@ -78,16 +80,69 @@ function Sidebar({
     }
     authenticatedFetch('/api/user/owner-account-info')
       .then((response) => (response.ok ? response.json() : null))
-      .then((data: { email?: string | null } | null) => {
+      .then((data: { email?: string | null; secondServerLabel?: string | null } | null) => {
         if (data?.email) {
           setOwnerAccountEmail(data.email);
         }
+        setSecondServerLabel(typeof data?.secondServerLabel === 'string' ? data.secondServerLabel : null);
       })
       .catch(() => {
         // Silently leave the badge without an email - purely cosmetic.
       });
   }, [openRegistration]);
   const accountEmail = openRegistration ? ownerAccountEmail : singleTenantAccountEmail;
+  // Название второго блока верхней панели. На общей площадке его отдаёт
+  // опознанный запрос владельца (гостю — null, чтобы у него не появлялся
+  // чужой блок), на одиночной копии — /health.
+  const secondServerLabel = useSecondServerLabel();
+  // Только одиночная копия берёт название из /health. На общей площадке его
+  // приносит опознанный запрос владельца ниже, и затирать значение здесь
+  // нельзя: этот расчёт успевал сработать ПОСЛЕ ответа того запроса и гасил
+  // блок до перезагрузки страницы — кнопки то было, то не было.
+  useEffect(() => {
+    if (openRegistration) {
+      return;
+    }
+    setSecondServerLabel(healthSecondServerLabel);
+  }, [openRegistration, healthSecondServerLabel]);
+  const [storedServerScope] = useServerScope();
+  const serverScope: ServerScope = secondServerLabel ? storedServerScope : 'main';
+
+  // Панель показывает дела одного блока за раз. Папка попадает в блок, если
+  // сама к нему приписана ИЛИ если в ней есть чат, перенесённый в этот блок
+  // поимённо: перенос чата — признак в базе, файл переписки остаётся в своей
+  // папке, поэтому чат виден там же, где и лежит, но в другом блоке.
+  const scopedProjects = useMemo(() => {
+    if (!secondServerLabel) {
+      return projects;
+    }
+
+    return projects.reduce<Project[]>((kept, project) => {
+      const projectScope: ServerScope = project.serverScope ?? 'main';
+      const allSessions = project.sessions ?? [];
+      const sessions = allSessions.filter(
+        (session) => effectiveScope(session.serverScope as ServerScope | null | undefined, projectScope) === serverScope,
+      );
+
+      if (projectScope !== serverScope && sessions.length === 0) {
+        return kept;
+      }
+
+      kept.push(
+        sessions.length === allSessions.length
+          ? project
+          : {
+            ...project,
+            sessions,
+            sessionMeta: {
+              hasMore: project.sessionMeta?.hasMore ?? false,
+              total: sessions.length,
+            },
+          },
+      );
+      return kept;
+    }, []);
+  }, [projects, serverScope, secondServerLabel]);
   const { preferences, setPreference } = useUiPreferences();
   const { sidebarVisible } = preferences;
   const { setCurrentProject, mcpServerStatus } = useTaskMaster() as TaskMasterSidebarContext;
@@ -160,7 +215,7 @@ function Sidebar({
     setSessionDeleteConfirmation,
     setShowVersionModal,
   } = useSidebarController({
-    projects,
+    projects: scopedProjects,
     selectedProject,
     selectedSession,
     isLoading,
@@ -202,7 +257,7 @@ function Sidebar({
   };
 
   const projectListProps: SidebarProjectListProps = {
-    projects,
+    projects: scopedProjects,
     filteredProjects,
     selectedProject,
     selectedSession,
@@ -292,7 +347,7 @@ function Sidebar({
             isPWA={isPWA}
             isMobile={isMobile}
             isLoading={isLoading}
-            projects={projects}
+            projects={scopedProjects}
             selectedProject={selectedProject}
             selectedSession={selectedSession}
             activeTab={activeTab}

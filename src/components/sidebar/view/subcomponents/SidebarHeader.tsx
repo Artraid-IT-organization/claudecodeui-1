@@ -1,5 +1,6 @@
-import { Archive, Clock, Folder, FolderPlus, Plus, RefreshCw, Search, X, PanelLeftClose } from 'lucide-react';
+import { Archive, Clock, Folder, FolderPlus, Plus, RefreshCw, Search, Server, X, PanelLeftClose } from 'lucide-react';
 import { useSessionListView } from '../../hooks/useSessionListView';
+import { useSecondServerLabel, useServerScope } from '../../hooks/useServerScope';
 import type { TFunction } from 'i18next';
 import type { ReactNode } from 'react';
 
@@ -8,7 +9,7 @@ import { CLOUDCLI_WORDMARK_FONT_FAMILY } from '../../../../shared/constants';
 import { IS_PLATFORM } from '../../../../shared/utils';
 import { cn } from '../../../../lib/utils';
 import type { SessionActivityMap } from '../../../../hooks/useSessionProtection';
-import type { Project, ProjectSession } from '../../../../types/app';
+import type { Project, ProjectSession, ServerScope } from '../../../../types/app';
 import type { SessionWithProvider, SidebarSearchMode } from '../../types/types';
 
 import SidebarPulseTrigger from './SidebarPulseTrigger';
@@ -88,6 +89,10 @@ export default function SidebarHeader({
   onPulseSessionSelect,
   t,
 }: SidebarHeaderProps) {
+  // Название второго блока и выбранный блок — из общего хранилища панели:
+  // их спрашивают и эта строка, и карточки чатов, и список папок.
+  const secondServerLabel = useSecondServerLabel();
+  const [serverScope, onServerScopeChange] = useServerScope();
   // «Последние чаты»: нажата — все чаты по дням, отжата — по группам.
   const [listView, setListView] = useSessionListView();
   const recentToggle = (
@@ -106,7 +111,8 @@ export default function SidebarHeader({
         aria-label="Последние чаты"
         title={listView === 'recent' ? 'Показать по группам' : 'Последние чаты'}
         className={cn(
-          "flex h-7 items-center justify-center rounded-md px-2.5 text-xs font-normal transition-all",
+          "flex h-7 items-center justify-center rounded-md text-xs font-normal transition-all",
+          secondServerLabel ? "px-1.5" : "px-2.5",
           searchMode !== 'archived' && listView === 'recent'
             ? "bg-background shadow-sm text-foreground"
             : "text-muted-foreground hover:text-foreground"
@@ -116,6 +122,50 @@ export default function SidebarHeader({
       </button>
     </Tooltip>
   );
+  // Два блока в одной строке: слева дела этого сервера, справа — второго.
+  // Егор 20.09.26 обвёл эту строку на снимке: «разделить её на 2 части».
+  // Нажатие на блок переключает и список папок, и чаты, и то, где заведётся
+  // новый чат. Оба блока рисуются одной функцией, потому что строка есть и в
+  // настольной шапке, и в телефонной — раньше такие пары расходились.
+  // Когда блока два, подписи делят между собой ту же ширину, что раньше
+  // занимала одна: значок внутри кнопки убирается, кегль на пункт меньше, а
+  // кнопки-значки справа поджимаются. Иначе обе подписи обрезаются до
+  // «Про…» и «2-й…» — на панели в 288 точек места на два слова с картинками
+  // просто нет. Без второго блока всё выглядит ровно как раньше.
+  const renderScopeButton = (scope: ServerScope, label: string, Icon: typeof Folder) => {
+    const isActive = searchMode === 'projects' && (!secondServerLabel || serverScope === scope);
+    return (
+      <button
+        key={scope}
+        onClick={() => {
+          onServerScopeChange(scope);
+          onSearchModeChange('projects');
+        }}
+        aria-pressed={isActive}
+        title={label}
+        className={cn(
+          'flex h-7 min-w-0 flex-1 items-center justify-center rounded-md transition-all',
+          secondServerLabel
+            ? 'gap-1 px-1 text-[11px] font-normal'
+            : 'gap-1.5 px-2 text-xs font-normal',
+          isActive
+            ? 'bg-background shadow-sm text-foreground'
+            : 'text-muted-foreground hover:text-foreground',
+        )}
+      >
+        {secondServerLabel ? null : <Icon className="h-3 w-3 shrink-0" />}
+        <span className="truncate">{label}</span>
+      </button>
+    );
+  };
+
+  const scopeTabs = (
+    <>
+      {renderScopeButton('main', t('search.modeProjects'), Folder)}
+      {secondServerLabel ? renderScopeButton('second', secondServerLabel, Server) : null}
+    </>
+  );
+
   const showSearchTools = (projectsCount > 0 || pulseSessionsCount > 0 || archivedSessionsCount > 0 || isArchivedSessionsLoading) && !isLoading;
   const searchPlaceholder = searchMode === 'archived'
     ? t('search.archivedPlaceholder', 'Search archived sessions...')
@@ -215,19 +265,7 @@ export default function SidebarHeader({
           <div className="mt-2.5 space-y-2">
             {/* Search mode toggle */}
             <div className="flex rounded-lg bg-muted/50 p-0.5">
-              <button
-                onClick={() => onSearchModeChange('projects')}
-                aria-pressed={searchMode === 'projects'}
-                className={cn(
-                  "flex-1 flex h-7 items-center justify-center gap-1.5 rounded-md px-2 text-xs font-normal transition-all",
-                  searchMode === 'projects'
-                    ? "bg-background shadow-sm text-foreground"
-                    : "text-muted-foreground hover:text-foreground"
-                )}
-              >
-                <Folder className="h-3 w-3" />
-                {t('search.modeProjects')}
-              </button>
+              {scopeTabs}
               {projectPickerSlot}
               <Tooltip content={t('search.archiveOnlyTooltip', 'Archive only')} position="top">
                 <button
@@ -236,7 +274,8 @@ export default function SidebarHeader({
                   aria-label={t('search.archiveOnlyTooltip', 'Archive only')}
                   title={t('search.archiveOnlyTooltip', 'Archive only')}
                   className={cn(
-                    "flex h-7 items-center justify-center rounded-md px-2.5 text-xs font-normal transition-all",
+                    "flex h-7 items-center justify-center rounded-md text-xs font-normal transition-all",
+                    secondServerLabel ? "px-1.5" : "px-2.5",
                     searchMode === 'archived'
                       ? "bg-background shadow-sm text-foreground"
                       : "text-muted-foreground hover:text-foreground"
@@ -335,19 +374,7 @@ export default function SidebarHeader({
         {showSearchTools && (
           <div className="mt-2.5 space-y-2">
             <div className="flex rounded-lg bg-muted/50 p-0.5">
-              <button
-                onClick={() => onSearchModeChange('projects')}
-                aria-pressed={searchMode === 'projects'}
-                className={cn(
-                  "flex-1 flex h-7 items-center justify-center gap-1.5 rounded-md px-2 text-xs font-normal transition-all",
-                  searchMode === 'projects'
-                    ? "bg-background shadow-sm text-foreground"
-                    : "text-muted-foreground hover:text-foreground"
-                )}
-              >
-                <Folder className="h-3 w-3" />
-                {t('search.modeProjects')}
-              </button>
+              {scopeTabs}
               {projectPickerSlot}
               <Tooltip content={t('search.archiveOnlyTooltip', 'Archive only')} position="top">
                 <button
@@ -356,7 +383,8 @@ export default function SidebarHeader({
                   aria-label={t('search.archiveOnlyTooltip', 'Archive only')}
                   title={t('search.archiveOnlyTooltip', 'Archive only')}
                   className={cn(
-                    "flex h-7 items-center justify-center rounded-md px-2.5 text-xs font-normal transition-all",
+                    "flex h-7 items-center justify-center rounded-md text-xs font-normal transition-all",
+                    secondServerLabel ? "px-1.5" : "px-2.5",
                     searchMode === 'archived'
                       ? "bg-background shadow-sm text-foreground"
                       : "text-muted-foreground hover:text-foreground"

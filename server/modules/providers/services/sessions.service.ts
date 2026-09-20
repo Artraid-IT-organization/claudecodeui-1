@@ -10,8 +10,9 @@ import type {
   FetchHistoryResult,
   LLMProvider,
   NormalizedMessage,
+  ServerScope,
 } from '@/shared/types.js';
-import { AppError } from '@/shared/utils.js';
+import { AppError, normalizeServerScope } from '@/shared/utils.js';
 
 type CreateAppSessionResult = {
   sessionId: string;
@@ -31,12 +32,16 @@ type ArchivedSessionListItem = {
   updatedAt: string | null;
   lastActivity: string | null;
   isProjectArchived: boolean;
+  serverScope: ServerScope;
 };
 
 type RecentSessionListItem = Pick<
   ArchivedSessionListItem,
   'sessionId' | 'provider' | 'projectId' | 'projectDisplayName' | 'sessionTitle' | 'lastActivity'
->;
+> & {
+  /** Блок верхней панели, в котором виден чат. */
+  serverScope: ServerScope;
+};
 
 type RecentSessionsPage = {
   conversations: RecentSessionListItem[];
@@ -155,8 +160,8 @@ export const sessionsService = {
   /**
    * Returns the active conversation feed in true global activity order.
    */
-  listRecentSessions(limit: number, offset: number): RecentSessionsPage {
-    const page = sessionsDb.getRecentSessionsPage(limit, offset);
+  listRecentSessions(limit: number, offset: number, serverScope?: ServerScope): RecentSessionsPage {
+    const page = sessionsDb.getRecentSessionsPage(limit, offset, serverScope);
     const projectCache = new Map<string, ReturnType<typeof projectsDb.getProjectPath>>();
     const conversations = page.sessions.map((session) => {
       const projectPath = session.project_path?.trim() ? session.project_path : null;
@@ -176,6 +181,8 @@ export const sessionsService = {
         projectDisplayName: resolveProjectDisplayName(projectPath, project?.custom_project_name),
         sessionTitle: session.custom_name?.trim() || session.session_id,
         lastActivity: session.updated_at ?? session.created_at ?? null,
+        // Блок верхней панели: своё значение чата важнее значения папки.
+        serverScope: normalizeServerScope(session.server_scope ?? project?.server_scope),
       };
     });
 
@@ -248,6 +255,27 @@ export const sessionsService = {
       projectPath: normalizedProjectPath,
       sessionName,
     };
+  },
+
+  /**
+   * Переносит чат в другой блок верхней панели или возвращает его к
+   * значению папки.
+   *
+   * Файл переписки при этом не двигается: перенос — это признак в базе,
+   * поэтому чат остаётся тем же самым, его можно продолжить и вернуть
+   * обратно одним нажатием.
+   */
+  setSessionServerScope(sessionId: string, serverScope: ServerScope | null): { serverScope: ServerScope | null } {
+    const session = sessionsDb.getSessionById(sessionId);
+    if (!session) {
+      throw new AppError(`Session "${sessionId}" was not found.`, {
+        code: 'SESSION_NOT_FOUND',
+        statusCode: 404,
+      });
+    }
+
+    sessionsDb.setSessionServerScope(sessionId, serverScope);
+    return { serverScope };
   },
 
   /**
@@ -396,6 +424,9 @@ export const sessionsService = {
         updatedAt: session.updated_at ?? null,
         lastActivity: session.updated_at ?? session.created_at ?? null,
         isProjectArchived: Boolean(project?.isArchived),
+        // Блок верхней панели: архив тоже делится на блоки, иначе дела
+        // второго сервера всплывали бы в архиве обычных «Проектов».
+        serverScope: normalizeServerScope(session.server_scope ?? project?.server_scope),
       };
     });
   },

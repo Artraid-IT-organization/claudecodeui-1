@@ -5,10 +5,10 @@ import { createProject, updateProjectDisplayName } from '@/modules/projects/serv
 import { startCloneProject } from '@/modules/projects/services/project-clone.service.js';
 import { getProjectTaskMaster } from '@/modules/projects/services/projects-has-taskmaster.service.js';
 import { getRequestRuntimeContext } from '@/shared/request-context.js';
-import { AppError, asyncHandler, createApiSuccessResponse, isPlatformOwnerWebUser } from '@/shared/utils.js';
+import { AppError, asyncHandler, createApiSuccessResponse, isPlatformOwnerWebUser, normalizeServerScope } from '@/shared/utils.js';
 import { getArchivedProjectsWithSessions, getProjectSessionsPage, getProjectsWithSessions } from '@/modules/projects/services/projects-with-sessions-fetch.service.js';
 import { deleteOrArchiveProject, restoreArchivedProject } from '@/modules/projects/services/project-delete.service.js';
-import { applyLegacyStarredProjectIds, toggleProjectStar } from '@/modules/projects/services/project-star.service.js';
+import { applyLegacyStarredProjectIds, setProjectServerScope, toggleProjectStar } from '@/modules/projects/services/project-star.service.js';
 import { autoGroupProjectSessions } from '@/modules/providers/index.js';
 
 const router = express.Router();
@@ -164,6 +164,7 @@ router.post(
     const projectCreationResult = await createProject({
       projectPath,
       customName,
+      serverScope: normalizeServerScope(requestBody.serverScope),
     });
 
     res.json({
@@ -282,6 +283,15 @@ router.post(
     const projectId = typeof req.params.projectId === 'string' ? req.params.projectId : '';
     const { isStarred } = toggleProjectStar(projectId);
     res.json({ success: true, isStarred });
+  }),
+);
+
+router.post(
+  '/:projectId/server-scope',
+  asyncHandler(async (req, res) => {
+    const projectId = typeof req.params.projectId === 'string' ? req.params.projectId : '';
+    const result = setProjectServerScope(projectId, normalizeServerScope((req.body ?? {}).serverScope));
+    res.json(createApiSuccessResponse(result));
   }),
 );
 

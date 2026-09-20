@@ -17,7 +17,7 @@ import type {
   ProviderSkillCreateInput,
   UpsertProviderMcpServerInput,
 } from '@/shared/types.js';
-import { AppError, asyncHandler, createApiSuccessResponse } from '@/shared/utils.js';
+import { AppError, asyncHandler, createApiSuccessResponse, normalizeServerScope } from '@/shared/utils.js';
 
 const router = express.Router();
 
@@ -727,7 +727,12 @@ router.get(
   asyncHandler(async (req: Request, res: Response) => {
     const limit = parseBoundedIntegerQuery(req.query.limit, 'limit', 40, 1, 100);
     const offset = parseBoundedIntegerQuery(req.query.offset, 'offset', 0, 0);
-    const page = sessionsService.listRecentSessions(limit, offset);
+    // Без параметра — лента всех чатов (как было). С параметром — один блок
+    // верхней панели: «Проекты» или «2-й сервер».
+    const serverScope = typeof req.query.serverScope === 'string'
+      ? normalizeServerScope(req.query.serverScope)
+      : undefined;
+    const page = sessionsService.listRecentSessions(limit, offset, serverScope);
     res.json(createApiSuccessResponse(page));
   }),
 );
@@ -737,6 +742,18 @@ router.get(
   asyncHandler(async (_req: Request, res: Response) => {
     const sessions = sessionsService.listArchivedSessions();
     res.json(createApiSuccessResponse({ sessions }));
+  }),
+);
+
+router.post(
+  '/sessions/:sessionId/server-scope',
+  asyncHandler(async (req: Request, res: Response) => {
+    const sessionId = parseSessionId(req.params.sessionId);
+    // null — «как у папки»; строка — явный блок верхней панели.
+    const raw = (req.body ?? {}).serverScope;
+    const serverScope = raw === null ? null : normalizeServerScope(raw);
+    const result = sessionsService.setSessionServerScope(sessionId, serverScope);
+    res.json(createApiSuccessResponse(result));
   }),
 );
 

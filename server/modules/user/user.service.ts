@@ -242,15 +242,23 @@ export function createUserService(dependencies: UserDependencies) {
     },
 
     async getOwnerAccountEmail(userId: number) {
+      // Второй блок верхней панели («2-й сервер») — настройка хозяина
+      // площадки, а не приглашённых: у гостя второго сервера нет, и пустой
+      // блок в панели только путал бы. Название приходит этим же ответом,
+      // потому что он уже опознаёт хозяина; в /health его отдавать нельзя —
+      // тот отвечает кому угодно без входа.
+      const secondServerLabel = isPlatformOwnerWebUser(userId)
+        ? (process.env.SECOND_SERVER_LABEL || null)
+        : null;
       if (!isPlatformOwnerWebUser(userId)) {
-        return { success: true, email: null };
+        return { success: true, email: null, secondServerLabel };
       }
       try {
         const raw = await readFile(getClaudeJsonPath(), 'utf-8');
         const parsed = JSON.parse(raw) as { oauthAccount?: { emailAddress?: string } };
-        return { success: true, email: parsed.oauthAccount?.emailAddress ?? null };
+        return { success: true, email: parsed.oauthAccount?.emailAddress ?? null, secondServerLabel };
       } catch {
-        return { success: true, email: null };
+        return { success: true, email: null, secondServerLabel };
       }
     },
 
