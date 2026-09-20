@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { Layers } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
+import { useSecondServerLabel } from '../../hooks/useServerScope';
 import { cn } from '../../../../lib/utils';
 import type { Project } from '../../../../types/app';
 
@@ -93,6 +94,9 @@ export default function SidebarProjectPickerTrigger({
 
   const isDesktop = variant === 'desktop';
   const isTab = variant === 'tab';
+  // Когда блоков два, значки в строке поджимаются — иначе подписи блоков
+  // обрезаются (см. SidebarHeader).
+  const secondServerLabel = useSecondServerLabel();
   const label = t('projects.chatsAndFolders', { defaultValue: 'Chats and folders' });
   const mainLabel = t('projects.mainChats', { defaultValue: 'Main chats' });
   const otherLabel = t('projects.otherFolders', { defaultValue: 'Other folders' });
@@ -186,7 +190,7 @@ export default function SidebarProjectPickerTrigger({
           // В полосе вкладок кнопка должна выглядеть как её соседи (архив),
           // иначе она читается как посторонний элемент, случайно попавший внутрь.
           isTab
-            ? 'rounded-md px-2.5  text-xs font-normal'
+            ? cn('rounded-md text-xs font-normal', secondServerLabel ? 'px-1.5' : 'px-2.5')
             : 'rounded-lg',
           !isTab && (isDesktop
             ? 'h-7 w-7 text-muted-foreground hover:bg-accent/80 hover:text-foreground'

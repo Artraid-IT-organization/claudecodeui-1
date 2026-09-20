@@ -111,7 +111,8 @@ export default function SidebarHeader({
         aria-label="Последние чаты"
         title={listView === 'recent' ? 'Показать по группам' : 'Последние чаты'}
         className={cn(
-          "flex h-7 items-center justify-center rounded-md px-2.5 text-xs font-normal transition-all",
+          "flex h-7 items-center justify-center rounded-md text-xs font-normal transition-all",
+          secondServerLabel ? "px-1.5" : "px-2.5",
           searchMode !== 'archived' && listView === 'recent'
             ? "bg-background shadow-sm text-foreground"
             : "text-muted-foreground hover:text-foreground"
@@ -126,10 +127,16 @@ export default function SidebarHeader({
   // Нажатие на блок переключает и список папок, и чаты, и то, где заведётся
   // новый чат. Оба блока рисуются одной функцией, потому что строка есть и в
   // настольной шапке, и в телефонной — раньше такие пары расходились.
+  // Когда блока два, подписи делят между собой ту же ширину, что раньше
+  // занимала одна: значок внутри кнопки убирается, кегль на пункт меньше, а
+  // кнопки-значки справа поджимаются. Иначе обе подписи обрезаются до
+  // «Про…» и «2-й…» — на панели в 288 точек места на два слова с картинками
+  // просто нет. Без второго блока всё выглядит ровно как раньше.
   const renderScopeButton = (scope: ServerScope, label: string, Icon: typeof Folder) => {
     const isActive = searchMode === 'projects' && (!secondServerLabel || serverScope === scope);
     return (
       <button
+        key={scope}
         onClick={() => {
           onServerScopeChange(scope);
           onSearchModeChange('projects');
@@ -137,13 +144,16 @@ export default function SidebarHeader({
         aria-pressed={isActive}
         title={label}
         className={cn(
-          'flex h-7 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-md px-2 text-xs font-normal transition-all',
+          'flex h-7 min-w-0 flex-1 items-center justify-center rounded-md transition-all',
+          secondServerLabel
+            ? 'gap-1 px-1 text-[11px] font-normal'
+            : 'gap-1.5 px-2 text-xs font-normal',
           isActive
             ? 'bg-background shadow-sm text-foreground'
             : 'text-muted-foreground hover:text-foreground',
         )}
       >
-        <Icon className="h-3 w-3 shrink-0" />
+        {secondServerLabel ? null : <Icon className="h-3 w-3 shrink-0" />}
         <span className="truncate">{label}</span>
       </button>
     );
@@ -264,7 +274,8 @@ export default function SidebarHeader({
                   aria-label={t('search.archiveOnlyTooltip', 'Archive only')}
                   title={t('search.archiveOnlyTooltip', 'Archive only')}
                   className={cn(
-                    "flex h-7 items-center justify-center rounded-md px-2.5 text-xs font-normal transition-all",
+                    "flex h-7 items-center justify-center rounded-md text-xs font-normal transition-all",
+                    secondServerLabel ? "px-1.5" : "px-2.5",
                     searchMode === 'archived'
                       ? "bg-background shadow-sm text-foreground"
                       : "text-muted-foreground hover:text-foreground"
@@ -372,7 +383,8 @@ export default function SidebarHeader({
                   aria-label={t('search.archiveOnlyTooltip', 'Archive only')}
                   title={t('search.archiveOnlyTooltip', 'Archive only')}
                   className={cn(
-                    "flex h-7 items-center justify-center rounded-md px-2.5 text-xs font-normal transition-all",
+                    "flex h-7 items-center justify-center rounded-md text-xs font-normal transition-all",
+                    secondServerLabel ? "px-1.5" : "px-2.5",
                     searchMode === 'archived'
                       ? "bg-background shadow-sm text-foreground"
                       : "text-muted-foreground hover:text-foreground"
