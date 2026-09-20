@@ -6,6 +6,7 @@ import type { MainContentStateViewProps } from '../../types/types';
 import type { Project } from '../../../../types/app';
 import type { SessionWithProvider } from '../../../sidebar/types/types';
 import { formatCompactAge, getAllSessions, getProjectLastActivity, getSessionDate, getSessionName } from '../../../sidebar/utils/utils';
+import { useServerScope } from '../../../sidebar/hooks/useServerScope';
 
 import MobileMenuButton from './MobileMenuButton';
 
@@ -17,24 +18,29 @@ type RecentSessionHit = {
 };
 
 export default function MainContentStateView({ mode, isMobile, onMenuClick, projects, onProjectSelect, onSessionSelect }: MainContentStateViewProps) {
+  const [serverScope] = useServerScope();
   const { t } = useTranslation();
   const currentTime = useMemo(() => new Date(), []);
 
   const isLoading = mode === 'loading';
 
   const recentProjects = useMemo(() => {
-    const activeProjects = projects.filter((project) => getAllSessions(project).length > 0);
-    const source = activeProjects.length > 0 ? activeProjects : projects;
+    // Экран приветствия показывает папки того же блока верхней панели, что и
+    // список слева: иначе «2-й сервер» стоял бы среди обычных проектов, ради
+    // чего блоки и разделяли.
+    const scoped = projects.filter((project) => (project.serverScope ?? 'main') === serverScope);
+    const activeProjects = scoped.filter((project) => getAllSessions(project).length > 0);
+    const source = activeProjects.length > 0 ? activeProjects : scoped;
 
     return [...source]
       .sort((a, b) => getProjectLastActivity(b).getTime() - getProjectLastActivity(a).getTime())
       .slice(0, MAX_RECENT_PROJECTS);
-  }, [projects]);
+  }, [projects, serverScope]);
 
   const lastSessionHit = useMemo<RecentSessionHit | null>(() => {
     let best: RecentSessionHit | null = null;
 
-    for (const project of projects) {
+    for (const project of projects.filter((project) => (project.serverScope ?? 'main') === serverScope)) {
       const [topSession] = getAllSessions(project);
       if (!topSession) {
         continue;
@@ -46,7 +52,7 @@ export default function MainContentStateView({ mode, isMobile, onMenuClick, proj
     }
 
     return best;
-  }, [projects]);
+  }, [projects, serverScope]);
 
   const handleContinueLastChat = () => {
     if (!lastSessionHit) {
