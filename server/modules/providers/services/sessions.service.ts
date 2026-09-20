@@ -32,6 +32,7 @@ type ArchivedSessionListItem = {
   updatedAt: string | null;
   lastActivity: string | null;
   isProjectArchived: boolean;
+  serverScope: ServerScope;
 };
 
 type RecentSessionListItem = Pick<
@@ -423,6 +424,9 @@ export const sessionsService = {
         updatedAt: session.updated_at ?? null,
         lastActivity: session.updated_at ?? session.created_at ?? null,
         isProjectArchived: Boolean(project?.isArchived),
+        // Блок верхней панели: архив тоже делится на блоки, иначе дела
+        // второго сервера всплывали бы в архиве обычных «Проектов».
+        serverScope: normalizeServerScope(session.server_scope ?? project?.server_scope),
       };
     });
   },

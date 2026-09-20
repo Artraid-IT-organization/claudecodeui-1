@@ -23,6 +23,8 @@ export type ArchivedSessionListItem = {
   updatedAt: string | null;
   lastActivity: string | null;
   isProjectArchived: boolean;
+  /** Блок верхней панели, в котором виден архивный чат. */
+  serverScope?: ServerScope;
 };
 
 export type RecentConversationListItem = Pick<
