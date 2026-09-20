@@ -95,8 +95,15 @@ function Sidebar({
   // опознанный запрос владельца (гостю — null, чтобы у него не появлялся
   // чужой блок), на одиночной копии — /health.
   const secondServerLabel = useSecondServerLabel();
+  // Только одиночная копия берёт название из /health. На общей площадке его
+  // приносит опознанный запрос владельца ниже, и затирать значение здесь
+  // нельзя: этот расчёт успевал сработать ПОСЛЕ ответа того запроса и гасил
+  // блок до перезагрузки страницы — кнопки то было, то не было.
   useEffect(() => {
-    setSecondServerLabel(openRegistration ? null : healthSecondServerLabel);
+    if (openRegistration) {
+      return;
+    }
+    setSecondServerLabel(healthSecondServerLabel);
   }, [openRegistration, healthSecondServerLabel]);
   const [storedServerScope] = useServerScope();
   const serverScope: ServerScope = secondServerLabel ? storedServerScope : 'main';
