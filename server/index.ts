@@ -96,6 +96,11 @@ const systemRoutes = createSystemModule({
 // visible hint of which account is active, plus a link to jump to the other
 // instance. Both are unset by default so unrelated deployments see no change.
 const ACCOUNT_LABEL = process.env.ACCOUNT_LABEL || null;
+// Название второго блока верхней панели слева. Пусто — блока нет вовсе, и
+// копия приложения у другого человека выглядит как раньше: один список
+// проектов. Задаётся в .env рядом с приложением (SECOND_SERVER_LABEL="2-й
+// сервер"), потому что у каждого владельца свой второй сервер и своё имя ему.
+const SECOND_SERVER_LABEL = process.env.SECOND_SERVER_LABEL || null;
 const SWITCH_ACCOUNT_URL = process.env.SWITCH_ACCOUNT_URL || null;
 // Real account email for the badge above: read once at startup from the same
 // ~/.claude.json the Claude CLI itself maintains after `claude /login`,
@@ -189,6 +194,7 @@ app.get('/health', (req, res) => {
         installMode,
         version: RUNNING_VERSION,
         accountLabel: ACCOUNT_LABEL,
+        secondServerLabel: SECOND_SERVER_LABEL,
         switchAccountUrl: SWITCH_ACCOUNT_URL,
         accountEmail: CLAUDE_ACCOUNT_EMAIL
     });

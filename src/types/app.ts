@@ -1,5 +1,11 @@
 export type LLMProvider = 'claude' | 'cursor' | 'codex' | 'opencode';
 
+/**
+ * Блок верхней панели слева: 'main' — дела этого сервера, 'second' — дела
+ * второго сервера (ведутся отсюда, а живут там).
+ */
+export type ServerScope = 'main' | 'second';
+
 export type ProviderModelOption = {
   value: string;
   label: string;
@@ -52,6 +58,11 @@ export interface ProjectSession {
   // auto-grouping). Absent/null means ungrouped.
   groupId?: string | null;
   groupLabel?: string | null;
+  /**
+   * Блок верхней панели у самого чата: null/absent — как у папки.
+   * Заполнено, когда чат перенесли поимённо («перенести во 2-й сервер»).
+   */
+  serverScope?: ServerScope | null;
   __provider?: LLMProvider;
   // Tags the session with the owning project's DB `projectId` so UI handlers
   // (session switching, sidebar focus, etc.) can match against selectedProject.
@@ -82,6 +93,8 @@ export interface Project {
   fullPath: string;
   path?: string;
   isStarred?: boolean;
+  /** Блок верхней панели, которому принадлежит папка ('main' по умолчанию). */
+  serverScope?: ServerScope;
   sessions?: ProjectSession[];
   sessionMeta?: ProjectSessionMeta;
   taskmaster?: ProjectTaskmasterInfo;

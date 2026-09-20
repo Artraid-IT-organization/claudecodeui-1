@@ -629,6 +629,16 @@ export type CredentialMetaRow = {
 // ---------------------------
 //----------------- PROJECT PERSISTENCE TYPES ------------
 /**
+ * Какому серверу принадлежит дело: 'main' — этому, 'second' — второму.
+ *
+ * Верхняя панель слева разделена на два блока (Егор 20.09.26): обычные
+ * проекты и проекты второго сервера. Чаты второго блока ведутся отсюда и
+ * расходуют подписку этого сервера, но всё, что они создают — код, файлы,
+ * записи — живёт на втором сервере; сюда ничего не складывается.
+ */
+export type ServerScope = 'main' | 'second';
+
+/**
  * Canonical project row shape returned by the projects repository.
  *
  * Use this type whenever backend services need to pass around one database
@@ -640,6 +650,12 @@ export type ProjectRepositoryRow = {
   custom_project_name: string | null;
   isStarred: number;
   isArchived: number;
+  /**
+   * На каком сервере ведётся это дело: 'main' — здесь, 'second' — второй
+   * блок панели («2-й сервер»). Чат может переопределить это у себя
+   * (`sessions.server_scope`), проект задаёт значение по умолчанию.
+   */
+  server_scope: ServerScope;
 };
 
 /**

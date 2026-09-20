@@ -7,8 +7,8 @@ import { WS_OPEN_STATE, connectedClients } from '@/modules/websocket/index.js';
 import { scanStateDb } from '@/modules/database/repositories/scan-state.db.js';
 import { getRequestRuntimeContext } from '@/shared/request-context.js';
 import { getActiveAccountDir } from '@/shared/session-scope.js';
-import type { RealtimeClientConnection } from '@/shared/types.js';
-import { AppError, isPlatformOwnerWebUser } from '@/shared/utils.js';
+import type { RealtimeClientConnection, ServerScope } from '@/shared/types.js';
+import { AppError, isPlatformOwnerWebUser, normalizeServerScope } from '@/shared/utils.js';
 
 type SessionSummary = {
   id: string;
@@ -18,6 +18,8 @@ type SessionSummary = {
   lastActivity: string;
   groupId: string | null;
   groupLabel: string | null;
+  /** Свой сервер у чата: null — как у папки. */
+  serverScope: ServerScope | null;
 };
 
 type SessionRepositoryRow = {
@@ -28,6 +30,7 @@ type SessionRepositoryRow = {
   created_at?: string | null;
   group_id?: string | null;
   group_label?: string | null;
+  server_scope?: ServerScope | null;
 };
 
 export type ProjectListItem = {
@@ -36,6 +39,8 @@ export type ProjectListItem = {
   displayName: string;
   fullPath: string;
   isStarred: boolean;
+  /** Блок верхней панели, которому принадлежит папка. */
+  serverScope: ServerScope;
   sessions: SessionSummary[];
   sessionMeta: {
     hasMore: boolean;
@@ -133,6 +138,7 @@ function mapSessionRowToSummary(row: SessionRepositoryRow): SessionSummary {
     lastActivity: row.updated_at ?? row.created_at ?? new Date().toISOString(),
     groupId: row.group_id ?? null,
     groupLabel: row.group_label ?? null,
+    serverScope: row.server_scope ?? null,
   };
 }
 
@@ -256,6 +262,7 @@ export async function getProjectsWithSessions(
     project_path: string;
     custom_project_name?: string | null;
     isStarred?: number;
+    server_scope?: ServerScope | null;
   }>;
   const totalProjects = projectRows.length;
   const projects: ProjectListItem[] = [];
@@ -290,6 +297,7 @@ export async function getProjectsWithSessions(
       displayName,
       fullPath: projectPath,
       isStarred: Boolean(row.isStarred),
+      serverScope: normalizeServerScope(row.server_scope),
       sessions: sessionsPage.sessions,
       sessionMeta: {
         hasMore: sessionsPage.hasMore,
@@ -324,6 +332,7 @@ export async function getArchivedProjectsWithSessions(
     project_path: string;
     custom_project_name?: string | null;
     isStarred?: number;
+    server_scope?: ServerScope | null;
   }>;
 
   const archivedProjects: ArchivedProjectListItem[] = [];
@@ -342,6 +351,7 @@ export async function getArchivedProjectsWithSessions(
       displayName,
       fullPath: row.project_path,
       isStarred: Boolean(row.isStarred),
+      serverScope: normalizeServerScope(row.server_scope),
       isArchived: true,
       sessions: sessionsPage.sessions,
       sessionMeta: {

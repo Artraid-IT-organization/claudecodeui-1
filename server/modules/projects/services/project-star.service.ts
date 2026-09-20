@@ -1,4 +1,5 @@
 import { projectsDb } from '@/modules/database/index.js';
+import type { ServerScope } from '@/shared/types.js';
 import { AppError } from '@/shared/utils.js';
 
 type ToggleProjectStarResult = {
@@ -75,4 +76,32 @@ export function toggleProjectStar(projectId: string): ToggleProjectStarResult {
   projectsDb.updateProjectIsStarredById(normalizedProjectId, nextStarredState);
 
   return { isStarred: nextStarredState };
+}
+
+/**
+ * Переносит папку в другой блок верхней панели ('main' — этот сервер,
+ * 'second' — второй).
+ *
+ * Чаты папки едут вместе с ней: у них признак пуст и читается от папки.
+ * Чат, перенесённый поимённо, остаётся там, куда его положили.
+ */
+export function setProjectServerScope(projectId: string, serverScope: ServerScope): { serverScope: ServerScope } {
+  const normalizedProjectId = normalizeProjectId(projectId);
+  if (!normalizedProjectId) {
+    throw new AppError('projectId is required', {
+      code: 'PROJECT_ID_REQUIRED',
+      statusCode: 400,
+    });
+  }
+
+  const project = projectsDb.getProjectById(normalizedProjectId);
+  if (!project) {
+    throw new AppError('Project not found', {
+      code: 'PROJECT_NOT_FOUND',
+      statusCode: 404,
+    });
+  }
+
+  projectsDb.updateProjectServerScopeById(normalizedProjectId, serverScope);
+  return { serverScope };
 }

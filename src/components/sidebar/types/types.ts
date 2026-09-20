@@ -1,4 +1,4 @@
-import type { AppTab, LoadingProgress, Project, ProjectSession, LLMProvider } from '../../../types/app';
+import type { AppTab, LoadingProgress, Project, ProjectSession, LLMProvider, ServerScope } from '../../../types/app';
 import type { SessionActivityMap } from '../../../hooks/useSessionProtection';
 
 export type ProjectSortOrder = 'name' | 'date';
@@ -28,7 +28,10 @@ export type ArchivedSessionListItem = {
 export type RecentConversationListItem = Pick<
   ArchivedSessionListItem,
   'sessionId' | 'provider' | 'projectId' | 'projectDisplayName' | 'sessionTitle' | 'lastActivity'
->;
+> & {
+  /** Блок верхней панели, в котором виден чат. */
+  serverScope?: ServerScope;
+};
 
 export type DeleteProjectConfirmation = {
   project: Project;

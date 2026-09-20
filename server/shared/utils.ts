@@ -20,6 +20,7 @@ import type { NextFunction, Request, RequestHandler, Response } from 'express';
 
 import { parseFrontMatter } from '@/shared/frontmatter.js';
 import { getRequestRuntimeContext } from '@/shared/request-context.js';
+import type { ServerScope } from '@/shared/types.js';
 import type {
   AnyRecord,
   ApiSuccessShape,
@@ -1293,4 +1294,13 @@ export function findApplicationRoot(startDirectory: string): string {
   return path.basename(parentDirectory) === 'dist-server'
     ? path.dirname(parentDirectory)
     : parentDirectory;
+}
+
+/**
+ * Приводит значение из базы или запроса к блоку верхней панели; всё
+ * неизвестное — 'main' (этот сервер). Отдельная функция, а не сравнение по
+ * месту: значение приходит и из SQLite (строка), и из тела запроса.
+ */
+export function normalizeServerScope(value: unknown): ServerScope {
+  return value === 'second' ? 'second' : 'main';
 }

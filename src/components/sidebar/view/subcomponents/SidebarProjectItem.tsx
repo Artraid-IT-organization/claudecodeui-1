@@ -1,13 +1,16 @@
 import { useEffect, useRef } from 'react';
-import { Check, ChevronDown, ChevronRight, Edit3, MoreHorizontal, Star, Trash2, X } from 'lucide-react';
+import { Check, ChevronDown, ChevronRight, Edit3, MoreHorizontal, Server, Star, Trash2, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
 import { ActionMenu, buttonVariants } from '../../../../shared/view/ui';
 import { cn } from '../../../../lib/utils';
-import type { Project, ProjectSession, LLMProvider } from '../../../../types/app';
+import type { Project, ProjectSession, LLMProvider, ServerScope } from '../../../../types/app';
 import type { SessionActivityMap } from '../../../../hooks/useSessionProtection';
 import type { MCPServerStatus, SessionWithProvider } from '../../types/types';
 import { getTaskIndicatorStatus } from '../../utils/utils';
+import { useSecondServerLabel } from '../../hooks/useServerScope';
+import { api } from '../../../../utils/api';
+import { usePaletteOps } from '../../../../contexts/PaletteOpsContext';
 
 import TaskIndicator from './TaskIndicator';
 import SidebarProjectSessions from './SidebarProjectSessions';
@@ -106,6 +109,27 @@ export default function SidebarProjectItem({
   const sessionCountLabel = `${sessionCountDisplay} session${totalSessionCount === 1 ? '' : 's'}`;
   const taskStatus = getTaskIndicatorStatus(project, mcpServerStatus);
   const mobileRenameInputRef = useRef<HTMLInputElement>(null);
+
+  // Перенос папки между блоками верхней панели. Папка едет вместе со своими
+  // чатами: у них признак пуст и читается от папки.
+  const secondServerLabel = useSecondServerLabel();
+  const paletteOps = usePaletteOps();
+  const projectScope: ServerScope = (project.serverScope as ServerScope | undefined) ?? 'main';
+  const moveToScope: ServerScope = projectScope === 'second' ? 'main' : 'second';
+  const moveLabel = projectScope === 'second'
+    ? t('projects.moveToMainServer', { defaultValue: 'Вернуть в «Проекты»' })
+    : t('projects.moveToSecondServer', {
+      label: secondServerLabel ?? '',
+      defaultValue: `Перенести в «${secondServerLabel ?? ''}»`,
+    });
+  const handleMoveServerScope = async () => {
+    try {
+      await api.setProjectServerScope(project.projectId, moveToScope);
+      await paletteOps.refreshProjects();
+    } catch (error) {
+      console.error('[Sidebar] Не удалось перенести папку в другой блок:', error);
+    }
+  };
 
   useEffect(() => {
     if (!isEditing || !mobileRenameInputRef.current) {
@@ -275,6 +299,13 @@ export default function SidebarProjectItem({
                             icon: Edit3,
                             onSelect: () => onStartEditingProject(project),
                           },
+                          ...(secondServerLabel ? [{
+                            key: 'server-scope',
+                            label: moveLabel,
+                            icon: Server,
+                            showDividerBefore: true,
+                            onSelect: () => { void handleMoveServerScope(); },
+                          }] : []),
                           {
                             key: 'delete',
                             label: t('tooltips.deleteProject'),
@@ -437,6 +468,13 @@ export default function SidebarProjectItem({
                         icon: Edit3,
                         onSelect: () => onStartEditingProject(project),
                       },
+                      ...(secondServerLabel ? [{
+                        key: 'server-scope',
+                        label: moveLabel,
+                        icon: Server,
+                        showDividerBefore: true,
+                        onSelect: () => { void handleMoveServerScope(); },
+                      }] : []),
                       {
                         key: 'delete',
                         label: t('tooltips.deleteProject'),

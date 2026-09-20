@@ -23,6 +23,7 @@ function createSessionRow(overrides: Record<string, unknown> = {}) {
     group_id: null,
     group_label: null,
     isArchived: 0,
+    server_scope: 'main' as const,
     created_at: '2026-01-01T00:00:00.000Z',
     updated_at: '2026-01-01T00:00:00.000Z',
     ...overrides,

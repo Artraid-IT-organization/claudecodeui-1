@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { getConnection } from '@/modules/database/connection.js';
-import type { CreateProjectPathResult, ProjectRepositoryRow } from '@/shared/types.js';
+import type { CreateProjectPathResult, ProjectRepositoryRow, ServerScope } from '@/shared/types.js';
 import { normalizeProjectPath } from '@/shared/utils.js';
 
 /**
@@ -71,7 +71,7 @@ export const projectsDb = {
             ON CONFLICT(project_path) DO UPDATE SET
             isArchived = 0
             WHERE projects.isArchived = 1
-            RETURNING project_id, project_path, custom_project_name, isStarred, isArchived
+            RETURNING project_id, project_path, custom_project_name, isStarred, isArchived, server_scope
         `).get(attemptedId, normalizedProjectPath, normalizedProjectName) as ProjectRepositoryRow | undefined;
 
         if (row) {
@@ -92,7 +92,7 @@ export const projectsDb = {
         const db = getConnection();
         const normalizedProjectPath = normalizeProjectPath(projectPath);
         const row = db.prepare(`
-            SELECT project_id, project_path, custom_project_name, isStarred, isArchived
+            SELECT project_id, project_path, custom_project_name, isStarred, isArchived, server_scope
             FROM projects
             WHERE project_path = ?
         `).get(normalizedProjectPath) as ProjectRepositoryRow | undefined;
@@ -103,7 +103,7 @@ export const projectsDb = {
     getProjectById(projectId: string): ProjectRepositoryRow | null {
         const db = getConnection();
         const row = db.prepare(`
-            SELECT project_id, project_path, custom_project_name, isStarred, isArchived
+            SELECT project_id, project_path, custom_project_name, isStarred, isArchived, server_scope
             FROM projects
             WHERE project_id = ?
         `).get(projectId) as ProjectRepositoryRow | undefined;
@@ -162,7 +162,7 @@ export const projectsDb = {
             // доступа к его файлам не получает — файловый обход проверяется
             // отдельно и по рабочей области.
             return db.prepare(`
-                SELECT project_id, project_path, custom_project_name, isStarred, isArchived
+                SELECT project_id, project_path, custom_project_name, isStarred, isArchived, server_scope
                 FROM projects
                 WHERE isArchived = 0
                 AND (
@@ -176,7 +176,7 @@ export const projectsDb = {
         }
         const guard = excludeOtherWebUserRoots(ownWorkspaceRoot);
         return db.prepare(`
-            SELECT project_id, project_path, custom_project_name, isStarred, isArchived
+            SELECT project_id, project_path, custom_project_name, isStarred, isArchived, server_scope
             FROM projects
             WHERE isArchived = 0${guard.clause}
         `).all(...guard.params) as ProjectRepositoryRow[];
@@ -192,7 +192,7 @@ export const projectsDb = {
         if (scopeRootDir) {
             const normalizedScopeRoot = resolveScope(scopeRootDir);
             return db.prepare(`
-                SELECT project_id, project_path, custom_project_name, isStarred, isArchived
+                SELECT project_id, project_path, custom_project_name, isStarred, isArchived, server_scope
                 FROM projects
                 WHERE isArchived = 1
                 AND (
@@ -205,7 +205,7 @@ export const projectsDb = {
         }
         const guard = excludeOtherWebUserRoots(ownWorkspaceRoot);
         return db.prepare(`
-            SELECT project_id, project_path, custom_project_name, isStarred, isArchived
+            SELECT project_id, project_path, custom_project_name, isStarred, isArchived, server_scope
             FROM projects
             WHERE isArchived = 1${guard.clause}
         `).all(...guard.params) as ProjectRepositoryRow[];
@@ -272,6 +272,22 @@ export const projectsDb = {
             SET isStarred = ?
             WHERE project_id = ?
         `).run(isStarred ? 1 : 0, projectId);
+    },
+
+    /**
+     * Переносит папку в другой блок верхней панели ('main' / 'second').
+     *
+     * Чаты папки едут за ней: у них `server_scope` остаётся NULL и читается
+     * от папки. Исключение — чаты, которые перенесли поимённо, у них своё
+     * значение, и оно важнее.
+     */
+    updateProjectServerScopeById(projectId: string, serverScope: ServerScope): void {
+        const db = getConnection();
+        db.prepare(`
+            UPDATE projects
+            SET server_scope = ?
+            WHERE project_id = ?
+        `).run(serverScope, projectId);
     },
 
     updateProjectIsArchived(projectPath: string, isArchived: boolean): void {

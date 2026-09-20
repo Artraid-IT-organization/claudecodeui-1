@@ -23,6 +23,9 @@ export const useVersionCheck = () => {
   // CLAUDE_CONFIG_DIR/.claude.json's oauthAccount.emailAddress - see
   // server/index.ts). null when unreadable/unset, same as the two above.
   const [accountEmail, setAccountEmail] = useState<string | null>(null);
+  // Название второго блока верхней панели (SECOND_SERVER_LABEL в .env рядом с
+  // приложением). null — блока нет: у чужой копии панель выглядит как раньше.
+  const [secondServerLabel, setSecondServerLabel] = useState<string | null>(null);
 
   useEffect(() => {
     const fetchHealth = async () => {
@@ -49,6 +52,9 @@ export const useVersionCheck = () => {
         }
         if (typeof data.accountEmail === 'string' && data.accountEmail.length > 0) {
           setAccountEmail(data.accountEmail);
+        }
+        if (typeof data.secondServerLabel === 'string' && data.secondServerLabel.trim().length > 0) {
+          setSecondServerLabel(data.secondServerLabel.trim());
         }
       } catch {
         // Default to git / no restart hint on error
@@ -79,5 +85,6 @@ export const useVersionCheck = () => {
     accountLabel,
     switchAccountUrl,
     accountEmail,
+    secondServerLabel,
   };
 };

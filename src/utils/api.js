@@ -269,11 +269,15 @@ export const api = {
     authenticatedFetch(`/api/providers/sessions/${encodeURIComponent(sessionId)}`),
   runningSessions: () =>
     authenticatedFetch('/api/providers/sessions/running'),
-  recentConversations: ({ limit = 40, offset = 0 } = {}) => {
+  // `serverScope` — блок верхней панели («Проекты» / «2-й сервер»). Отбор
+  // делает сервер: страница берётся по 40 чатов, и отбор после выдачи
+  // оставлял бы второй блок почти пустым.
+  recentConversations: ({ limit = 40, offset = 0, serverScope } = {}) => {
     const params = new URLSearchParams({
       limit: String(limit),
       offset: String(offset),
     });
+    if (serverScope) params.set('serverScope', serverScope);
     return authenticatedFetch(`/api/providers/sessions/recent?${params.toString()}`);
   },
   providerSessionId: (sessionId) =>
@@ -315,6 +319,18 @@ export const api = {
   toggleProjectStar: (projectId) =>
     authenticatedFetch(`/api/projects/${encodeURIComponent(projectId)}/toggle-star`, {
       method: 'POST',
+    }),
+  // Переносит папку в другой блок верхней панели ('main' / 'second').
+  setProjectServerScope: (projectId, serverScope) =>
+    authenticatedFetch(`/api/projects/${encodeURIComponent(projectId)}/server-scope`, {
+      method: 'POST',
+      body: JSON.stringify({ serverScope }),
+    }),
+  // Переносит один чат; null возвращает его к значению папки.
+  setSessionServerScope: (sessionId, serverScope) =>
+    authenticatedFetch(`/api/providers/sessions/${encodeURIComponent(sessionId)}/server-scope`, {
+      method: 'POST',
+      body: JSON.stringify({ serverScope }),
     }),
   // Clusters this project's currently ungrouped sessions by topic via one
   // LLM call. Assignments land through the usual session_upserted websocket

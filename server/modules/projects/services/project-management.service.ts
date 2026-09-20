@@ -5,13 +5,20 @@ import { projectsDb } from '@/modules/database/index.js';
 import type {
   CreateProjectPathResult,
   ProjectRepositoryRow,
+  ServerScope,
   WorkspacePathValidationResult,
 } from '@/shared/types.js';
-import { AppError, normalizeProjectPath, validateWorkspacePath } from '@/shared/utils.js';
+import { AppError, normalizeProjectPath, normalizeServerScope, validateWorkspacePath } from '@/shared/utils.js';
 
 type CreateProjectInput = {
   projectPath: string;
   customName?: string | null;
+  /**
+   * В каком блоке верхней панели заводится папка. Папка, созданная из блока
+   * «2-й сервер», сразу принадлежит ему — иначе она появилась бы в обычных
+   * проектах, и человеку пришлось бы переносить её вручную.
+   */
+  serverScope?: ServerScope;
 };
 
 type CreateProjectDependencies = {
@@ -29,6 +36,7 @@ type ProjectApiView = {
   customName: string | null;
   isArchived: boolean;
   isStarred: boolean;
+  serverScope: ServerScope;
   sessions: [];
   sessionMeta: {
     hasMore: false;
@@ -77,6 +85,7 @@ function mapProjectRowToApiView(projectRow: ProjectRepositoryRow): ProjectApiVie
     customName: projectRow.custom_project_name,
     isArchived: Boolean(projectRow.isArchived),
     isStarred: Boolean(projectRow.isStarred),
+    serverScope: normalizeServerScope(projectRow.server_scope),
     sessions: [],
     sessionMeta: {
       hasMore: false,
@@ -126,6 +135,12 @@ export async function createProject(
       code: 'PROJECT_CREATE_FAILED',
       statusCode: 500,
     });
+  }
+
+  const requestedScope = normalizeServerScope(input.serverScope);
+  if (requestedScope !== normalizeServerScope(projectRow.server_scope)) {
+    projectsDb.updateProjectServerScopeById(projectRow.project_id, requestedScope);
+    projectRow.server_scope = requestedScope;
   }
 
   // Archived rows intentionally remain archived when reused, as requested.

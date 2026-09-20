@@ -17,6 +17,7 @@ import SidebarUsageLimits from './SidebarUsageLimits';
 import SidebarProjectList, { type SidebarProjectListProps } from './SidebarProjectList';
 import SidebarProjectPickerTrigger from './SidebarProjectPickerTrigger';
 import SidebarProjectSessions from './SidebarProjectSessions';
+import { useServerScope } from '../../hooks/useServerScope';
 
 function HighlightedSnippet({ snippet, highlights }: { snippet: string; highlights: { start: number; end: number }[] }) {
   const parts: ReactNode[] = [];
@@ -206,6 +207,7 @@ export default function SidebarContent({
     projectListProps.editingProject || projectListProps.editingSession,
   );
 
+  const [serverScope] = useServerScope();
   // Flat-mode: when exactly ONE project is starred, show its sessions directly
   // without the project-header/expand-step clutter.  0 or 2+ starred = normal mode.
   const starredProjects = projectListProps.projects.filter((p) =>
@@ -220,7 +222,20 @@ export default function SidebarContent({
       (project.sessionMeta?.total ?? 0) > (best.sessionMeta?.total ?? 0) ? project : best
     ))
     : null;
-  const singleStarredProject = starredProjects.length === 1 ? starredProjects[0] : mainProjectWithoutStars;
+  const fallbackFlatProject = starredProjects.length === 1 ? starredProjects[0] : mainProjectWithoutStars;
+  // Во втором блоке ведущей становится папка, которая сама к нему приписана,
+  // а не отмеченная звёздочкой: звезда стоит на главной папке этого сервера,
+  // и новый чат из второго блока заводился бы в ней — то есть не там, где
+  // человек его просил. Чаты, перенесённые во второй блок поимённо, остаются
+  // в своих папках и видны через выбор папки.
+  const secondServerProject = serverScope === 'second'
+    ? projectListProps.projects
+      .filter((project) => project.serverScope === 'second')
+      .reduce<Project | null>((best, project) => (
+        !best || (project.sessionMeta?.total ?? 0) > (best.sessionMeta?.total ?? 0) ? project : best
+      ), null)
+    : null;
+  const singleStarredProject = secondServerProject ?? fallbackFlatProject;
 
 
   // Which project to display in the flat session list (null = show starred project).
