@@ -43,6 +43,20 @@ export const MAX_THOUGHTS_PER_REQUEST = 60;
 const DIGEST_CHUNK_SIZE = 10;
 const MAX_THOUGHT_CHARS = 4000;
 const DIGEST_TIMEOUT_MS = 120 * 1000;
+/**
+ * Сколько вызовов Haiku идёт одновременно на весь сайт, и сколько ждут очереди.
+ *
+ * 21.09.26 в 15:01 за одну минуту запустилось 40 вызовов разом (много чатов и
+ * вкладок открыли «Ход работы» одновременно). Каждый — отдельный процесс CLI на
+ * ~110 МБ, вместе ~7 ГБ: сервис упёрся в свой потолок памяти, подкачка
+ * кончилась, нагрузка сервера дошла до 116, сайт отдавал 502. При перезапуске
+ * эти процессы ещё и остались висеть сиротами (KillMode=process).
+ * Перевод мыслей — украшение: лучше показать мысль без перевода, чем уронить
+ * сайт. Поэтому сверх очереди вызов не ставится вовсе — клиент получит null и
+ * покажет оригинал, а следующий заход достанет перевод из кэша или спросит снова.
+ */
+const MAX_CONCURRENT_DIGESTS = 2;
+const MAX_WAITING_DIGESTS = 6;
 const CACHE_DIR = path.join(os.homedir(), '.cloudcli', 'thought-digests');
 /** Своя папка запуска: не общая /tmp, где лежат записи других разговоров. */
 const DIGEST_CWD = path.join(os.homedir(), '.cloudcli', 'thought-translate-cwd');
@@ -256,11 +270,36 @@ async function askModel(texts: string[], claudeConfigDir: string | null): Promis
 /** Одна и та же пачка из двух вкладок разбирается одним вызовом. */
 const inFlight = new Map<string, Promise<Array<ThoughtDigest | null> | null>>();
 
+let digestsRunning = 0;
+const digestWaiters: Array<() => void> = [];
+
+/**
+ * Место в общей очереди вызовов. Освободившееся место передаётся следующему в
+ * очереди напрямую, без уменьшения счётчика, — иначе новый запрос из того же
+ * такта успевал бы занять его раньше ждущего и вызовов становилось бы больше
+ * предела. `null` — очередь полна, вызова не будет.
+ */
+export async function withDigestSlot<T>(run: () => Promise<T>): Promise<T | null> {
+  if (digestsRunning >= MAX_CONCURRENT_DIGESTS) {
+    if (digestWaiters.length >= MAX_WAITING_DIGESTS) return null;
+    await new Promise<void>((resolve) => digestWaiters.push(resolve));
+  } else {
+    digestsRunning += 1;
+  }
+  try {
+    return await run();
+  } finally {
+    const next = digestWaiters.shift();
+    if (next) next();
+    else digestsRunning -= 1;
+  }
+}
+
 async function digestChunk(texts: string[], claudeConfigDir: string | null): Promise<Array<ThoughtDigest | null> | null> {
   const key = `${claudeConfigDir ?? ''}\n${texts.join('\n \n')}`;
   let pending = inFlight.get(key);
   if (!pending) {
-    pending = askModel(texts, claudeConfigDir).finally(() => inFlight.delete(key));
+    pending = withDigestSlot(() => askModel(texts, claudeConfigDir)).finally(() => inFlight.delete(key));
     inFlight.set(key, pending);
   }
   return pending;
