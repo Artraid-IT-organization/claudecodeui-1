@@ -24,6 +24,12 @@ type UsageLimitsPayload = {
  * поэтому раз в две минуты — достаточно свежо и без лишних запросов.
  */
 const REFRESH_INTERVAL_MS = 2 * 60 * 1000;
+const EMPTY_RETRY_INTERVAL_MS = 30 * 1000;
+
+// Показываем только два окна: пятичасовое и недельное. Лимит конкретной модели
+// Егору не нужен («лимиты fable не нужно показывать, а вот 7 дней и 5 часов
+// нужны»); сервер отдаёт все окна — отбор дело показа, а не источника.
+const VISIBLE_KINDS = ['session', 'weekly_all'];
 /**
  * Позже этого возраста кэш считается несвежим и это подписывается.
  *
@@ -81,22 +87,39 @@ export default function SidebarUsageLimits() {
     }
   }, []);
 
-  useEffect(() => {
-    void load();
-    const timer = window.setInterval(() => void load(), REFRESH_INTERVAL_MS);
-    return () => window.clearInterval(timer);
-  }, [load]);
-
-  // Показываем только два окна: пятичасовое и недельное.
-  //
-  // Лимит конкретной модели Егору не нужен — «лимиты fable не нужно
-  // показывать, а вот 7 дней и 5 часов нужны». Сервер продолжает отдавать все
-  // окна: отбор — дело показа, а не источника данных.
-  const VISIBLE_KINDS = ['session', 'weekly_all'];
   const rows = (payload?.limits ?? []).filter(
     (limit) => !limit.expired && VISIBLE_KINDS.includes(limit.kind),
   );
-  if (rows.length === 0) {
+  const hasRows = rows.length > 0;
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  // Пусто — значит, ключ входа аккаунта просрочен (аккаунт долго простаивал) и
+  // сервер не вправе его продлить. Ключ обновится сам с первым сообщением, и
+  // тогда панель должна появиться за секунды, а не через две минуты.
+  useEffect(() => {
+    const timer = window.setInterval(
+      () => void load(),
+      hasRows ? REFRESH_INTERVAL_MS : EMPTY_RETRY_INTERVAL_MS,
+    );
+    return () => window.clearInterval(timer);
+  }, [load, hasRows]);
+
+  // Телефон усыпляет таймеры свёрнутого приложения: без этого после
+  // возвращения на экран висит ответ, полученный до сна.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        void load();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [load]);
+
+  if (!hasRows) {
     return null;
   }
 

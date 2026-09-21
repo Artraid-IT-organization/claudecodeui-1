@@ -36,3 +36,34 @@ test('ответ без окон — не данные', () => {
   assert.equal(parseOfficialUsage({ limits: [] }, Date.now()), null);
   assert.equal(parseOfficialUsage(null, Date.now()), null);
 });
+
+test('просроченный ключ не запоминается: свежий ключ подхватывается сразу', async () => {
+  const { mkdtemp, writeFile } = await import('node:fs/promises');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const { getOfficialUsage } = await import('../official-usage.js');
+
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'usage-key-'));
+  const writeKey = (expiresAt: number) =>
+    writeFile(
+      path.join(dir, '.credentials.json'),
+      JSON.stringify({ claudeAiOauth: { accessToken: 'test-token', expiresAt } }),
+    );
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(
+      JSON.stringify({ limits: [{ kind: 'session', percent: 12, resets_at: '2999-01-01T00:00:00+00:00' }] }),
+      { status: 200 },
+    )) as typeof fetch;
+
+  try {
+    await writeKey(Date.now() - 1000);
+    assert.equal(await getOfficialUsage(dir), null);
+
+    await writeKey(Date.now() + 3600_000);
+    const fresh = await getOfficialUsage(dir);
+    assert.equal(fresh?.limits[0]?.percent, 12);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});

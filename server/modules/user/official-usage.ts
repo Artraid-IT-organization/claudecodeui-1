@@ -116,24 +116,28 @@ export async function getOfficialUsage(accountDir: string): Promise<OfficialUsag
     return cached.value ?? lastGoodByAccountDir.get(accountDir) ?? null;
   }
 
-  let value: OfficialUsage | null = null;
   const token = await readAccessToken(accountDir);
-  if (token) {
-    try {
-      const response = await fetch(USAGE_URL, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'anthropic-beta': 'oauth-2025-04-20',
-          'Content-Type': 'application/json',
-        },
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
-      if (response.ok) {
-        value = parseOfficialUsage(await response.json(), Date.now());
-      }
-    } catch {
-      // Сеть или таймаут: ниже отдадим последнее удачное значение.
+  if (!token) {
+    // Ключа нет или он просрочен: не запоминаем «пусто» на минуту — ключ
+    // обновится сам с первым сообщением, и панель должна подхватить его сразу.
+    return lastGoodByAccountDir.get(accountDir) ?? null;
+  }
+
+  let value: OfficialUsage | null = null;
+  try {
+    const response = await fetch(USAGE_URL, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'anthropic-beta': 'oauth-2025-04-20',
+        'Content-Type': 'application/json',
+      },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (response.ok) {
+      value = parseOfficialUsage(await response.json(), Date.now());
     }
+  } catch {
+    // Сеть или таймаут: ниже отдадим последнее удачное значение.
   }
 
   cacheByAccountDir.set(accountDir, { checkedAtMs: Date.now(), value });
