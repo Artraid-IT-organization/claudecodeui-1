@@ -43,6 +43,19 @@ export const MAX_THOUGHTS_PER_REQUEST = 60;
 const DIGEST_CHUNK_SIZE = 10;
 const MAX_THOUGHT_CHARS = 4000;
 const DIGEST_TIMEOUT_MS = 120 * 1000;
+/**
+ * Столько разборов идёт одновременно, остальные ждут очереди.
+ *
+ * Каждый разбор — отдельный процесс CLI на ~180 МБ, и он считается в пределы
+ * самой службы. 21.09.26 их набралось 43 штуки: страница дозапрашивала разбор
+ * на каждую новую мысль прямого эфира, а прежний запрос оставался считаться на
+ * сервере. Служба упёрлась в свой потолок памяти, её начало тормозить ядро — и
+ * вместе с ней встала выдача страниц, то есть один открытый экран положил
+ * интерфейс целиком. Клиент с тех пор не частит (WorkStretchContainer), но
+ * потолок здесь нужен всё равно: сервер не должен зависеть от того, как себя
+ * ведёт браузер.
+ */
+const MAX_PARALLEL_DIGESTS = 2;
 const CACHE_DIR = path.join(os.homedir(), '.cloudcli', 'thought-digests');
 /** Своя папка запуска: не общая /tmp, где лежат записи других разговоров. */
 const DIGEST_CWD = path.join(os.homedir(), '.cloudcli', 'thought-translate-cwd');
@@ -98,6 +111,29 @@ async function removeTitleStub(claudeConfigDir: string | null, sessionId: string
     }
   }));
 }
+
+/**
+ * Пропускной пункт: больше `limit` работ разом не пускает, остальные стоят в
+ * очереди в порядке прихода. Отдельной функцией — чтобы проверять тестом без
+ * запуска модели.
+ */
+export function createGate(limit: number): <T>(job: () => Promise<T>) => Promise<T> {
+  let running = 0;
+  const waiting: Array<() => void> = [];
+  return async function run<T>(job: () => Promise<T>): Promise<T> {
+    if (running >= limit) await new Promise<void>((resolve) => waiting.push(resolve));
+    running += 1;
+    try {
+      return await job();
+    } finally {
+      running -= 1;
+      waiting.shift()?.();
+    }
+  };
+}
+
+/** Один пропускной пункт на всю службу: потолок общий, а не на запрос. */
+const gate = createGate(MAX_PARALLEL_DIGESTS);
 
 function cacheFileFor(text: string): string {
   return path.join(CACHE_DIR, `${createHash('sha256').update(text).digest('hex')}.json`);
@@ -196,7 +232,11 @@ export function buildDigestPrompt(texts: string[]): string {
   ].join('\n');
 }
 
-async function askModel(texts: string[], claudeConfigDir: string | null): Promise<Array<ThoughtDigest | null> | null> {
+async function askModel(
+  texts: string[],
+  claudeConfigDir: string | null,
+  signal?: AbortSignal,
+): Promise<Array<ThoughtDigest | null> | null> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (typeof value === 'string') env[key] = value;
@@ -204,9 +244,19 @@ async function askModel(texts: string[], claudeConfigDir: string | null): Promis
   if (claudeConfigDir) env.CLAUDE_CONFIG_DIR = claudeConfigDir;
   await mkdir(DIGEST_CWD, { recursive: true }).catch(() => undefined);
 
+  // Отмену несёт свой контроллер: по нему SDK гасит процесс CLI (мягко, затем
+  // принудительно). Браузер ушёл со страницы — считать дальше некому и незачем.
+  const abort = new AbortController();
+  const forwardAbort = () => abort.abort();
+  if (signal) {
+    if (signal.aborted) return null;
+    signal.addEventListener('abort', forwardAbort, { once: true });
+  }
+
   const instance = query({
     prompt: buildDigestPrompt(texts),
     options: {
+      abortController: abort,
       cwd: DIGEST_CWD,
       model: 'haiku',
       tools: [],
@@ -242,6 +292,7 @@ async function askModel(texts: string[], claudeConfigDir: string | null): Promis
     return null;
   } finally {
     clearTimeout(timer);
+    if (signal) signal.removeEventListener('abort', forwardAbort);
     if (sessionId) {
       const id = sessionId;
       await removeTitleStub(claudeConfigDir, id);
@@ -253,17 +304,51 @@ async function askModel(texts: string[], claudeConfigDir: string | null): Promis
   return parseDigest(resultText, texts);
 }
 
-/** Одна и та же пачка из двух вкладок разбирается одним вызовом. */
-const inFlight = new Map<string, Promise<Array<ThoughtDigest | null> | null>>();
+/**
+ * Пачка в работе: её ждут все, кто смотрит одни и те же мысли.
+ *
+ * `waiters` — сколько ждущих осталось. Ушёл последний (человек закрыл страницу,
+ * браузер оборвал запрос) — разбор гасится: считать его больше некому.
+ */
+type DigestBatch = {
+  promise: Promise<Array<ThoughtDigest | null> | null>;
+  abort: AbortController;
+  waiters: number;
+};
 
-async function digestChunk(texts: string[], claudeConfigDir: string | null): Promise<Array<ThoughtDigest | null> | null> {
+/** Одна и та же пачка из двух вкладок разбирается одним вызовом. */
+const inFlight = new Map<string, DigestBatch>();
+
+function whenAborted(signal: AbortSignal): Promise<null> {
+  return new Promise<null>((resolve) => {
+    if (signal.aborted) resolve(null);
+    else signal.addEventListener('abort', () => resolve(null), { once: true });
+  });
+}
+
+async function digestChunk(
+  texts: string[],
+  claudeConfigDir: string | null,
+  signal?: AbortSignal,
+): Promise<Array<ThoughtDigest | null> | null> {
   const key = `${claudeConfigDir ?? ''}\n${texts.join('\n \n')}`;
-  let pending = inFlight.get(key);
-  if (!pending) {
-    pending = askModel(texts, claudeConfigDir).finally(() => inFlight.delete(key));
-    inFlight.set(key, pending);
+  let batch = inFlight.get(key);
+  if (!batch) {
+    const abort = new AbortController();
+    const started: DigestBatch = { abort, waiters: 0, promise: Promise.resolve(null) };
+    started.promise = gate(() => askModel(texts, claudeConfigDir, abort.signal)).finally(() => inFlight.delete(key));
+    batch = started;
+    inFlight.set(key, started);
   }
-  return pending;
+
+  batch.waiters += 1;
+  try {
+    return await (signal ? Promise.race([batch.promise, whenAborted(signal)]) : batch.promise);
+  } finally {
+    batch.waiters -= 1;
+    // Гасим только брошенную работу; после ответа отмена уже ничего не делает.
+    if (batch.waiters <= 0) batch.abort.abort();
+  }
 }
 
 /**
@@ -273,6 +358,7 @@ async function digestChunk(texts: string[], claudeConfigDir: string | null): Pro
 export async function digestThoughts(
   rawTexts: unknown,
   claudeConfigDir: string | null,
+  signal?: AbortSignal,
 ): Promise<Array<ThoughtDigest | null>> {
   const texts = (Array.isArray(rawTexts) ? rawTexts : [])
     .slice(0, MAX_THOUGHTS_PER_REQUEST)
@@ -292,6 +378,9 @@ export async function digestThoughts(
   }));
 
   if (missing.length === 0) return results;
+  // Запрос уже брошен — в модель не идём вовсе: разобранное из кэша отдадим,
+  // остальное останется пустым.
+  if (signal?.aborted) return results;
   missing.sort((a, b) => a - b);
   await mkdir(CACHE_DIR, { recursive: true }).catch(() => undefined);
 
@@ -307,8 +396,9 @@ export async function digestThoughts(
   const runChunks = async (indices: number[]): Promise<number[]> => {
     const unresolved: number[] = [];
     for (let start = 0; start < indices.length; start += DIGEST_CHUNK_SIZE) {
+      if (signal?.aborted) return unresolved.concat(indices.slice(start)).sort((a, b) => a - b);
       const chunk = indices.slice(start, start + DIGEST_CHUNK_SIZE);
-      const digests = await digestChunk(chunk.map((index) => texts[index]), claudeConfigDir);
+      const digests = await digestChunk(chunk.map((index) => texts[index]), claudeConfigDir, signal);
       await Promise.all(chunk.map(async (index, position) => {
         const digest = digests?.[position] ?? null;
         if (digest) await save(index, digest);
@@ -320,6 +410,6 @@ export async function digestThoughts(
 
   // Пропущенное моделью досылается ещё раз — отдельной, меньшей пачкой.
   const leftover = await runChunks(missing);
-  if (leftover.length > 0) await runChunks(leftover);
+  if (leftover.length > 0 && !signal?.aborted) await runChunks(leftover);
   return results;
 }

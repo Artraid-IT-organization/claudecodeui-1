@@ -48,9 +48,16 @@ export function createUserRouter(service: ReturnType<typeof createUserService>):
 
   // Важные этапы среди мыслей «Хода работы» по-русски, входом того, кто смотрит.
   router.post('/thought-digest', async (req, res, next) => {
+    // Браузер закрыл запрос — разбор бросаем. Иначе оставленная страница
+    // продолжает жечь процессы CLI, которые никто уже не ждёт (21.09.26:
+    // так набралось 43 процесса и служба встала).
+    const abandoned = new AbortController();
+    req.on('close', () => {
+      if (!res.writableEnded) abandoned.abort();
+    });
     try {
       const body = req.body as { texts?: unknown };
-      res.json(await service.digestThoughts(readUserId(req), body.texts));
+      res.json(await service.digestThoughts(readUserId(req), body.texts, abandoned.signal));
     } catch (error) {
       next(error);
     }

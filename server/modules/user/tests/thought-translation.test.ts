@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { buildDigestPrompt, digestThoughts, echoMatches, isTitleStubOnly, parseDigest } from '../thought-translation.js';
+import { buildDigestPrompt, createGate, digestThoughts, echoMatches, isTitleStubOnly, parseDigest } from '../thought-translation.js';
 
 test('пустышкой считается только файл из одних заголовков', () => {
   assert.equal(isTitleStubOnly('{"type":"ai-title","aiTitle":"Перевод","sessionId":"x"}\n'), true);
@@ -63,4 +63,40 @@ test('в запросе к модели — фрагменты с номерам
 test('пустой и неверный ввод модель не вызывает', async () => {
   assert.deepEqual(await digestThoughts('не массив', null), []);
   assert.deepEqual(await digestThoughts(['', '   '], null), [null, null]);
+});
+
+test('пропускной пункт: больше потолка разом не пускает, остальные ждут очереди', async () => {
+  // 21.09.26: без потолка один открытый экран нарастил 43 процесса CLI и
+  // положил службу целиком.
+  const gate = createGate(2);
+  let running = 0;
+  let peak = 0;
+  const release: Array<() => void> = [];
+  const jobs = Array.from({ length: 5 }, () =>
+    gate(async () => {
+      running += 1;
+      peak = Math.max(peak, running);
+      await new Promise<void>((resolve) => release.push(resolve));
+      running -= 1;
+      return true;
+    }),
+  );
+
+  // Дать очереди разобраться и отпускать работы по одной.
+  for (let step = 0; step < 5; step += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+    release.shift()?.();
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  release.forEach((done) => done());
+  assert.deepEqual(await Promise.all(jobs), [true, true, true, true, true]);
+  assert.equal(peak, 2);
+});
+
+test('брошенный запрос в модель не идёт: отмена до разбора отдаёт пустые места', async () => {
+  // Браузер закрыл запрос — считать больше некому. Мысль заведомо не из кэша:
+  // если бы разбор всё же пошёл, тест ушёл бы в запуск модели и упал по времени.
+  const abandoned = AbortSignal.abort();
+  const fresh = `Thought that was never digested ${Date.now()}`;
+  assert.deepEqual(await digestThoughts([fresh], null, abandoned), [null]);
 });

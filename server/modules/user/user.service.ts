@@ -115,9 +115,9 @@ export function createUserService(dependencies: UserDependencies) {
     },
 
     /** Важные этапы среди мыслей «Хода работы» и их русский текст — входом того, кто смотрит. */
-    async digestThoughts(userId: number, texts: unknown) {
+    async digestThoughts(userId: number, texts: unknown, signal?: AbortSignal) {
       const claudeConfigDir = resolveWebUserRuntimeContext(Number.isFinite(userId) ? userId : null).claudeConfigDir;
-      return { success: true, items: await digestThoughts(texts, claudeConfigDir) };
+      return { success: true, items: await digestThoughts(texts, claudeConfigDir, signal) };
     },
 
     /**
