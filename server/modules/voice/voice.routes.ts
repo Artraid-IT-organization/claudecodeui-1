@@ -87,6 +87,13 @@ export function createVoiceRouter(dependencies: VoiceRouterDependencies): expres
         // должна уносить с собой саму запись.
         const kept = archive ? await archive.keep(audio) : null;
 
+        // И в Telegram — тоже до распознавания, не дожидаясь его итога.
+        // 21.09.26 перезапуск сервиса через 19 секунд после записи убил
+        // отправку, которая тогда стартовала только с готовой расшифровкой:
+        // запись осталась на диске и не дошла ни до кого. Без await —
+        // загрузка не должна задерживать ответ пользователю.
+        void archive?.publishAudio(kept);
+
         const result = await dependencies.voiceService.transcribe({
           audio,
           overrides: parseVoiceOverrides(request),
@@ -94,7 +101,7 @@ export function createVoiceRouter(dependencies: VoiceRouterDependencies): expres
 
         // Без await: ни задержка Telegram, ни его отказ не должны стоить
         // пользователю ответа, который уже готов.
-        void archive?.publish(kept, result.ok ? { text: result.value.text } : { error: result.error });
+        void archive?.publishOutcome(kept, result.ok ? { text: result.value.text } : { error: result.error });
 
         if (sendFailure(response, result)) {
           return;

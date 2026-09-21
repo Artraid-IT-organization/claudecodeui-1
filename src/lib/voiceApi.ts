@@ -9,7 +9,7 @@ export function voiceConfigSignature(): string {
   return JSON.stringify(readVoiceConfig());
 }
 
-export function transcribeVoice(blob: Blob, filename: string): Promise<Response> {
+export function transcribeVoice(blob: Blob, filename: string, signal?: AbortSignal): Promise<Response> {
   const config = readVoiceConfig();
   const body = new FormData();
 
@@ -20,6 +20,7 @@ export function transcribeVoice(blob: Blob, filename: string): Promise<Response>
       method: 'POST',
       headers: config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {},
       body,
+      signal,
     });
   }
 
@@ -28,6 +29,7 @@ export function transcribeVoice(blob: Blob, filename: string): Promise<Response>
     method: 'POST',
     headers: voiceConfigHeaders(),
     body,
+    signal,
   });
 }
 

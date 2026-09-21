@@ -25,6 +25,25 @@ function pickMime(): string {
 export type VoiceInputState = 'idle' | 'recording' | 'transcribing';
 
 /**
+ * Hard ceiling on one transcription request. The server itself allows half an
+ * hour, and the spinner used to follow it blindly: 21.09.26 the service was
+ * restarted mid-request, the phone kept the dead connection frozen in the
+ * background, and the mic button span for as long as the owner cared to look
+ * at it. Twelve minutes is far above any real dictation (measured: a ten
+ * minute recording comes back in about two) and turns "forever" into an
+ * answer.
+ */
+const TRANSCRIBE_TIMEOUT_MS = 12 * 60 * 1000;
+
+/**
+ * Said when the transcript could not be brought back. The recording itself is
+ * never lost at that point - the server puts every recording in the owner's
+ * Telegram chat before transcription even starts - so the message points
+ * there instead of just reporting a failure.
+ */
+const LOST_TRANSCRIPT_MESSAGE = 'Расшифровка не дошла. Запись сохранена и отправлена в Telegram.';
+
+/**
  * Push-to-talk dictation. Records the mic, uploads to /api/voice/transcribe
  * (an OpenAI-compatible speech-to-text backend via the Express proxy), and
  * returns the transcript through onTranscript.
@@ -94,9 +113,11 @@ export function useVoiceInput(
           return;
         }
         setState('transcribing');
+        const abort = new AbortController();
+        const timeout = setTimeout(() => abort.abort(), TRANSCRIBE_TIMEOUT_MS);
         try {
           const ext = type.includes('mp4') ? 'm4a' : type.includes('ogg') ? 'ogg' : 'webm';
-          const res = await transcribeVoice(blob, `recording.${ext}`);
+          const res = await transcribeVoice(blob, `recording.${ext}`, abort.signal);
           if (!res.ok) throw new Error(`transcribe ${res.status}`);
           const data = await res.json();
           if (cancelledRef.current) return;
@@ -105,9 +126,13 @@ export function useVoiceInput(
           else onError?.('No speech detected');
         } catch (e) {
           if (!cancelledRef.current) {
-            onError?.(`Transcription failed: ${e instanceof Error ? e.message : String(e)}`);
+            // Причина — в консоль: на экране она ничего не объясняет, а при
+            // разборе показывает, оборвалось соединение или ответил сервер.
+            console.warn('[voice] transcription did not come back', e);
+            onError?.(LOST_TRANSCRIPT_MESSAGE);
           }
         } finally {
+          clearTimeout(timeout);
           if (!cancelledRef.current) setState('idle');
         }
       };
