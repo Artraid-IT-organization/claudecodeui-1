@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 
 import { IS_PLATFORM } from '../../../shared/utils';
 import {
@@ -11,6 +11,7 @@ import {
 } from '../../../utils/api';
 import { AUTH_ERROR_MESSAGES, AUTH_TOKEN_STORAGE_KEY, LOGIN_LINK_TOKEN_STORAGE_KEY } from '../constants';
 import { installLoginLinkManifest } from '../loginLinkManifest';
+import { nextAuthRetryDelay } from '../authRetry';
 import type {
   AuthContextValue,
   AuthProviderProps,
@@ -85,6 +86,14 @@ export function AuthProvider({ children }: AuthProviderProps) {
   const [hasCompletedOnboarding, setHasCompletedOnboarding] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [openRegistration, setOpenRegistration] = useState(false);
+  /**
+   * Проверка авторизации не удалась по связи, а не по отказу сервера.
+   * Считается отдельно от `error`: `error` — это текст для человека, а здесь
+   * решается, надо ли пробовать снова. Раньше не пробовали никогда — экран
+   * с надписью «не удалось проверить» стоял, пока страницу не перезагрузят.
+   */
+  const [statusCheckFailedAt, setStatusCheckFailedAt] = useState<number | null>(null);
+  const statusRetriesRef = useRef(0);
   const [pendingLoginLink, setPendingLoginLink] = useState<string | null>(null);
   const [inviteToken, setInviteToken] = useState<string | null>(null);
   const [inviteStatus, setInviteStatus] = useState<AuthContextValue['inviteStatus']>('idle');
@@ -212,6 +221,10 @@ export function AuthProvider({ children }: AuthProviderProps) {
   }, [clearSession, enterWithLoginLinkToken]);
 
   const checkAuthStatus = useCallback(async () => {
+    // Провал отмечается в catch, а успех — отсутствием провала: выходов из
+    // try несколько (настройка, приглашение, вход по ссылке), и все они
+    // проходят через finally.
+    let failed = false;
     try {
       setIsLoading(true);
       setError(null);
@@ -323,8 +336,16 @@ export function AuthProvider({ children }: AuthProviderProps) {
     } catch (caughtError) {
       console.error('[Auth] Auth status check failed:', caughtError);
       setError(AUTH_ERROR_MESSAGES.authStatusCheckFailed);
+      // Связь подведёт — попробуем ещё: см. эффект повтора ниже.
+      failed = true;
+      setStatusCheckFailedAt(Date.now());
     } finally {
       setIsLoading(false);
+      if (!failed) {
+        // Дошли до конца — ждать больше нечего, счётчик пауз обнуляется.
+        statusRetriesRef.current = 0;
+        setStatusCheckFailedAt(null);
+      }
     }
   }, [checkOnboardingStatus, clearSession, enterWithLoginLinkToken, setSession, token]);
 
@@ -340,6 +361,48 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
     void checkAuthStatus();
   }, [checkAuthStatus, checkOnboardingStatus]);
+
+  /**
+   * Повтор проверки авторизации, если она не удалась по связи.
+   *
+   * Без этого экран «Failed to check authentication status» — тупик: проверка
+   * делается ровно один раз при запуске, и страница, запустившаяся в минуту
+   * без сети, стоит мёртвой, пока её не перезагрузят руками. Поймано
+   * 20.09.26: телефон простоял так больше получаса, и в журнале сервера за
+   * это время не было ни одного запроса с устройства — молчала страница.
+   *
+   * Повторяем двумя путями: по времени (с растущей паузой, чтобы не долбить
+   * сервер) и сразу, как только браузер скажет, что сеть вернулась или человек
+   * вернулся на вкладку, — ждать полную паузу в этот момент незачем.
+   */
+  useEffect(() => {
+    if (IS_PLATFORM || statusCheckFailedAt === null) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    const retry = () => {
+      if (cancelled) return;
+      statusRetriesRef.current += 1;
+      void checkAuthStatus();
+    };
+
+    const timer = window.setTimeout(retry, nextAuthRetryDelay(statusRetriesRef.current));
+    const onBack = () => {
+      if (document.visibilityState === 'hidden') return;
+      window.clearTimeout(timer);
+      retry();
+    };
+    window.addEventListener('online', onBack);
+    document.addEventListener('visibilitychange', onBack);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      window.removeEventListener('online', onBack);
+      document.removeEventListener('visibilitychange', onBack);
+    };
+  }, [checkAuthStatus, statusCheckFailedAt]);
 
   useEffect(() => {
     if (IS_PLATFORM || !token || !user) {

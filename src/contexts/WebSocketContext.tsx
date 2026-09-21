@@ -5,6 +5,7 @@ import { IS_PLATFORM } from '../shared/utils';
 import { expireAuthSession, isAuthTokenExpired } from '../utils/api';
 
 import { ChatOutbox, isChatSend, SLOT_RETRY_MS, SLOT_WAIT_CODE, type OutboxEntry } from './chatOutbox';
+import { decideConnectionAction } from './connectionWatchdog';
 
 /**
  * One frame received from the chat websocket. The server guarantees every
@@ -60,6 +61,12 @@ const ACK_TIMEOUT_MS = 10_000;
 const OUTBOX_CHECK_MS = 3_000;
 /** Соединение, не открывшееся за это время, пересоздаётся. */
 const CONNECT_STALL_MS = 15_000;
+/**
+ * Как часто сторож связи проверяет, что соединение на месте. Работает всегда,
+ * а не только когда есть что отправлять: связь нужна и молчащей странице —
+ * без неё не придут ни ответ работающего агента, ни события чужих вкладок.
+ */
+const CONNECTION_CHECK_MS = 5_000;
 /** Сколько ждать от сервера сообщения о возможностях, прежде чем счесть его старым. */
 const HELLO_GRACE_MS = 2_000;
 /** Что умеет страница; сервер отвечает `server_capabilities` только знающим. */
@@ -118,6 +125,7 @@ const useWebSocketProviderState = (): WebSocketContextType => {
   const outboxTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const connectStartedAtRef = useRef(0);
   const connectRef = useRef<() => void>(() => {});
+  const ensureConnectionRef = useRef<() => boolean>(() => false);
   /**
    * Умеет ли сервер этого соединения расписываться в получении. Страница может
    * оказаться новее сервера (соседняя выкатка вернула старый сервер, а вкладка
@@ -201,6 +209,49 @@ const useWebSocketProviderState = (): WebSocketContextType => {
     connectRef.current();
   }, []);
 
+  /**
+   * Довести связь до рабочего состояния, чем бы она ни была прервана.
+   *
+   * Раньше эта проверка жила ВНУТРИ разбора очереди и потому работала только
+   * тогда, когда в очереди ждало сообщение. Пустая очередь — и страница
+   * оставалась без связи сколько угодно: поймано 20.09.26 на телефоне, где
+   * вкладка после сна простояла 11 минут с красным индикатором, не сделав ни
+   * одной попытки подключиться (в журнале сервера — ни одного обращения к
+   * `/ws`). Единственным лекарем связи был таймер на 3 секунды из `onclose`,
+   * а его Chrome на Android замораживает вместе с фоновой вкладкой.
+   * Связь — не свойство очереди, поэтому и следит за ней теперь отдельный
+   * сторож, работающий всегда.
+   *
+   * `false` — связи нет и подключение уже идёт или назначено.
+   */
+  const ensureConnection = useCallback((): boolean => {
+    if (unmountedRef.current) return false;
+    const socket = wsRef.current;
+    const action = decideConnectionAction({
+      readyState: socket ? socket.readyState : null,
+      reconnectScheduled: reconnectTimeoutRef.current !== null,
+      connectingForMs: Date.now() - connectStartedAtRef.current,
+      stallMs: CONNECT_STALL_MS,
+    });
+    switch (action) {
+      case 'ok':
+        return true;
+      case 'connect':
+        connectRef.current();
+        return false;
+      case 'recreate':
+        forceReconnect(
+          socket && socket.readyState === WebSocket.CONNECTING
+            ? 'соединение не устанавливается'
+            : 'соединение закрыто без уведомления',
+        );
+        return false;
+      default:
+        return false;
+    }
+  }, [forceReconnect]);
+  ensureConnectionRef.current = ensureConnection;
+
   const scheduleOutboxCheck = useCallback(() => {
     if (outboxTimerRef.current || unmountedRef.current) return;
     outboxTimerRef.current = setTimeout(() => {
@@ -211,10 +262,10 @@ const useWebSocketProviderState = (): WebSocketContextType => {
       reportGivenUp();
       if (outbox.size === 0) return;
 
-      const socket = wsRef.current;
-      if (!socket) {
-        if (!reconnectTimeoutRef.current) connectRef.current();
-      } else if (socket.readyState === WebSocket.OPEN) {
+      // Состояние связи разбирает ensureConnection — здесь остаётся только то,
+      // что относится к самой очереди.
+      const socket = ensureConnection() ? wsRef.current! : null;
+      if (socket) {
         if (ackModeRef.current === 'legacy') {
           flushRef.current(socket);
         } else if (ackModeRef.current === 'ack' && outbox.overdue(ACK_TIMEOUT_MS).length > 0) {
@@ -228,17 +279,10 @@ const useWebSocketProviderState = (): WebSocketContextType => {
             }
           }
         }
-      } else if (socket.readyState === WebSocket.CONNECTING) {
-        if (Date.now() - connectStartedAtRef.current > CONNECT_STALL_MS) {
-          forceReconnect('соединение не устанавливается');
-        }
-      } else {
-        // CLOSING/CLOSED без onclose — так бывает у сокета, уснувшего в фоне.
-        forceReconnect('соединение закрыто без уведомления');
       }
       scheduleOutboxCheck();
     }, OUTBOX_CHECK_MS);
-  }, [forceReconnect, reportGivenUp, transmit]);
+  }, [ensureConnection, forceReconnect, reportGivenUp, transmit]);
 
   /** Отправить очередь по открытому соединению с учётом того, что умеет сервер. */
   const flushOutbox = useCallback((socket: WebSocket) => {
@@ -429,12 +473,16 @@ const useWebSocketProviderState = (): WebSocketContextType => {
   }, [dispatch, isAuthLoading, token, user, reportGivenUp, reportFailed, transmit, scheduleOutboxCheck]); // reconnect with current authentication state
   connectRef.current = connect;
 
-  // Приложение вернулось из фона или появилась сеть. Если есть сообщения без
-  // расписки, связи не доверяем: на iPhone сокет после сна часто числится
-  // открытым, но мёртв, — открываем новый и досылаем.
+  // Приложение вернулось из фона или появилась сеть. Первым делом — связь, и
+  // независимо от очереди: телефон, проснувшись, чаще всего держит сокет,
+  // который сервер уже закрыл, а `onclose` замёрз вместе с вкладкой. Если
+  // сверх того есть сообщения без расписки, связи не доверяем даже открытой:
+  // на iPhone сокет после сна часто числится открытым, но мёртв, — открываем
+  // новый и досылаем.
   useEffect(() => {
     const onResume = () => {
       if (document.visibilityState === 'hidden') return;
+      if (!ensureConnectionRef.current()) return;
       const outbox = outboxRef.current;
       if (!outbox || outbox.size === 0) return;
       const socket = wsRef.current;
@@ -453,6 +501,21 @@ const useWebSocketProviderState = (): WebSocketContextType => {
       window.removeEventListener('online', onResume);
     };
   }, [forceReconnect, scheduleOutboxCheck]);
+
+  /**
+   * Сторож связи. Единственный механизм восстановления, не зависящий ни от
+   * события `onclose` (его может не быть у сокета, уснувшего в фоне), ни от
+   * очереди сообщений, ни от того, дошёл ли `connect()` до конца: исключение
+   * при создании сокета раньше тоже оставляло страницу без связи навсегда.
+   */
+  useEffect(() => {
+    if (!IS_PLATFORM && (isAuthLoading || !user)) return undefined;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'hidden') return;
+      ensureConnectionRef.current();
+    }, CONNECTION_CHECK_MS);
+    return () => window.clearInterval(timer);
+  }, [isAuthLoading, user]);
 
   const sendMessage = useCallback((message: unknown) => {
     const socket = wsRef.current;
