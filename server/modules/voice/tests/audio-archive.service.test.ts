@@ -246,6 +246,36 @@ test('recordings past the retention period are not resurrected by a resume pass'
   assert.equal(calls.length, 0);
 });
 
+test('a recording too big for Telegram stays on disk instead of failing the upload', async () => {
+  const { service, calls, warnings } = await makeArchive({
+    convertToVoice: async (_input, output) => {
+      await fs.writeFile(output, Buffer.alloc(51 * 1024 * 1024));
+    },
+  });
+  const kept = await service.keep(audio);
+
+  await service.publishAudio(kept);
+
+  assert.equal(calls.length, 0);
+  assert.ok(warnings.some((w) => w.includes('50 MB')));
+  assert.deepEqual(await fs.readFile(kept!.audioPath), audio.bytes);
+});
+
+test('a backlog is resumed in batches instead of one burst of messages', async () => {
+  const { service, archiveDir, calls } = await makeArchive();
+  await markResumeInitialized(archiveDir);
+  for (let i = 0; i < 25; i += 1) {
+    const minute = String(i).padStart(2, '0');
+    await fs.writeFile(path.join(archiveDir, `2026-09-15_15-${minute}-00_abcde${i % 10}.webm`), 'x');
+  }
+
+  const resumed = await service.resumePending();
+
+  assert.equal(resumed, 20);
+  assert.equal(calls.length, 20);
+  assert.equal(await service.resumePending(), 5);
+});
+
 test('sweep removes only archive files older than the retention period', async () => {
   const { service, archiveDir } = await makeArchive();
   const old = path.join(archiveDir, '2026-08-30_10-00-00_abcdef.webm');

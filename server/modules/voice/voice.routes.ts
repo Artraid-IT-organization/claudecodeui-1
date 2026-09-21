@@ -52,7 +52,13 @@ export function createVoiceRouter(dependencies: VoiceRouterDependencies): expres
   const router = express.Router();
 
   router.get('/health', (_request, response) => {
-    response.json(dependencies.voiceService.getHealth());
+    // `archived` — для текста ошибки в поле ввода: владельцу можно обещать,
+    // что запись уже в Telegram, гостю общего сайта — нельзя, его записи
+    // никуда не копируются.
+    response.json({
+      ...dependencies.voiceService.getHealth(),
+      archived: dependencies.audioArchive?.mayArchiveCurrentRequest() ?? false,
+    });
   });
 
   router.post('/transcribe', (request, response, next) => {

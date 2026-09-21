@@ -88,6 +88,14 @@ export type KeptRecording = {
 /**
  * How far a recording got on its way to Telegram. Written next to the audio
  * after every step, so an interrupted delivery is visible to the next start.
+ *
+ * The state is written AFTER Telegram confirms, which leaves a window of a few
+ * milliseconds where a killed process loses the fact of a delivery that did
+ * happen - and the next start sends that recording a second time. That way
+ * round is deliberate: the owner asked never to lose a recording, and a
+ * duplicate voice message costs him a glance, while the reverse order would
+ * silently drop a recording whose upload failed right after the state was
+ * written.
  */
 type DeliveryState = {
   /** Set once the voice message exists in the chat; its caption can be edited. */
@@ -533,8 +541,21 @@ export function createAudioArchiveService(dependencies: AudioArchiveDependencies
           if (stat.isFile() && stat.mtimeMs < cutoff) {
             await fs.rm(filePath);
             removed += 1;
+            // Спутники уходят вместе с записью. Их mtime моложе самой записи
+            // (состояние доставки дописывается после), и поодиночке они
+            // пережили бы её на целый срок хранения.
+            if (AUDIO_FILE_PATTERN.test(name)) {
+              for (const companion of [statePathFor(filePath), textPathFor(filePath)]) {
+                if (await fs.rm(companion).then(() => true, () => false)) {
+                  removed += 1;
+                }
+              }
+            }
           }
         } catch (error) {
+          // Спутник мог уйти вместе со своей записью парой строк выше —
+          // это не сбой уборки, жаловаться не на что.
+          if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') continue;
           dependencies.log.warn(`[Voice] Could not remove expired recording ${name}: ${describeError(error)}`);
         }
       }

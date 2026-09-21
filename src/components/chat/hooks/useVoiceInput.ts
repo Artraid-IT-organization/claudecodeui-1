@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { transcribeVoice } from '../../../lib/voiceApi';
 
+import { recordingsAreArchived } from './useVoiceAvailable';
+
 // Mobile-safe recording: iOS Safari 18.4+ supports webm/opus; older iOS needs mp4.
 const MIME_CANDIDATES = [
   'audio/webm;codecs=opus',
@@ -36,12 +38,16 @@ export type VoiceInputState = 'idle' | 'recording' | 'transcribing';
 const TRANSCRIBE_TIMEOUT_MS = 12 * 60 * 1000;
 
 /**
- * Said when the transcript could not be brought back. The recording itself is
- * never lost at that point - the server puts every recording in the owner's
- * Telegram chat before transcription even starts - so the message points
- * there instead of just reporting a failure.
+ * Said when the transcript could not be brought back. For whoever's recordings
+ * the server archives, it is worth saying where the audio went - it is in
+ * Telegram before transcription even starts, so nothing is lost. A guest on a
+ * shared instance is archived nowhere and must not be told otherwise.
  */
-const LOST_TRANSCRIPT_MESSAGE = 'Расшифровка не дошла. Запись сохранена и отправлена в Telegram.';
+function lostTranscriptMessage(): string {
+  return recordingsAreArchived()
+    ? 'Расшифровка не дошла. Запись сохранена и отправлена в Telegram.'
+    : 'Расшифровка не дошла. Попробуйте записать ещё раз.';
+}
 
 /**
  * Push-to-talk dictation. Records the mic, uploads to /api/voice/transcribe
@@ -129,7 +135,7 @@ export function useVoiceInput(
             // Причина — в консоль: на экране она ничего не объясняет, а при
             // разборе показывает, оборвалось соединение или ответил сервер.
             console.warn('[voice] transcription did not come back', e);
-            onError?.(LOST_TRANSCRIPT_MESSAGE);
+            onError?.(lostTranscriptMessage());
           }
         } finally {
           clearTimeout(timeout);

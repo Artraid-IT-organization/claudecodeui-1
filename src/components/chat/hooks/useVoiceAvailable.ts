@@ -13,7 +13,17 @@ let healthRequest: Promise<boolean> | null = null;
 // снова и снова. Готовый ответ держим минуту: настройка голоса на сервере
 // меняется раз в жизни, а неудачу не запоминаем, чтобы кнопка ожила сама.
 const HEALTH_CACHE_MS = 60_000;
-let healthResult: { value: boolean; at: number } | null = null;
+let healthResult: { value: boolean; archived: boolean; at: number } | null = null;
+
+/**
+ * Whether the server keeps a copy of this user's recordings (owner only on a
+ * shared instance). Read from the last health answer, so it costs nothing at
+ * the moment it is needed - when dictation failed and the message on screen
+ * must either promise the recording is in Telegram or say nothing of the kind.
+ */
+export function recordingsAreArchived(): boolean {
+  return healthResult?.archived === true;
+}
 
 function checkVoiceHealth(): Promise<boolean> {
   if (healthResult && Date.now() - healthResult.at < HEALTH_CACHE_MS) {
@@ -25,7 +35,7 @@ function checkVoiceHealth(): Promise<boolean> {
       if (!response.ok) throw new Error(`Voice health check failed (${response.status})`);
       const data = await response.json();
       const value = data?.configured === true;
-      healthResult = { value, at: Date.now() };
+      healthResult = { value, archived: data?.archived === true, at: Date.now() };
       return value;
     })
     .finally(() => {
