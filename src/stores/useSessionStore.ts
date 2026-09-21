@@ -12,7 +12,11 @@ import { useCallback, useMemo, useRef, useState } from 'react';
 import { authenticatedFetch } from '../utils/api';
 import type { LLMProvider } from '../types/app';
 
-import { isLongReplyAlreadyOnServer, removeOptimisticUserEchoes } from './sessionMessageReconciliation';
+import {
+  appendRealtimeWithQueuedEcho,
+  isLongReplyAlreadyOnServer,
+  removeOptimisticUserEchoes,
+} from './sessionMessageReconciliation';
 import {
   buildSessionMessagesUrl,
   hasReachedCachedTailTimeBoundary,
@@ -928,7 +932,7 @@ export function useSessionStore() {
       msg.sessionId === sessionId
         ? msg
         : { ...msg, sessionId };
-    let updated = [...slot.realtimeMessages, normalizedMessage];
+    let updated = appendRealtimeWithQueuedEcho(slot.realtimeMessages, normalizedMessage);
     if (updated.length > MAX_REALTIME_MESSAGES) {
       updated = updated.slice(-MAX_REALTIME_MESSAGES);
     }
@@ -948,7 +952,7 @@ export function useSessionStore() {
         ? msg
         : { ...msg, sessionId },
     );
-    let updated = [...slot.realtimeMessages, ...normalizedMessages];
+    let updated = normalizedMessages.reduce(appendRealtimeWithQueuedEcho, slot.realtimeMessages);
     if (updated.length > MAX_REALTIME_MESSAGES) {
       updated = updated.slice(-MAX_REALTIME_MESSAGES);
     }

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type { NormalizedMessage } from './useSessionStore';
-import { removeOptimisticUserEchoes } from './sessionMessageReconciliation';
+import { appendRealtimeWithQueuedEcho, removeOptimisticUserEchoes } from './sessionMessageReconciliation';
 
 const createUserMessage = (
   id: string,
@@ -67,4 +67,39 @@ test('keeps the existing optimistic text reconciliation behavior', () => {
   });
 
   assert.deepEqual(removeOptimisticUserEchoes([persisted], [local]), []);
+});
+
+// Снимок Егора 21.09.26: «2» в 16:53:39 (пузырь вкладки) и «2» в 16:53:54
+// (сервер отправил из очереди, ход ещё дописывался).
+test('queued server echo replaces the tab bubble instead of adding a second one', () => {
+  const local = createUserMessage('local_2', '2026-09-21T13:53:39.000Z', { content: '2' });
+  const reply = { ...createUserMessage('a1', '2026-09-21T13:53:40.000Z'), role: 'assistant' as const, content: 'ok' };
+  const queued = createUserMessage('queued_q1', '2026-09-21T13:53:54.300Z', { content: '2' });
+
+  assert.deepEqual(appendRealtimeWithQueuedEcho([local, reply], queued), [queued, reply]);
+});
+
+test('queued echo without a tab bubble is simply appended', () => {
+  const queued = createUserMessage('queued_q1', '2026-09-21T13:53:54.300Z', { content: '2' });
+  const other = createUserMessage('local_x', '2026-09-21T13:53:39.000Z', { content: '1' });
+
+  assert.deepEqual(appendRealtimeWithQueuedEcho([other], queued), [other, queued]);
+});
+
+test('queued echo is dropped once the transcript row lands, even after a long wait', () => {
+  const local = createUserMessage('local_2', '2026-09-21T13:40:00.000Z', { content: '2' });
+  const queued = createUserMessage('queued_q1', '2026-09-21T13:53:54.300Z', { content: '2' });
+  const persisted = createUserMessage('claude_2', '2026-09-21T13:53:54.352Z', { content: '2' });
+
+  const realtime = appendRealtimeWithQueuedEcho([local], queued);
+  assert.deepEqual(removeOptimisticUserEchoes([persisted], realtime), []);
+});
+
+test('two identical sends keep two rows until both are persisted', () => {
+  const first = createUserMessage('local_a', '2026-09-21T13:53:39.000Z', { content: '2' });
+  const second = createUserMessage('local_b', '2026-09-21T13:53:45.000Z', { content: '2' });
+  const queued = createUserMessage('queued_q1', '2026-09-21T13:53:54.300Z', { content: '2' });
+
+  const realtime = appendRealtimeWithQueuedEcho([first, second], queued);
+  assert.equal(realtime.length, 2);
 });

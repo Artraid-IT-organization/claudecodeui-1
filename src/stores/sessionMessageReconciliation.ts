@@ -83,9 +83,51 @@ function findServerEchoForLocalUser(
   return closestMatch;
 }
 
+/** Строка сообщения человека, которую сервер разослал, отправляя его из очереди. */
+function isQueuedUserEcho(message: NormalizedMessage): boolean {
+  return message.id.startsWith('queued_') && message.kind === 'text' && message.role === 'user';
+}
+
 /**
- * Removes local optimistic user rows once a corresponding persisted turn is
- * available. Matches are one-to-one so repeated sends cannot claim one row.
+ * Живая строка из серверной очереди встаёт НА МЕСТО пузыря, который вкладка
+ * уже нарисовала сама.
+ *
+ * Стык ходов: вкладка считает ход законченным и рисует сообщение сразу, а на
+ * сервере ход ещё дописывается — сообщение ложится в очередь и через секунды
+ * уходит оттуда строкой `queued_…`. Без замены в ленте две копии: Егор
+ * 21.09.26 — «2» в 16:53:39 и «2» в 16:53:54, «зачем дублировать?». Время
+ * берём серверное: оно совпадает с записью на диске, и по нему строку потом
+ * снимает removeOptimisticUserEchoes, сколько бы сообщение ни ждало очереди.
+ */
+export function appendRealtimeWithQueuedEcho(
+  realtimeMessages: NormalizedMessage[],
+  incoming: NormalizedMessage,
+): NormalizedMessage[] {
+  const fingerprint = isQueuedUserEcho(incoming) ? userTurnFingerprint(incoming) : null;
+  const incomingTime = readMessageTime(incoming);
+  if (fingerprint && incomingTime !== null) {
+    const index = realtimeMessages.findIndex((message) => {
+      if (!message.id.startsWith('local_')) return false;
+      const local = userTurnFingerprint(message);
+      const localTime = readMessageTime(message);
+      return Boolean(local)
+        && userTurnFingerprintsMatch(local as UserTurnFingerprint, fingerprint)
+        && localTime !== null
+        && localTime <= incomingTime + LOCAL_USER_DEDUPE_CLOCK_SKEW_MS;
+    });
+    if (index !== -1) {
+      const next = realtimeMessages.slice();
+      next[index] = incoming;
+      return next;
+    }
+  }
+  return [...realtimeMessages, incoming];
+}
+
+/**
+ * Removes local optimistic user rows (and rows the server sent from its queue)
+ * once a corresponding persisted turn is available. Matches are one-to-one so
+ * repeated sends cannot claim one row.
  */
 export function removeOptimisticUserEchoes(
   serverMessages: NormalizedMessage[],
@@ -94,7 +136,7 @@ export function removeOptimisticUserEchoes(
   const claimedServerIds = new Set<string>();
 
   return realtimeMessages.filter((message) => {
-    if (!message.id.startsWith('local_')) {
+    if (!message.id.startsWith('local_') && !isQueuedUserEcho(message)) {
       return true;
     }
 
