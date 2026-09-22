@@ -42,8 +42,10 @@ async function executeCommand(
   commandName: string,
   context: Record<string, unknown>,
   sessionModels: Record<string, string> = {},
+  tokenUsage?: { getSessionTokenUsage(sessionId: string): Promise<Record<string, any>> },
 ): Promise<Record<string, unknown>> {
   const router = createCommandsRouter({
+    ...(tokenUsage ? { tokenUsage } : {}),
     fileSystem: {
       readFile: async () => JSON.stringify({ name: 'claude-code-ui', version: '0.0.0-test' }),
     } as unknown as typeof import('node:fs/promises'),
@@ -111,4 +113,41 @@ test('cost and status commands report the same resolved model as /models', async
 
   assert.equal((cost.data as { model: string }).model, 'haiku');
   assert.equal((status.data as { model: string }).model, 'haiku');
+});
+
+test('окно «Token Usage» берёт цифры с сервера в момент нажатия, а не присланный браузером ноль', async () => {
+  const asked: string[] = [];
+  const tokenUsage = {
+    getSessionTokenUsage: async (sessionId: string) => {
+      asked.push(sessionId);
+      return {
+        used: 152_041,
+        total: 1_000_000,
+        contextTokens: 152_041,
+        contextWindow: 1_000_000,
+        contextPercent: 15.2,
+        model: 'claude-opus-5-5',
+        session: { inputTokens: 9_000_000, outputTokens: 40_000, totalTokens: 9_040_000 },
+      };
+    },
+  };
+  const cost = await executeCommand('/cost', { provider: 'claude', sessionId: 'session-1', tokenUsage: null }, {}, tokenUsage);
+  assert.deepEqual(asked, ['session-1']);
+  assert.deepEqual(cost.data, {
+    tokenUsage: { used: 9_040_000, total: 1_000_000, contextUsed: 152_041, contextPercent: 15.2 },
+    tokenBreakdown: { input: 9_000_000, output: 40_000 },
+    provider: 'claude',
+    model: 'claude-opus-5-5 · 1M context',
+  });
+});
+
+test('окно «Token Usage»: сервер не нашёл чат — остаются цифры браузера', async () => {
+  const tokenUsage = { getSessionTokenUsage: async () => { throw new Error('not found'); } };
+  const cost = await executeCommand('/cost', {
+    provider: 'claude', sessionId: 'session-1', model: 'sonnet',
+    tokenUsage: { used: 10, total: 200_000, inputTokens: 7, outputTokens: 3 },
+  }, {}, tokenUsage);
+  const data = cost.data as { tokenUsage: { used: number; total: number } };
+  assert.equal(data.tokenUsage.used, 10);
+  assert.equal(data.tokenUsage.total, 200_000);
 });

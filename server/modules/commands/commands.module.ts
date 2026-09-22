@@ -2,6 +2,7 @@ import * as fs from 'node:fs/promises';
 import os from 'node:os';
 
 import { providerModelsService } from '@/modules/providers/index.js';
+import { providerTokenUsageService } from '@/modules/providers/services/provider-token-usage.service.js';
 import { findApplicationRoot, getModuleDirectory } from '@/shared/utils.js';
 
 import { createCommandsRouter } from './commands.routes.js';
@@ -12,6 +13,7 @@ export const commandsRoutes = createCommandsRouter({
   homeDirectory: os.homedir,
   appRoot: findApplicationRoot(getModuleDirectory(import.meta.url)),
   models: providerModelsService,
+  tokenUsage: providerTokenUsageService,
   runtime: {
     uptime: process.uptime,
     memoryUsage: process.memoryUsage,

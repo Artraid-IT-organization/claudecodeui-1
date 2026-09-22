@@ -55,8 +55,9 @@ test('token usage lookup requires only the app-facing session id for Claude', as
       getClaudeContextWindow: () => '180000',
     });
 
+    // Заполненность — только вход (input + cache_read + cache_creation), как у Claude Code.
     assert.deepEqual(await service.getSessionTokenUsage('app-session'), {
-      used: 155,
+      used: 125,
       total: 180_000,
       inputTokens: 125,
       outputTokens: 30,
@@ -64,6 +65,19 @@ test('token usage lookup requires only the app-facing session id for Claude', as
       cacheCreationTokens: 5,
       cacheTokens: 25,
       breakdown: { input: 125, output: 30 },
+      contextTokens: 125,
+      contextWindow: 180_000,
+      contextPercent: 0.1,
+      model: null,
+      session: {
+        inputTokens: 125,
+        outputTokens: 30,
+        freshInputTokens: 100,
+        cacheReadTokens: 20,
+        cacheCreationTokens: 5,
+        totalTokens: 155,
+        requests: 1,
+      },
     });
   } finally {
     await rm(tempDirectory, { recursive: true, force: true });
@@ -214,3 +228,100 @@ test('Claude: счётчик находится, даже если после н
   }
 });
 
+
+function assistantLine(usage: Record<string, number>, extra: Record<string, unknown> = {}, message: Record<string, unknown> = {}) {
+  return JSON.stringify({ type: 'assistant', ...extra, message: { model: 'claude-opus-5-5', ...message, usage } });
+}
+
+test('Claude: помощники и пустые <synthetic> не сбивают заполненность, повторы одного ответа склеиваются по максимуму', async () => {
+  const tempDirectory = await mkdtemp(path.join(tmpdir(), 'provider-token-usage-claude-rules-'));
+  const sessionFilePath = path.join(tempDirectory, 'session.jsonl');
+  try {
+    await writeFile(sessionFilePath, [
+      // Один ответ тремя строками: ранние несут недописанный вывод.
+      assistantLine({ input_tokens: 10, cache_read_input_tokens: 1000, cache_creation_input_tokens: 50, output_tokens: 1 }, { requestId: 'r1' }, { id: 'm1' }),
+      assistantLine({ input_tokens: 10, cache_read_input_tokens: 1000, cache_creation_input_tokens: 50, output_tokens: 7 }, { requestId: 'r1' }, { id: 'm1' }),
+      assistantLine({ input_tokens: 10, cache_read_input_tokens: 1000, cache_creation_input_tokens: 50, output_tokens: 90 }, { requestId: 'r1' }, { id: 'm1' }),
+      assistantLine({ input_tokens: 5, cache_read_input_tokens: 2000, cache_creation_input_tokens: 0, output_tokens: 40 }, { requestId: 'r2' }, { id: 'm2' }),
+      // Помощник: в полный расход входит, в заполненность — нет.
+      assistantLine({ input_tokens: 3, cache_read_input_tokens: 9000, cache_creation_input_tokens: 0, output_tokens: 11 }, { requestId: 'r3', isSidechain: true }, { id: 'm3' }),
+      // Прерывание: нулевой счёт.
+      assistantLine({ input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 0 }, {}, { model: '<synthetic>', id: 'm4' }),
+    ].join('\n') + '\n');
+
+    const service = createProviderTokenUsageService({
+      getSessionById: () => createSessionRow({ jsonl_path: sessionFilePath }),
+      getClaudeContextWindow: () => undefined,
+      resolveClaudeContextWindow: () => 200_000,
+    });
+    const usage = await service.getSessionTokenUsage('app-session');
+    assert.equal(usage.used, 2005);
+    assert.equal(usage.contextTokens, 2005);
+    assert.equal(usage.outputTokens, 40);
+    assert.equal(usage.model, 'claude-opus-5-5');
+    assert.deepEqual(usage.session, {
+      inputTokens: 1060 + 2005 + 9003,
+      outputTokens: 90 + 40 + 11,
+      freshInputTokens: 18,
+      cacheReadTokens: 12000,
+      cacheCreationTokens: 50,
+      totalTokens: 1060 + 2005 + 9003 + 141,
+      requests: 3,
+    });
+  } finally {
+    await rm(tempDirectory, { recursive: true, force: true });
+  }
+});
+
+test('Claude: после сжатия разговора заполненность — «стало» из compact_boundary до первого нового ответа; файл дочитывается', async () => {
+  const tempDirectory = await mkdtemp(path.join(tmpdir(), 'provider-token-usage-claude-compact-'));
+  const sessionFilePath = path.join(tempDirectory, 'session.jsonl');
+  try {
+    await writeFile(sessionFilePath, [
+      assistantLine({ input_tokens: 1, cache_read_input_tokens: 950_000, cache_creation_input_tokens: 0, output_tokens: 5 }, { requestId: 'r1' }, { id: 'm1' }),
+      JSON.stringify({ type: 'system', subtype: 'compact_boundary', compactMetadata: { trigger: 'auto', preTokens: 964_535, postTokens: 21_496 } }),
+    ].join('\n') + '\n');
+    const seenObserved: number[] = [];
+    const service = createProviderTokenUsageService({
+      getSessionById: () => createSessionRow({ jsonl_path: sessionFilePath }),
+      getClaudeContextWindow: () => undefined,
+      resolveClaudeContextWindow: (input) => {
+        seenObserved.push(input.maxObservedContext ?? 0);
+        return 1_000_000;
+      },
+    });
+    const afterCompact = await service.getSessionTokenUsage('app-session');
+    assert.equal(afterCompact.contextTokens, 21_496);
+    assert.equal(afterCompact.contextPercent, 2.1);
+    assert.equal(seenObserved[0], 964_535);
+
+    await writeFile(sessionFilePath, [
+      assistantLine({ input_tokens: 1, cache_read_input_tokens: 950_000, cache_creation_input_tokens: 0, output_tokens: 5 }, { requestId: 'r1' }, { id: 'm1' }),
+      JSON.stringify({ type: 'system', subtype: 'compact_boundary', compactMetadata: { trigger: 'auto', preTokens: 964_535, postTokens: 21_496 } }),
+      assistantLine({ input_tokens: 2, cache_read_input_tokens: 25_000, cache_creation_input_tokens: 100, output_tokens: 8 }, { requestId: 'r2' }, { id: 'm2' }),
+    ].join('\n') + '\n');
+    const next = await service.getSessionTokenUsage('app-session');
+    assert.equal(next.contextTokens, 25_102);
+    assert.equal(next.session?.requests, 2);
+    assert.equal(next.session?.outputTokens, 13);
+  } finally {
+    await rm(tempDirectory, { recursive: true, force: true });
+  }
+});
+
+test('Claude: чат находится и по номеру у Claude, если страница ещё не знает номер сайта', async () => {
+  const tempDirectory = await mkdtemp(path.join(tmpdir(), 'provider-token-usage-claude-provider-id-'));
+  const sessionFilePath = path.join(tempDirectory, 'session.jsonl');
+  try {
+    await writeFile(sessionFilePath, assistantLine({ input_tokens: 7, output_tokens: 1 }) + '\n');
+    const service = createProviderTokenUsageService({
+      getSessionById: () => null,
+      getSessionByProviderSessionId: (id) => (id === 'provider-session' ? createSessionRow({ jsonl_path: sessionFilePath }) : null),
+      getClaudeContextWindow: () => undefined,
+      resolveClaudeContextWindow: () => 200_000,
+    });
+    assert.equal((await service.getSessionTokenUsage('provider-session')).contextTokens, 7);
+  } finally {
+    await rm(tempDirectory, { recursive: true, force: true });
+  }
+});

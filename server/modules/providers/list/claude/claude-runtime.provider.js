@@ -136,6 +136,11 @@ function resolveClaudeEffort(model, effort, modelsDefinition = CLAUDE_PREDEFINED
 }
 
 import { recordRateLimitEvent } from '@/modules/providers/services/usage-limits.store.js';
+import {
+  pickContextWindowFromModelUsage,
+  rememberContextWindow,
+  resolveClaudeContextWindow,
+} from '@/modules/providers/services/claude-context-window.js';
 
 function createRequestId() {
   if (typeof crypto.randomUUID === 'function') {
@@ -467,69 +472,70 @@ function readNumber(value) {
 }
 
 /**
- * Extracts token usage from SDK messages.
- * Prefers per-step `message.usage` (Claude message payload), then falls back
- * to result-level usage/modelUsage for compatibility across SDK versions.
+ * Живой счётчик контекста во время ответа — те же правила, что у серверного
+ * подсчёта (provider-token-usage.service.ts) и у Claude Code:
+ * заполненность = `input + cache_creation + cache_read` последнего ответа
+ * ОСНОВНОЙ ветки. Ответы помощников (`parent_tool_use_id`) показывают ИХ окно,
+ * а не окно чата; `<synthetic>` и ошибки пишутся с нулевым счётом — пропуск.
+ * `result.usage` — сумма всех запросов хода, это не заполненность: из итога
+ * берём только размер окна (`modelUsage[модель].contextWindow`) и запоминаем.
  * @param {Object} sdkMessage - SDK stream message
+ * @param {{ sessionIds: Array<string|null>, sessionModel?: string|null, last: { context: number, input: number, output: number, cacheRead: number, cacheCreation: number, model: string|null } }} tracker
  * @returns {Object|null} Token budget object or null
  */
-function extractTokenBudget(sdkMessage) {
+function extractTokenBudget(sdkMessage, tracker) {
   if (!sdkMessage || typeof sdkMessage !== 'object') {
     return null;
   }
 
-  const messageUsage = sdkMessage.message?.usage || sdkMessage.usage;
-  if (messageUsage && typeof messageUsage === 'object') {
-    const directInputTokens = readNumber(messageUsage.input_tokens ?? messageUsage.inputTokens);
-    const cacheCreationTokens = readNumber(messageUsage.cache_creation_input_tokens ?? messageUsage.cacheCreationInputTokens ?? messageUsage.cacheCreationTokens);
-    const cacheReadTokens = readNumber(messageUsage.cache_read_input_tokens ?? messageUsage.cacheReadInputTokens ?? messageUsage.cacheReadTokens);
-    const cacheTokens = cacheCreationTokens + cacheReadTokens;
-    const inputTokens = directInputTokens + cacheTokens;
-    const outputTokens = readNumber(messageUsage.output_tokens ?? messageUsage.outputTokens);
-    const totalUsed = inputTokens + outputTokens;
-    const contextWindow = parseInt(process.env.CONTEXT_WINDOW, 10) || 160000;
-
-    return {
-      used: totalUsed,
-      total: contextWindow,
-      inputTokens,
-      outputTokens,
-      cacheReadTokens,
-      cacheCreationTokens,
-      cacheTokens,
-      breakdown: {
-        input: inputTokens,
-        output: outputTokens,
-      },
-    };
+  if (sdkMessage.type === 'result') {
+    const picked = pickContextWindowFromModelUsage(sdkMessage.modelUsage, tracker.last.model);
+    if (picked) {
+      rememberContextWindow(tracker.sessionIds, picked.contextWindow, picked.model);
+    }
+    if (!tracker.last.context) {
+      return null;
+    }
+  } else {
+    const messageUsage = sdkMessage.type === 'assistant' ? sdkMessage.message?.usage : null;
+    if (!messageUsage || typeof messageUsage !== 'object' || sdkMessage.parent_tool_use_id) {
+      return null;
+    }
+    const model = typeof sdkMessage.message?.model === 'string' ? sdkMessage.message.model : null;
+    const input = readNumber(messageUsage.input_tokens ?? messageUsage.inputTokens);
+    const cacheCreation = readNumber(messageUsage.cache_creation_input_tokens ?? messageUsage.cacheCreationInputTokens ?? messageUsage.cacheCreationTokens);
+    const cacheRead = readNumber(messageUsage.cache_read_input_tokens ?? messageUsage.cacheReadInputTokens ?? messageUsage.cacheReadTokens);
+    const output = readNumber(messageUsage.output_tokens ?? messageUsage.outputTokens);
+    const context = input + cacheCreation + cacheRead;
+    if (model === '<synthetic>' || context === 0) {
+      return null;
+    }
+    tracker.last = { context, input, output, cacheRead, cacheCreation, model: model || tracker.last.model };
   }
 
-  if (!sdkMessage.modelUsage || typeof sdkMessage.modelUsage !== 'object') {
-    return null;
-  }
-
-  // Fallback for older SDK messages with only modelUsage
-  const modelKey = Object.keys(sdkMessage.modelUsage)[0];
-  const modelData = sdkMessage.modelUsage[modelKey];
-
-  if (!modelData || typeof modelData !== 'object') {
-    return null;
-  }
-
-  const inputTokens = readNumber(modelData.cumulativeInputTokens ?? modelData.inputTokens);
-  const outputTokens = readNumber(modelData.cumulativeOutputTokens ?? modelData.outputTokens);
-  const totalUsed = inputTokens + outputTokens;
-  const contextWindow = parseInt(process.env.CONTEXT_WINDOW, 10) || 160000;
+  const last = tracker.last;
+  const contextWindow = resolveClaudeContextWindow({
+    sessionIds: tracker.sessionIds,
+    sessionModel: tracker.sessionModel,
+    maxObservedContext: last.context,
+  });
 
   return {
-    used: totalUsed,
+    used: last.context,
     total: contextWindow,
-    inputTokens,
-    outputTokens,
+    inputTokens: last.context,
+    outputTokens: last.output,
+    cacheReadTokens: last.cacheRead,
+    cacheCreationTokens: last.cacheCreation,
+    cacheTokens: last.cacheRead + last.cacheCreation,
     breakdown: {
-      input: inputTokens,
-      output: outputTokens,
+      input: last.context,
+      output: last.output,
     },
+    contextTokens: last.context,
+    contextWindow,
+    contextPercent: contextWindow > 0 ? Math.round((last.context / contextWindow) * 1000) / 10 : 0,
+    model: last.model,
   };
 }
 
@@ -1073,6 +1079,12 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     }, 30_000);
     stallTimer.unref?.();
 
+    const tokenTracker = {
+      sessionIds: [capturedSessionId, sessionId],
+      sessionModel: sdkOptions.model || null,
+      last: { context: 0, input: 0, output: 0, cacheRead: 0, cacheCreation: 0, model: null },
+    };
+
     for await (const message of queryInstance) {
       lastMessageAt = Date.now();
 
@@ -1128,7 +1140,8 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       }
 
       // Extract and send token budget updates from assistant/result usage payloads
-      const tokenBudgetData = extractTokenBudget(message);
+      tokenTracker.sessionIds = [capturedSessionId, sessionId];
+      const tokenBudgetData = extractTokenBudget(message, tokenTracker);
       if (tokenBudgetData) {
         ws.send(createNormalizedMessage({ kind: 'status', text: 'token_budget', tokenBudget: tokenBudgetData, sessionId: capturedSessionId || sessionId || null, provider: 'claude' }));
       }

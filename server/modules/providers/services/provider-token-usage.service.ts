@@ -6,6 +6,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 
 import { sessionsDb } from '@/modules/database/index.js';
+import { resolveClaudeContextWindow } from '@/modules/providers/services/claude-context-window.js';
 import type { AnyRecord } from '@/shared/types.js';
 import { AppError, getOpenCodeDatabasePath } from '@/shared/utils.js';
 
@@ -13,12 +14,14 @@ type SessionRow = NonNullable<ReturnType<typeof sessionsDb.getSessionById>>;
 
 type ProviderTokenUsageServiceDependencies = {
   getSessionById: (sessionId: string) => SessionRow | null | undefined;
+  getSessionByProviderSessionId?: (providerSessionId: string) => SessionRow | null | undefined;
   getHomeDirectory: () => string;
   getOpenCodeDatabasePath: () => string;
   fileExists: (filePath: string) => boolean;
   readDirectory: (directoryPath: string) => Promise<Dirent[]>;
   readTextFile: (filePath: string) => Promise<string>;
   getClaudeContextWindow: () => string | undefined;
+  resolveClaudeContextWindow: typeof resolveClaudeContextWindow;
 };
 
 type TokenUsageResult = {
@@ -32,6 +35,19 @@ type TokenUsageResult = {
   breakdown: {
     input: number;
     output: number;
+  };
+  contextTokens?: number;
+  contextWindow?: number;
+  contextPercent?: number;
+  model?: string | null;
+  session?: {
+    inputTokens: number;
+    outputTokens: number;
+    freshInputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+    totalTokens: number;
+    requests: number;
   };
   unsupported?: boolean;
   message?: string;
@@ -47,12 +63,14 @@ type OpenCodeTokenRow = {
 
 const defaultDependencies: ProviderTokenUsageServiceDependencies = {
   getSessionById: (sessionId) => sessionsDb.getSessionById(sessionId),
+  getSessionByProviderSessionId: (providerSessionId) => sessionsDb.getSessionByProviderSessionId(providerSessionId),
   getHomeDirectory: () => os.homedir(),
   getOpenCodeDatabasePath,
   fileExists: (filePath) => fsSync.existsSync(filePath),
   readDirectory: (directoryPath) => fsp.readdir(directoryPath, { withFileTypes: true }),
   readTextFile: (filePath) => fsp.readFile(filePath, 'utf8'),
   getClaudeContextWindow: () => process.env.CONTEXT_WINDOW,
+  resolveClaudeContextWindow,
 };
 
 function readUsageNumber(value: unknown): number {
@@ -131,83 +149,216 @@ function readCodexTokenUsage(fileContent: string): TokenUsageResult {
   };
 }
 
-function readClaudeTokenUsage(fileContent: string, configuredContextWindow: string | undefined): TokenUsageResult {
-  let inputTokens = 0;
-  let outputTokens = 0;
-  let cacheReadTokens = 0;
-  let cacheCreationTokens = 0;
-  const lines = fileContent.trim().split('\n');
+/**
+ * Счётчик токенов чата Claude по файлу переписки. Правила взяты у готовых
+ * инструментов, а не придуманы:
+ *
+ * — Заполненность контекста — последний ответ ОСНОВНОЙ ветки:
+ *   `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`, без
+ *   вывода. Так считает сам Claude Code (документация строки состояния:
+ *   «used_percentage is calculated from input tokens only»), ccstatusline
+ *   (jsonl-metrics.ts: `isMainChain = !isSidechain && !isApiErrorMessage`) и
+ *   основной claudecodeui (пропуск помощников и `<synthetic>` с нулевым счётом).
+ *   После сжатия разговора (`compact_boundary`) до первого нового ответа —
+ *   `compactMetadata.postTokens`, как у ccstatusline.
+ * — Полный расход за чат — сумма всех ответов. Claude Code пишет один ответ
+ *   несколькими строками с одним `message.id` + `requestId`, и ранние строки
+ *   несут недописанный счёт вывода. Склейка по этой паре с максимумом по каждому
+ *   полю — как в ccusage (Rust, should_replace_deduped_entry) и tokscale.
+ *
+ * Файл дочитывается с места прошлого чтения: у долгих чатов он до 90 МБ, а
+ * счётчик спрашивают на каждое открытие чата и каждое окно «Token Usage».
+ */
 
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    try {
-      const entry = JSON.parse(lines[index]) as AnyRecord;
-      const usage = entry.type === 'assistant' ? entry.message?.usage : null;
-      if (!usage) {
-        continue;
-      }
+type UsageParts = { input: number; output: number; cacheRead: number; cacheCreation: number };
 
-      const directInputTokens = readUsageNumber(usage.input_tokens ?? usage.inputTokens);
-      cacheReadTokens = readUsageNumber(
-        usage.cache_read_input_tokens ?? usage.cacheReadInputTokens ?? usage.cacheReadTokens,
-      );
-      cacheCreationTokens = readUsageNumber(
-        usage.cache_creation_input_tokens
-          ?? usage.cacheCreationInputTokens
-          ?? usage.cacheCreationTokens,
-      );
-      inputTokens = directInputTokens + cacheReadTokens + cacheCreationTokens;
-      outputTokens = readUsageNumber(usage.output_tokens ?? usage.outputTokens);
-      break;
-    } catch {
-      // Skip malformed lines without discarding usage from earlier messages.
-    }
-  }
+type ClaudeScanState = {
+  size: number;
+  mtimeMs: number;
+  offset: number;
+  pending: string;
+  requests: Map<string, UsageParts>;
+  totals: UsageParts;
+  lastMain: (UsageParts & { model: string | null }) | null;
+  compactPostTokens: number | null;
+  maxObservedContext: number;
+  model: string | null;
+};
 
-  const parsedContextWindow = Number.parseInt(configuredContextWindow ?? '', 10);
-  const contextWindow = Number.isFinite(parsedContextWindow) ? parsedContextWindow : 160_000;
-  const cacheTokens = cacheReadTokens + cacheCreationTokens;
+const scanStates = new Map<string, ClaudeScanState>();
+const SCAN_STATE_LIMIT = 64;
+const SCAN_CHUNK_BYTES = 4 * 1024 * 1024;
 
+function emptyParts(): UsageParts {
+  return { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
+}
+
+function newScanState(): ClaudeScanState {
   return {
-    used: inputTokens + outputTokens,
-    total: contextWindow,
-    inputTokens,
-    outputTokens,
-    cacheReadTokens,
-    cacheCreationTokens,
-    cacheTokens,
-    breakdown: { input: inputTokens, output: outputTokens },
+    size: 0,
+    mtimeMs: 0,
+    offset: 0,
+    pending: '',
+    requests: new Map(),
+    totals: emptyParts(),
+    lastMain: null,
+    compactPostTokens: null,
+    maxObservedContext: 0,
+    model: null,
   };
 }
 
-/**
- * Расход токенов — это последняя строка ответа модели со счётчиком, а она почти
- * всегда в самом конце стенограммы. Раньше файл читался целиком: 89 МБ текста в
- * память и 1,3 с на каждое открытие чата (замер 14.09.26). Теперь читаем с конца
- * кусками, увеличивая кусок, пока не найдём счётчик или не дойдём до начала.
- * Первая строка куска может быть обрывком — разбор её просто пропустит.
- */
-const TOKEN_USAGE_TAIL_START_BYTES = 256 * 1024;
+function readUsageParts(usage: AnyRecord): UsageParts {
+  return {
+    input: readUsageNumber(usage.input_tokens ?? usage.inputTokens),
+    output: readUsageNumber(usage.output_tokens ?? usage.outputTokens),
+    cacheRead: readUsageNumber(
+      usage.cache_read_input_tokens ?? usage.cacheReadInputTokens ?? usage.cacheReadTokens,
+    ),
+    cacheCreation: readUsageNumber(
+      usage.cache_creation_input_tokens ?? usage.cacheCreationInputTokens ?? usage.cacheCreationTokens,
+    ),
+  };
+}
 
-async function readClaudeTokenUsageFromTail(
-  filePath: string,
-  configuredContextWindow: string | undefined,
-): Promise<TokenUsageResult> {
-  const handle = await fsp.open(filePath, 'r');
+function contextOf(parts: UsageParts): number {
+  return parts.input + parts.cacheRead + parts.cacheCreation;
+}
+
+function applyClaudeLine(state: ClaudeScanState, line: string): void {
+  if (!line || (!line.includes('"usage"') && !line.includes('compact_boundary'))) return;
+  let entry: AnyRecord;
   try {
-    const { size } = await handle.stat();
-    let windowBytes = Math.min(TOKEN_USAGE_TAIL_START_BYTES, size);
-    for (;;) {
-      const buffer = Buffer.alloc(windowBytes);
-      const { bytesRead } = await handle.read(buffer, 0, windowBytes, size - windowBytes);
-      const result = readClaudeTokenUsage(buffer.subarray(0, bytesRead).toString('utf8'), configuredContextWindow);
-      if (result.used > 0 || windowBytes >= size) {
-        return result;
-      }
-      windowBytes = Math.min(windowBytes * 4, size);
-    }
-  } finally {
-    await handle.close();
+    entry = JSON.parse(line) as AnyRecord;
+  } catch {
+    return;
   }
+
+  if (entry.type === 'system' && entry.subtype === 'compact_boundary') {
+    const meta = entry.compactMetadata ?? {};
+    const post = readUsageNumber(meta.postTokens ?? meta.post_tokens);
+    state.compactPostTokens = post > 0 ? post : 0;
+    state.maxObservedContext = Math.max(state.maxObservedContext, readUsageNumber(meta.preTokens ?? meta.pre_tokens));
+    return;
+  }
+
+  const usage = entry.type === 'assistant' ? entry.message?.usage : null;
+  if (!usage || typeof usage !== 'object') return;
+
+  const parts = readUsageParts(usage as AnyRecord);
+  const model = typeof entry.message?.model === 'string' ? entry.message.model : null;
+  const isEmpty = parts.input + parts.output + parts.cacheRead + parts.cacheCreation === 0;
+
+  // Полный расход: склейка строк одного ответа, максимум по каждому полю.
+  const messageId = typeof entry.message?.id === 'string' ? entry.message.id : '';
+  const requestId = typeof entry.requestId === 'string' ? entry.requestId : '';
+  const key = messageId && requestId ? `${messageId}:${requestId}` : String(entry.uuid ?? `${state.offset}:${state.requests.size}`);
+  if (!isEmpty) {
+    const prev = state.requests.get(key) ?? emptyParts();
+    const next: UsageParts = {
+      input: Math.max(prev.input, parts.input),
+      output: Math.max(prev.output, parts.output),
+      cacheRead: Math.max(prev.cacheRead, parts.cacheRead),
+      cacheCreation: Math.max(prev.cacheCreation, parts.cacheCreation),
+    };
+    state.totals.input += next.input - prev.input;
+    state.totals.output += next.output - prev.output;
+    state.totals.cacheRead += next.cacheRead - prev.cacheRead;
+    state.totals.cacheCreation += next.cacheCreation - prev.cacheCreation;
+    state.requests.set(key, next);
+  }
+
+  // Заполненность: только основная ветка, без ошибок API и пустых `<synthetic>`.
+  const isMainChain = entry.isSidechain !== true && !entry.isApiErrorMessage && model !== '<synthetic>';
+  if (isMainChain && !isEmpty && contextOf(parts) > 0) {
+    state.lastMain = { ...parts, model };
+    state.compactPostTokens = null;
+    state.maxObservedContext = Math.max(state.maxObservedContext, contextOf(parts));
+    if (model) state.model = model;
+  }
+}
+
+async function scanClaudeTranscript(filePath: string): Promise<ClaudeScanState> {
+  const stat = await fsp.stat(filePath);
+  let state = scanStates.get(filePath);
+  // Файл переписали или урезали (например, откат чата) — считаем заново.
+  if (!state || stat.size < state.size || (stat.size === state.size && stat.mtimeMs !== state.mtimeMs)) {
+    state = newScanState();
+  }
+  if (stat.size > state.offset) {
+    const handle = await fsp.open(filePath, 'r');
+    try {
+      while (state.offset < stat.size) {
+        const length = Math.min(SCAN_CHUNK_BYTES, stat.size - state.offset);
+        const buffer = Buffer.alloc(length);
+        const { bytesRead } = await handle.read(buffer, 0, length, state.offset);
+        if (bytesRead <= 0) break;
+        // Кусок режется по последнему переводу строки: многобайтные буквы и
+        // недописанная последняя строка остаются в `pending` до следующего раза.
+        let chunk = buffer.subarray(0, bytesRead);
+        const lastNewline = chunk.lastIndexOf(0x0a);
+        if (lastNewline === -1) {
+          state.pending += chunk.toString('utf8');
+          state.offset += bytesRead;
+          continue;
+        }
+        const tail = chunk.subarray(lastNewline + 1);
+        chunk = chunk.subarray(0, lastNewline);
+        const text = state.pending + chunk.toString('utf8');
+        state.pending = tail.toString('utf8');
+        state.offset += bytesRead;
+        for (const line of text.split('\n')) applyClaudeLine(state, line);
+      }
+    } finally {
+      await handle.close();
+    }
+  }
+  state.size = stat.size;
+  state.mtimeMs = stat.mtimeMs;
+  scanStates.delete(filePath);
+  scanStates.set(filePath, state);
+  if (scanStates.size > SCAN_STATE_LIMIT) {
+    const oldest = scanStates.keys().next().value;
+    if (oldest) scanStates.delete(oldest);
+  }
+  return state;
+}
+
+function buildClaudeTokenUsage(
+  state: ClaudeScanState,
+  contextWindow: number,
+): TokenUsageResult {
+  const last = state.lastMain;
+  const contextTokens = state.compactPostTokens ?? (last ? contextOf(last) : 0);
+  const lastInput = last ? contextOf(last) : 0;
+  const lastOutput = last ? last.output : 0;
+  const totals = state.totals;
+  const sessionInput = totals.input + totals.cacheRead + totals.cacheCreation;
+
+  return {
+    // `used` — заполненность контекста, как и раньше (кнопка у поля ввода).
+    used: contextTokens,
+    total: contextWindow,
+    inputTokens: lastInput,
+    outputTokens: lastOutput,
+    cacheReadTokens: last ? last.cacheRead : 0,
+    cacheCreationTokens: last ? last.cacheCreation : 0,
+    cacheTokens: last ? last.cacheRead + last.cacheCreation : 0,
+    breakdown: { input: lastInput, output: lastOutput },
+    contextTokens,
+    contextWindow,
+    contextPercent: contextWindow > 0 ? Math.round((contextTokens / contextWindow) * 1000) / 10 : 0,
+    model: state.model,
+    session: {
+      inputTokens: sessionInput,
+      outputTokens: totals.output,
+      freshInputTokens: totals.input,
+      cacheReadTokens: totals.cacheRead,
+      cacheCreationTokens: totals.cacheCreation,
+      totalTokens: sessionInput + totals.output,
+      requests: state.requests.size,
+    },
+  };
 }
 
 function readOpenCodeTokenUsage(databasePath: string, providerSessionId: string): TokenUsageResult {
@@ -287,7 +438,9 @@ export function createProviderTokenUsageService(
      * session id, then returns the latest usage snapshot for that provider.
      */
     async getSessionTokenUsage(sessionId: string): Promise<TokenUsageResult> {
-      const session = dependencies.getSessionById(sessionId);
+      // Страница знает чат то по номеру сайта, то (новый чат, первые секунды) по номеру у Claude.
+      const session = dependencies.getSessionById(sessionId)
+        ?? dependencies.getSessionByProviderSessionId?.(sessionId);
       if (!session) {
         throw new AppError(`Session "${sessionId}" was not found.`, {
           code: 'SESSION_NOT_FOUND',
@@ -295,7 +448,7 @@ export function createProviderTokenUsageService(
         });
       }
 
-      const providerSessionId = session.provider_session_id || sessionId;
+      const providerSessionId = session.provider_session_id || session.session_id || sessionId;
 
       if (session.provider === 'cursor') {
         return {
@@ -376,7 +529,16 @@ export function createProviderTokenUsageService(
         });
       }
 
-      return readClaudeTokenUsageFromTail(sessionFilePath, dependencies.getClaudeContextWindow());
+      const state = await scanClaudeTranscript(sessionFilePath);
+      const configuredWindow = Number.parseInt(dependencies.getClaudeContextWindow() ?? '', 10);
+      const contextWindow = Number.isFinite(configuredWindow) && configuredWindow > 0
+        ? configuredWindow
+        : dependencies.resolveClaudeContextWindow({
+          sessionIds: [session.session_id, providerSessionId, sessionId],
+          sessionModel: session.model,
+          maxObservedContext: state.maxObservedContext,
+        });
+      return buildClaudeTokenUsage(state, contextWindow);
     },
   };
 }

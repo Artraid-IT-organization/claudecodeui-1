@@ -574,7 +574,11 @@ export function useChatRealtimeHandlers({
 
         case 'status': {
           if (msg.text === 'token_budget' && msg.tokenBudget) {
-            setTokenBudget(msg.tokenBudget as Record<string, unknown>);
+            // Счётчик приходит от КАЖДОГО работающего чата; чужой не должен
+            // подменять цифры открытого (было: «379 117» у чата с 63 000).
+            if (!msg.sessionId || msg.sessionId === activeViewSessionId) {
+              setTokenBudget(msg.tokenBudget as Record<string, unknown>);
+            }
           } else if (msg.text && sid) {
             onSessionProcessing?.(sid, {
               statusText: msg.text as string,

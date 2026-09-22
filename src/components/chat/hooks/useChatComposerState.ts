@@ -115,6 +115,8 @@ export type CostCommandData = {
   tokenUsage?: {
     used?: number;
     total?: number;
+    contextUsed?: number;
+    contextPercent?: number;
   };
   tokenBreakdown?: {
     input?: number;

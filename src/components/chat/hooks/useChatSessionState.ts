@@ -901,10 +901,6 @@ export function useChatSessionState({
     if (loadAllOverlayTimerRef.current) clearTimeout(loadAllOverlayTimerRef.current);
     if (loadAllFinishedTimerRef.current) clearTimeout(loadAllFinishedTimerRef.current);
 
-    if (sessionChanged) {
-      setTokenBudget(null);
-    }
-
     setCurrentSessionId(selectedSessionId);
 
     lastLoadedSessionKeyRef.current = sessionKey;
@@ -1119,29 +1115,42 @@ export function useChatSessionState({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatMessages.length, isActive, isLoadingSessionMessages, searchTarget]);
 
-  // Initial token usage fetch for providers with file-backed usage data.
+  // Счётчик токенов открытого чата. Смена чата сразу убирает цифры прежнего;
+  // запрос к серверу — при открытии, при возврате на вкладку и после конца
+  // каждого ответа (во время ответа цифры идут живыми событиями). Раньше
+  // запрос шёл только при смене чата, а обнуление в эффекте загрузки истории
+  // могло сработать уже ПОСЛЕ ответа сервера — окно показывало «0» (22.09.26).
+  const tokenUsageSessionId = selectedSession?.id || null;
   useEffect(() => {
-    if (!selectedSession?.id) {
-      setTokenBudget(null);
-      return;
+    setTokenBudget(null);
+  }, [tokenUsageSessionId]);
+
+  useEffect(() => {
+    if (!tokenUsageSessionId || !isActive) {
+      return undefined;
     }
-    const fetchInitialTokenUsage = async () => {
+    let cancelled = false;
+    const fetchTokenUsage = async () => {
       try {
         // The provider module resolves storage and provider details from the session id.
-        const url = `/api/providers/sessions/${encodeURIComponent(selectedSession.id)}/token-usage`;
+        const url = `/api/providers/sessions/${encodeURIComponent(tokenUsageSessionId)}/token-usage`;
         const response = await authenticatedFetch(url);
+        if (cancelled) return;
         if (response.ok) {
           const payload = await response.json();
-          setTokenBudget(payload.data ?? null);
-        } else {
-          setTokenBudget(null);
+          if (!cancelled && payload?.data) {
+            setTokenBudget(payload.data);
+          }
         }
       } catch (error) {
-        console.error('Failed to fetch initial token usage:', error);
+        console.error('Failed to fetch token usage:', error);
       }
     };
-    fetchInitialTokenUsage();
-  }, [selectedSession?.id]);
+    fetchTokenUsage();
+    return () => {
+      cancelled = true;
+    };
+  }, [tokenUsageSessionId, isActive, isProcessing]);
 
   const visibleMessages = useMemo(() => {
     if (chatMessages.length <= visibleMessageCount) return chatMessages;

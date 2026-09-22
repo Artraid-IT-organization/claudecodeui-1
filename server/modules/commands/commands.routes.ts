@@ -11,6 +11,8 @@ type CommandsRouterDependencies = {
   homeDirectory(): string;
   appRoot: string;
   models: typeof import('../providers/index.js').providerModelsService;
+  /** Свежий счётчик чата с сервера для окна «Token Usage»; без него — цифры из браузера. */
+  tokenUsage?: { getSessionTokenUsage(sessionId: string): Promise<Record<string, any>> };
   runtime: {
     uptime(): number;
     memoryUsage(): NodeJS.MemoryUsage;
@@ -270,9 +272,47 @@ Custom commands can be created in:
   "/models": (args, context) => executeModelsCommand(args, context, providerModelsService),
 
   "/cost": async (args, context) => {
-    const tokenUsage = context?.tokenUsage || {};
     const provider = readModelProvider(context?.provider);
     const model = await resolveCommandModel(providerModelsService, provider, context);
+
+    // Цифры окна берутся с сервера в момент нажатия. Раньше окно показывало то,
+    // что лежало в памяти браузера, а браузер её обнулял при открытии чата и
+    // подменял счётчиком любого другого работающего чата: «0» у долгого
+    // разговора и чужие цифры (22.09.26).
+    let fresh = null;
+    if (dependencies.tokenUsage && typeof context?.sessionId === "string" && context.sessionId) {
+      try {
+        fresh = await dependencies.tokenUsage.getSessionTokenUsage(context.sessionId);
+      } catch {
+        fresh = null;
+      }
+    }
+    if (fresh?.session && !fresh.unsupported) {
+      const contextWindow = Number(fresh.contextWindow ?? fresh.total) || 0;
+      const windowLabel = contextWindow >= 1_000_000
+        ? `${Math.round(contextWindow / 100_000) / 10}M`
+        : `${Math.round(contextWindow / 1000)}K`;
+      return {
+        type: "builtin",
+        action: "cost",
+        data: {
+          tokenUsage: {
+            used: Number(fresh.session.totalTokens) || 0,
+            total: contextWindow,
+            contextUsed: Number(fresh.contextTokens) || 0,
+            contextPercent: Number(fresh.contextPercent) || 0,
+          },
+          tokenBreakdown: {
+            input: Number(fresh.session.inputTokens) || 0,
+            output: Number(fresh.session.outputTokens) || 0,
+          },
+          provider,
+          model: fresh.model && contextWindow ? `${fresh.model} · ${windowLabel} context` : (fresh.model || model),
+        },
+      };
+    }
+
+    const tokenUsage = context?.tokenUsage || {};
 
     const reportedUsed =
       Number(

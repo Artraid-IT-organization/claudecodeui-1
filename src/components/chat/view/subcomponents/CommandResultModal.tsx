@@ -450,7 +450,14 @@ function CostContent({ data }: { data: CostCommandData }) {
           },
         ]),
     ...(total > 0
-      ? [{ label: 'Context window', value: formatNumber(total), icon: Gauge }]
+      ? [{
+          label: 'Context window',
+          // Занято / всего (%), как счётчик контекста в терминальном Claude Code.
+          value: typeof data.tokenUsage?.contextUsed === 'number'
+            ? `${formatNumber(Number(data.tokenUsage.contextUsed))} / ${formatNumber(total)} (${Number(data.tokenUsage.contextPercent ?? 0).toLocaleString('ru-RU')}%)`
+            : formatNumber(total),
+          icon: Gauge,
+        }]
       : []),
   ];
 
