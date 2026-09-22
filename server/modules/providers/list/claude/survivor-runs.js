@@ -29,6 +29,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { wrapInAgentRoom } from './agent-rooms.js';
+
 let shuttingDown = false;
 /** appSessionId → { pid, providerSessionId, configDir, startedAt, transcriptPath, transcriptMtime } */
 const survivors = new Map();
@@ -85,7 +87,11 @@ export function markShuttingDown() {
  * уборке SDK убить агента при остановке сервера.
  */
 export function spawnSurvivableClaude(spawnOptions, context = {}) {
-  const { command, args, cwd, env, signal } = spawnOptions;
+  const { cwd, signal } = spawnOptions;
+  // Своя комната (cgroup) для агента — см. agent-rooms.js. PID тот же.
+  const { command, args, env } = wrapInAgentRoom(
+    spawnOptions.command, spawnOptions.args, spawnOptions.env, context.appSessionId,
+  );
   const child = spawn(command, args, {
     cwd,
     env,
