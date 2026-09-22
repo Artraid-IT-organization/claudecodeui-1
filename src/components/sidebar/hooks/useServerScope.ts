@@ -8,23 +8,30 @@ import { useCallback, useSyncExternalStore } from 'react';
  *
  * Выбор живёт здесь, а не в состоянии панели: его спрашивают и шапка
  * (какая кнопка нажата), и список папок, и лента последних чатов, и
- * создание нового чата. Помнится устройством — вернувшись, человек
- * попадает в тот же блок, из которого ушёл.
+ * создание нового чата.
+ *
+ * НЕ помнится между заходами (Егор 22.09.26: «пишет, что я на втором
+ * сервере, хотя я его не открывал»). Раньше выбор лежал в памяти телефона:
+ * однажды нажатый «2-й…» тихо оставался включённым, и следующие новые чаты
+ * и командная строка заводились в папке второго сервера. Теперь каждый заход
+ * начинается с «Проекты», а второй блок включается только нажатием или
+ * открытием чата, который ему принадлежит (AppContent сверяет блок с
+ * открытым чатом).
  */
 export type ServerScope = 'main' | 'second';
 
 const STORAGE_KEY = 'sidebar-server-scope';
 const listeners = new Set<() => void>();
 
-function read(): ServerScope {
-  try {
-    return localStorage.getItem(STORAGE_KEY) === 'second' ? 'second' : 'main';
-  } catch {
-    return 'main';
-  }
+// Старая запись о выбранном блоке больше не читается — стираем её, чтобы
+// она не всплыла, если чтение когда-нибудь вернут.
+try {
+  if (typeof window !== 'undefined') localStorage.removeItem(STORAGE_KEY);
+} catch {
+  // Приватный режим Safari — записи и так нет.
 }
 
-let current: ServerScope = typeof window === 'undefined' ? 'main' : read();
+let current: ServerScope = 'main';
 
 function subscribe(listener: () => void) {
   listeners.add(listener);
@@ -38,11 +45,6 @@ export function useServerScope(): [ServerScope, (next: ServerScope) => void] {
   const setScope = useCallback((next: ServerScope) => {
     if (next === current) return;
     current = next;
-    try {
-      localStorage.setItem(STORAGE_KEY, next);
-    } catch {
-      // Приватный режим Safari — выбор просто не запомнится.
-    }
     listeners.forEach((listener) => listener());
   }, []);
   return [scope, setScope];

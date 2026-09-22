@@ -13,6 +13,8 @@ type MainContentTitleProps = {
   shouldShowTasksTab: boolean;
   /** Имя открытого окна командной строки — оно и стоит в шапке вместо чата. */
   terminalTitle?: string | null;
+  /** Папка открытого окна командной строки (у окна своя, не как у чата). */
+  terminalProjectName?: string | null;
 };
 
 function getTabTitle(activeTab: AppTab, shouldShowTasksTab: boolean, t: (key: string) => string, pluginDisplayName?: string) {
@@ -45,6 +47,7 @@ export default function MainContentTitle({
   selectedSession,
   shouldShowTasksTab,
   terminalTitle = null,
+  terminalProjectName = null,
 }: MainContentTitleProps) {
   const { t } = useTranslation();
   const { plugins } = usePlugins();
@@ -74,7 +77,7 @@ export default function MainContentTitle({
         {terminalTitle ? (
           <div className="min-w-0">
             <h2 className="truncate text-sm font-semibold leading-tight text-foreground">{terminalTitle}</h2>
-            <div className="truncate text-[11px] leading-tight text-muted-foreground">{selectedProject.displayName}</div>
+            <div className="truncate text-[11px] leading-tight text-muted-foreground">{terminalProjectName ?? selectedProject.displayName}</div>
           </div>
         ) : activeTab === 'chat' && selectedSession ? (
           <div className="min-w-0">

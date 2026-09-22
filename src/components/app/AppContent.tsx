@@ -17,7 +17,8 @@ import { useTerminalTabs } from '../../hooks/useTerminalTabs';
 import { useBrowserUseEnabled } from '../../hooks/useBrowserUseEnabled';
 import { ensureLatestBuild, watchServiceWorkerUpdates } from '../../lib/appUpdate';
 import { api, authenticatedFetch } from '../../utils/api';
-import type { AppTab } from '../../types/app';
+import type { AppTab, Project } from '../../types/app';
+import { effectiveScope, useServerScope, type ServerScope } from '../sidebar/hooks/useServerScope';
 
 type RunningSessionApiItem = {
   sessionId?: unknown;
@@ -103,6 +104,35 @@ function AppContentInner() {
   const shouldShowTasksTab = Boolean(tasksEnabled && isTaskMasterInstalled);
   const shouldShowBrowserTab = useBrowserUseEnabled();
 
+  // Блок слева («Проекты» / «2-й сервер») всегда тот, где лежит открытый чат.
+  // Егор 22.09.26: надпись «2-й сервер» должна значить ровно одно — я сейчас
+  // в папке второго сервера. Без этой сверки блок оставался от прошлого
+  // нажатия, и новый чат заводился во втором сервере незаметно для человека.
+  const [, setServerScope] = useServerScope();
+  const openChatScope: ServerScope | null = selectedProject
+    ? effectiveScope(selectedSession?.serverScope, selectedProject.serverScope)
+    : null;
+  useEffect(() => {
+    if (openChatScope) setServerScope(openChatScope);
+  }, [openChatScope, selectedProject?.projectId, selectedSession?.id, setServerScope]);
+
+  // Командная строка всегда работает на ЭТОМ сервере: папка второго сервера
+  // здесь лишь дверь, и оболочка в ней не подключена ко второй машине — а
+  // подпись «2-й сервер» обещала бы именно это. Поэтому из чата второго блока
+  // окно открывается в главной папке этого сервера (со звёздочкой, иначе
+  // с наибольшим числом чатов).
+  const terminalProjectId = useMemo(() => {
+    if (!selectedProject) return null;
+    if ((selectedProject.serverScope ?? 'main') !== 'second') return selectedProject.projectId;
+    const mainProjects = projects.filter((project: Project) => (project.serverScope ?? 'main') === 'main');
+    if (mainProjects.length === 0) return selectedProject.projectId;
+    const starred = mainProjects.find((project: Project) => project.isStarred);
+    const busiest = mainProjects.reduce((best: Project, project: Project) => (
+      (project.sessionMeta?.total ?? 0) > (best.sessionMeta?.total ?? 0) ? project : best
+    ));
+    return (starred ?? busiest).projectId;
+  }, [projects, selectedProject]);
+
   // Окна командной строки. Живут рядом с чатами: своя вкладка наверху, свой
   // крестик, несколько сразу. Открываются одной дверью — запросом вкладки
   // 'shell' (кнопка в боковой панели, палитра команд): вместо переключения
@@ -115,7 +145,7 @@ function AppContentInner() {
     closeTerminal,
     moveTerminal,
     clearActiveTerminal,
-  } = useTerminalTabs(selectedProject?.projectId ?? null);
+  } = useTerminalTabs(terminalProjectId);
 
   const selectTab = useCallback(
     (tab: AppTab) => {

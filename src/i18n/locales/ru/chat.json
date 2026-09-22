@@ -217,9 +217,9 @@
     "connecting": "Подключение к оболочке...",
     "startSession": "Начать новый сеанс Claude",
     "resumeSession": "Возобновить сеанс: {{displayName}}...",
-    "runCommand": "Выполнить {{command}} в {{projectName}}",
+    "runCommand": "Выполнить {{command}} в папке «{{projectName}}»",
     "startCli": "Запуск Claude CLI в {{projectName}}",
-    "defaultCommand": "команда"
+    "defaultCommand": "команду"
   },
   "claudeStatus": {
     "state": {

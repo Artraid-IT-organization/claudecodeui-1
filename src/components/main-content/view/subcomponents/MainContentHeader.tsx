@@ -13,6 +13,7 @@ export default function MainContentHeader({
   isMobile,
   onMenuClick,
   terminalTitle = null,
+  terminalProjectName = null,
   onSessionArchived,
   onSessionRestored,
 }: MainContentHeaderProps) {
@@ -26,6 +27,7 @@ export default function MainContentHeader({
           selectedSession={selectedSession}
           shouldShowTasksTab={shouldShowTasksTab}
           terminalTitle={terminalTitle}
+          terminalProjectName={terminalProjectName}
         />
         {/*
           На этом месте раньше был переключатель пресетов. Егор попросил вместо

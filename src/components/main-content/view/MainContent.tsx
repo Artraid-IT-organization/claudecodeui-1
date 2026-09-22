@@ -184,6 +184,13 @@ function MainContent({
       <MainContentHeader
         activeTab={activeTab}
         terminalTitle={terminals.find((term) => term.id === activeTerminalId)?.title ?? null}
+        terminalProjectName={(() => {
+          // Подпись под окном — папка САМОГО окна, а не открытого чата: окно
+          // остаётся там, где открылось, даже если потом выбрали другой чат.
+          const term = terminals.find((candidate) => candidate.id === activeTerminalId);
+          if (!term) return null;
+          return (projects.find((candidate) => candidate.projectId === term.projectId) ?? selectedProject).displayName;
+        })()}
         selectedProject={selectedProject}
         selectedSession={selectedSession}
         shouldShowTasksTab={shouldShowTasksTab}

@@ -83,6 +83,7 @@ export type MainContentHeaderProps = {
   activeTab: AppTab;
   /** Имя открытого окна командной строки, если сейчас смотрят на него. */
   terminalTitle?: string | null;
+  terminalProjectName?: string | null;
   selectedProject: Project;
   selectedSession: ProjectSession | null;
   shouldShowTasksTab: boolean;
