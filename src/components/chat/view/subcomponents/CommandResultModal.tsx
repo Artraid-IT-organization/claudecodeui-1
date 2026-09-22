@@ -461,8 +461,8 @@ function CostContent({ data }: { data: CostCommandData }) {
           label: 'Context window',
           // Занято / всего (%), как счётчик контекста в терминальном Claude Code.
           value: typeof data.tokenUsage?.contextUsed === 'number'
-            // Коротко («261K / 1M (26,1%)»): полные числа на телефоне вытесняли подпись до «C..».
-            ? `${formatCompactTokens(Number(data.tokenUsage.contextUsed))} / ${formatCompactTokens(total)} (${Number(data.tokenUsage.contextPercent ?? 0).toLocaleString('ru-RU')}%)`
+            // Коротко («283K/1M · 28%»): полные числа на телефоне вытесняли подпись до «C..».
+            ? `${formatCompactTokens(Number(data.tokenUsage.contextUsed))}/${formatCompactTokens(total)} · ${Math.round(Number(data.tokenUsage.contextPercent ?? 0))}%`
             : formatNumber(total),
           icon: Gauge,
         }]
