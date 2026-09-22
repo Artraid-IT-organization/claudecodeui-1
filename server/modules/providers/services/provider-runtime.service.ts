@@ -1,7 +1,7 @@
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
 import { providerModelsService } from '@/modules/providers/services/provider-models.service.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
-import type { IProvider } from '@/shared/interfaces.js';
+import type { IProvider, ProviderSteerPayload } from '@/shared/interfaces.js';
 import type {
   AnyRecord,
   LLMProvider,
@@ -89,6 +89,14 @@ export function createProviderRuntimeService(
 
     async abort(providerName: LLMProvider, sessionId: string): Promise<boolean> {
       return Boolean(await dependencies.resolveProvider(providerName).runtime.abort(sessionId));
+    },
+
+    async steer(providerName: LLMProvider, sessionId: string, payload: ProviderSteerPayload): Promise<boolean> {
+      const runtime = dependencies.resolveProvider(providerName).runtime;
+      if (!runtime.steer) {
+        return false;
+      }
+      return Boolean(await runtime.steer(sessionId, payload));
     },
 
     resolveToolApproval(requestId: string, decision: ProviderPermissionDecision): void {

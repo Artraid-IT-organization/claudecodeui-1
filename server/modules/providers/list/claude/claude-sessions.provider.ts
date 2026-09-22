@@ -506,6 +506,42 @@ export class ClaudeSessionsProvider implements IProviderSessions {
     const ts = raw.timestamp || new Date().toISOString();
     const baseId = raw.uuid || generateMessageId('claude');
 
+    /**
+     * Сообщение, которое Claude прочёл посреди хода («отправить сейчас» на
+     * сайте, ввод в терминале во время работы), лежит в переписке не строкой
+     * `user`, а вставкой `queued_command`. Если он разобрал его отдельным
+     * ходом, записью будет обычный `user` — эти случаи не пересекаются, двойной
+     * строки не бывает (проверено на живых переписках 22.09.26).
+     */
+    if (raw.type === 'attachment' && raw.attachment?.type === 'queued_command') {
+      const attachment = raw.attachment as AnyRecord;
+      if (attachment.commandMode && attachment.commandMode !== 'prompt') {
+        return messages;
+      }
+      const prompt = typeof attachment.prompt === 'string'
+        ? attachment.prompt
+        : Array.isArray(attachment.prompt)
+          ? attachment.prompt
+            .filter((part: AnyRecord) => part?.type === 'text' && typeof part.text === 'string')
+            .map((part: AnyRecord) => part.text)
+            .join('\n')
+          : '';
+      const parsedFiles = parseFilesInputTag(prompt);
+      if ((parsedFiles.text || parsedFiles.attachments.length > 0) && !isInternalContent(parsedFiles.text)) {
+        messages.push(createNormalizedMessage({
+          id: baseId,
+          sessionId,
+          timestamp: ts,
+          provider: PROVIDER,
+          kind: 'text',
+          role: 'user',
+          content: parsedFiles.text,
+          files: parsedFiles.attachments.length > 0 ? parsedFiles.attachments : undefined,
+        }));
+      }
+      return messages;
+    }
+
     if (raw.message?.role === 'user' && raw.message?.content && raw.isMeta !== true) {
       if (Array.isArray(raw.message.content)) {
         // Image attachments sent through the SDK are persisted as base64

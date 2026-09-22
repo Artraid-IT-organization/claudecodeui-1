@@ -236,3 +236,40 @@ test('claude: готовность агента (system init) даёт этап 
   assert.equal(result[0].text, 'requesting');
 });
 
+
+test('claude: a message read mid-turn (queued_command) is shown as the human message', () => {
+  const provider = new ClaudeSessionsProvider();
+
+  // «Отправить сейчас»: Claude прочёл сообщение между шагами, в переписке это
+  // вставка queued_command, а не строка user (живая переписка 22.09.26).
+  const shown = provider.normalizeMessage(
+    {
+      type: 'attachment',
+      uuid: 'a1',
+      timestamp: '2026-09-22T11:12:05.765Z',
+      attachment: { type: 'queued_command', prompt: 'Стоп, команду C не выполняй.', commandMode: 'prompt' },
+    },
+    SESSION_ID,
+  );
+  assert.equal(shown.length, 1);
+  assert.equal(shown[0].kind, 'text');
+  assert.equal(shown[0].role, 'user');
+  assert.equal(shown[0].content, 'Стоп, команду C не выполняй.');
+
+  // Прочие вставки (списки навыков и т.п.) по-прежнему не показываются.
+  assert.deepEqual(
+    provider.normalizeMessage(
+      { type: 'attachment', uuid: 'a2', attachment: { type: 'skill_listing' } },
+      SESSION_ID,
+    ),
+    [],
+  );
+  // Служебная команда из очереди (не текст человека) — тоже нет.
+  assert.deepEqual(
+    provider.normalizeMessage(
+      { type: 'attachment', uuid: 'a3', attachment: { type: 'queued_command', prompt: '/compact', commandMode: 'bash' } },
+      SESSION_ID,
+    ),
+    [],
+  );
+});

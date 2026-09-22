@@ -83,6 +83,7 @@ interface ChatComposerProps {
   queuedDrafts: QueuedDraft[];
   onEditQueuedDraft: (id: string) => void;
   onDeleteQueuedDraft: (id: string) => void;
+  onSendNowQueuedDraft: (id: string) => void;
   onMoveQueuedDraft: (id: string, direction: -1 | 1) => void;
   onClearQueuedDrafts: () => void;
   attachedFiles: File[];
@@ -145,6 +146,7 @@ export default function ChatComposer({
   queuedDrafts,
   onEditQueuedDraft,
   onDeleteQueuedDraft,
+  onSendNowQueuedDraft,
   onMoveQueuedDraft,
   onClearQueuedDrafts,
   attachedFiles,
@@ -252,11 +254,11 @@ export default function ChatComposer({
   const touchKeyboard = isTouchKeyboard();
   const submitHint = canQueueDraft
     ? hasQueuedDraft
-      ? t(touchKeyboard ? 'input.hintText.queueMoreTouch' : 'input.hintText.queueMore', {
+      ? t(touchKeyboard || sendByCtrlEnter ? 'input.hintText.queueMoreTouch' : 'input.hintText.queueMore', {
           defaultValue: 'Enter to add this to the queue ({{position}} in line)',
           position: queuedDrafts.length + 1,
         })
-      : t(touchKeyboard ? 'input.hintText.queueTouch' : 'input.hintText.queue', {
+      : t(touchKeyboard || sendByCtrlEnter ? 'input.hintText.queueTouch' : 'input.hintText.queue', {
           defaultValue: 'Enter to queue your next message',
         })
     : touchKeyboard
@@ -338,6 +340,7 @@ export default function ChatComposer({
         }))}
         onEdit={onEditQueuedDraft}
         onDelete={onDeleteQueuedDraft}
+        onSendNow={onSendNowQueuedDraft}
         onMove={onMoveQueuedDraft}
         onClear={onClearQueuedDrafts}
       />

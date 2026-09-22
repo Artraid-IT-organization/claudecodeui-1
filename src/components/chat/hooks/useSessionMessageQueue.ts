@@ -106,6 +106,16 @@ export function useSessionMessageQueue(sessionId: string | null) {
     sendMessage({ type: 'chat.queue.reorder', sessionId: session, ids });
   }, [sendMessage]);
 
+  // «Сейчас»: сервер передаёт сообщение в идущий ход, не дожидаясь конца.
+  // Из списка убираем сразу; не выйдет — сервер вернёт строку рассылкой
+  // очереди и объяснит почему.
+  const sendNowQueued = useCallback((id: string) => {
+    const session = sessionIdRef.current;
+    if (!session) return;
+    setQueue((prev) => prev.filter((item) => item.id !== id));
+    sendMessage({ type: 'chat.queue.sendNow', sessionId: session, id });
+  }, [sendMessage]);
+
   const clearQueued = useCallback(() => {
     const session = sessionIdRef.current;
     if (!session) return;
@@ -113,5 +123,5 @@ export function useSessionMessageQueue(sessionId: string | null) {
     sendMessage({ type: 'chat.queue.clear', sessionId: session });
   }, [sendMessage]);
 
-  return { queue, removeQueued, reorderQueued, clearQueued };
+  return { queue, removeQueued, reorderQueued, clearQueued, sendNowQueued };
 }

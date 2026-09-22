@@ -35,8 +35,20 @@ export interface IProviderRuntime {
     context: ProviderRuntimeContext,
   ): Promise<unknown>;
   abort(sessionId: string): boolean | Promise<boolean>;
+  /**
+   * «Отправить сейчас»: дописать сообщение человека в идущий ход, не дожидаясь
+   * его конца. Нет у провайдера — сообщение ждёт в очереди.
+   */
+  steer?(sessionId: string, payload: ProviderSteerPayload): Promise<boolean>;
   permissions?: ProviderRuntimePermissionGateway;
 }
+
+export type ProviderSteerPayload = {
+  content: string;
+  images: unknown[];
+  files: unknown[];
+  cwd?: string;
+};
 
 /**
  * Main provider contract for CLI and SDK integrations.

@@ -2,10 +2,11 @@ import path from 'node:path';
 
 import type { WebSocket } from 'ws';
 
-import { sessionsDb, type StoredQueuedChatMessage } from '@/modules/database/index.js';
+import { chatMessageQueueDb, sessionsDb, type StoredQueuedChatMessage } from '@/modules/database/index.js';
 import { providerModelsService } from '@/modules/providers/index.js';
 import { chatRunRegistry, onChatRunCompleted } from '@/modules/websocket/services/chat-run-registry.service.js';
 import {
+  broadcastChatQueue,
   clearChatQueue,
   dispatchChatQueues,
   listChatQueue,
@@ -36,6 +37,7 @@ import type {
   ProviderRuntimeWriter,
   RealtimeClientConnection,
 } from '@/shared/types.js';
+import type { ProviderSteerPayload } from '@/shared/interfaces.js';
 import { isPlatformOwnerWebUser, OPEN_REGISTRATION, parseIncomingJsonObject } from '@/shared/utils.js';
 import { getImageAssetsDirForUser, readRequestUserId, resolveWebUserRuntimeContext } from '@/shared/web-user-runtime.js';
 
@@ -105,6 +107,7 @@ type ProviderRuntimeGateway = {
     writer: ProviderRuntimeWriter,
   ): Promise<unknown>;
   abort(provider: LLMProvider, sessionId: string): Promise<boolean>;
+  steer?(provider: LLMProvider, sessionId: string, payload: ProviderSteerPayload): Promise<boolean>;
   resolveToolApproval(requestId: string, payload: ProviderPermissionDecision): void;
   getPendingApprovalsForSession(sessionId: string): unknown[];
 };
@@ -266,6 +269,18 @@ async function handleChatSend(
     userId,
   });
 
+  if (!run && data.sendNow === true) {
+    // Ctrl/Cmd+Enter во время ответа — «отправить сейчас», без очереди.
+    const steered = await steerIntoRunningTurn({ sessionId, userId, content: command, clientOptions, dependencies });
+    if (steered) {
+      if (clientMessageId) {
+        rememberAcceptedSend(sessionId, clientMessageId);
+        sendJson(ws, { kind: 'chat_send_ack', sessionId, clientMessageId, timestamp: new Date().toISOString() });
+      }
+      return;
+    }
+  }
+
   if (!run) {
     /*
      * Чат сейчас занят — это не отказ, а ОЧЕРЕДЬ.
@@ -328,6 +343,53 @@ async function handleChatSend(
   });
 }
 
+/**
+ * Вложения из настроек сообщения, перепроверенные сервером: до провайдера
+ * доходят только файлы из общего хранилища загрузок, каждый один раз.
+ */
+function verifiedClientAttachments(clientOptions: AnyRecord, userId: string | number | null) {
+  const attachmentCandidates = [
+    ...normalizeAttachmentDescriptors(clientOptions.images),
+    ...normalizeAttachmentDescriptors(clientOptions.files),
+    ...normalizeAttachmentDescriptors(clientOptions.attachments),
+  ];
+  const verifiedAttachments = filterAttachmentsToUploadStore(attachmentCandidates, undefined, userId);
+  return verifiedAttachments.filter(
+    (descriptor, index, all) => all.findIndex((candidate) => candidate.path === descriptor.path) === index,
+  );
+}
+
+/**
+ * «Отправить сейчас»: сообщение уходит в идущий ход, а не ждёт его конца
+ * (Егор 22.09.26: «не ждать, пока закончит — как в Cursor»). Claude прочтёт
+ * его на ближайшем шаге, сделанное не пропадает (claude-runtime steerTurn).
+ *
+ * `false` — дописать нельзя: хода в памяти нет (агент пережил перезапуск
+ * сайта, у сервера к нему нет канала), провайдер этого не умеет, или ход уже
+ * отчитался о конце. Тогда сообщение остаётся в очереди.
+ */
+async function steerIntoRunningTurn(input: {
+  sessionId: string;
+  userId: string | number | null;
+  content: string;
+  clientOptions: AnyRecord;
+  dependencies: ChatWebSocketDependencies;
+}): Promise<boolean> {
+  const { sessionId, userId, content, clientOptions, dependencies } = input;
+  const run = chatRunRegistry.getRun(sessionId);
+  if (!run || run.status !== 'running' || !dependencies.runtime.steer) {
+    return false;
+  }
+  const attachments = verifiedClientAttachments(clientOptions, userId);
+  const session = sessionsDb.getSessionById(sessionId);
+  return dependencies.runtime.steer(run.provider, sessionId, {
+    content,
+    images: attachments.filter(isImageAttachmentDescriptor),
+    files: attachments.filter((descriptor) => !isImageAttachmentDescriptor(descriptor)),
+    cwd: (typeof clientOptions.cwd === 'string' && clientOptions.cwd) || session?.project_path || undefined,
+  });
+}
+
 /** Заведённый запуск: и обычная отправка, и отправка из очереди ведут его одинаково. */
 type StartedChatRun = NonNullable<ReturnType<typeof chatRunRegistry.startRun>>;
 
@@ -361,15 +423,7 @@ async function runProviderTurn(input: {
     providerModelsService.setSessionEffort(provider, sessionId, clientOptions.effort);
   }
 
-  const attachmentCandidates = [
-    ...normalizeAttachmentDescriptors(clientOptions.images),
-    ...normalizeAttachmentDescriptors(clientOptions.files),
-    ...normalizeAttachmentDescriptors(clientOptions.attachments),
-  ];
-  const verifiedAttachments = filterAttachmentsToUploadStore(attachmentCandidates, undefined, userId);
-  const uniqueAttachments = verifiedAttachments.filter(
-    (descriptor, index, all) => all.findIndex((candidate) => candidate.path === descriptor.path) === index,
-  );
+  const uniqueAttachments = verifiedClientAttachments(clientOptions, userId);
 
   // The provider runtimes receive the stable app session id. When their
   // CLI/SDK needs the provider-native id for resume, they resolve it from the
@@ -721,6 +775,69 @@ function handleChatSubscribe(
 }
 
 /**
+ * `chat.queue.sendNow`: кнопка «Сейчас» у сообщения в очереди.
+ *
+ * Строка снимается с очереди ДО передачи: пока идёт передача, ход может
+ * закончиться, и обход очереди отправил бы ту же строку второй раз. Не
+ * получилось — строка возвращается в начало очереди, человеку объясняем.
+ * Чат уже свободен — строка встаёт первой и уходит обычным путём.
+ */
+async function handleChatQueueSendNow(
+  ws: WebSocket,
+  data: AnyRecord,
+  dependencies: ChatWebSocketDependencies,
+): Promise<void> {
+  const sessionId = readRequiredSessionId(data);
+  const id = typeof data.id === 'string' ? data.id.trim() : '';
+  if (!sessionId || !id) {
+    sendProtocolError(ws, 'QUEUE_ITEM_ID_REQUIRED', 'chat.queue.sendNow requires a sessionId and an id.', sessionId ?? undefined);
+    return;
+  }
+  const queue = chatMessageQueueDb.list(sessionId);
+  const item = queue.find((entry) => entry.id === id);
+  if (!item) {
+    // Уже ушло (второе нажатие, другое устройство, конец хода) — делать нечего.
+    return;
+  }
+
+  if (!chatRunRegistry.isProcessing(sessionId)) {
+    reorderChatQueue(sessionId, [id, ...queue.filter((entry) => entry.id !== id).map((entry) => entry.id)]);
+    dispatchChatQueues();
+    return;
+  }
+
+  removeChatQueueItem(sessionId, id);
+  let steered = false;
+  try {
+    steered = await steerIntoRunningTurn({
+      sessionId,
+      userId: item.userId,
+      content: item.content,
+      clientOptions: item.options ?? {},
+      dependencies,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[Очередь чата] «отправить сейчас» не удалось', { sessionId, error: message });
+  }
+  if (steered) {
+    console.log(`[Очередь чата] сообщение ${id} отправлено в идущий ход (чат ${sessionId})`);
+    return;
+  }
+
+  chatMessageQueueDb.pushFront(item);
+  broadcastChatQueue(sessionId);
+  // Ход мог закончиться, пока шла попытка: тогда строка уйдёт обычным путём.
+  dispatchChatQueues();
+  sendProtocolError(
+    ws,
+    'SEND_NOW_UNAVAILABLE',
+    'Не получилось передать сообщение в идущий ответ — оно осталось в очереди и уйдёт, как только ответ закончится.',
+    sessionId,
+  );
+}
+
+/**
  * Правка очереди с любого устройства: убрать строку, переставить порядок,
  * очистить. Очередь общая и лежит на сервере, поэтому изменение тут же
  * рассылается всем вкладкам (chat-queue.service).
@@ -787,6 +904,9 @@ function handlePermissionResponse(data: AnyRecord, dependencies: ChatWebSocketDe
  * - `chat.queue.remove`        { sessionId, id }
  * - `chat.queue.reorder`       { sessionId, ids }
  * - `chat.queue.clear`         { sessionId }
+ * - `chat.queue.sendNow`       { sessionId, id } — в идущий ход, не ждать конца
+ *
+ * `chat.send` с `sendNow: true` в занятый чат тоже уходит в идущий ход.
  *
  * `chat.send` в занятый чат не отказ, а очередь: сообщение ложится в базу и
  * уходит само по концу хода (chat-queue.service). Очередь чата приходит
@@ -845,6 +965,9 @@ export function handleChatConnection(
         case 'chat.queue.reorder':
         case 'chat.queue.clear':
           handleChatQueueEdit(ws, messageType, data);
+          return;
+        case 'chat.queue.sendNow':
+          await handleChatQueueSendNow(ws, data, dependencies);
           return;
         default:
           sendProtocolError(ws, 'UNKNOWN_MESSAGE_TYPE', `Unknown message type "${messageType}".`);

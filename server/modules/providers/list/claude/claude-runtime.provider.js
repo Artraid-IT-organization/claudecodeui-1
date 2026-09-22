@@ -386,7 +386,7 @@ function mapCliOptionsToSDK(options = {}) {
  * @param {Object} writer - WebSocket writer for reconnect support
  * @param {Function} releaseInput - Closes the held stdin stream so the CLI can exit
  */
-function addSession(sessionId, queryInstance, writer = null, releaseInput = null) {
+function addSession(sessionId, queryInstance, writer = null, releaseInput = null, steer = null) {
   const existing = activeSessions.get(sessionId);
   // A different live instance under the same key means an earlier run was
   // superseded without being stopped (e.g. an abort that raced run setup and
@@ -414,7 +414,9 @@ function addSession(sessionId, queryInstance, writer = null, releaseInput = null
     status: 'active',
     writer,
     // Re-registered mid-run once the provider session id lands; keep the closer.
-    releaseInput: releaseInput || carried?.releaseInput || null
+    releaseInput: releaseInput || carried?.releaseInput || null,
+    // «Отправить сейчас»: дописывает сообщение человека в идущий ход.
+    steer: steer || carried?.steer || null
   });
 }
 
@@ -606,18 +608,42 @@ async function buildPromptMessages(command, images, files, cwd) {
  * @returns {{ stream: AsyncIterable, release: () => void }} Stream plus its closer
  */
 function createHeldPromptStream(messages) {
+  let released = false;
   let release;
-  const held = new Promise((resolve) => { release = resolve; });
+  const held = new Promise((resolve) => {
+    release = () => {
+      released = true;
+      resolve('released');
+    };
+  });
+  // Сообщения, дописанные посреди хода («отправить сейчас», см. steerTurn в
+  // queryClaudeSDK), и будильник генератора, ждущего следующего.
+  const extra = [];
+  let wake = null;
 
   const stream = (async function* () {
     for (const message of messages) {
       yield message;
     }
     // Keeps stdin open — the CLI stays alive until release() is called.
-    await held;
+    while (!released) {
+      if (extra.length > 0) {
+        yield extra.shift();
+        continue;
+      }
+      await Promise.race([held, new Promise((resolve) => { wake = resolve; })]);
+      wake = null;
+    }
   })();
 
-  return { stream, release };
+  const push = (message) => {
+    if (released) return false;
+    extra.push(message);
+    wake?.();
+    return true;
+  };
+
+  return { stream, release, push };
 }
 
 /**
@@ -728,6 +754,44 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
   // Closes the held stdin stream so the CLI can wind down. Replaced once the
   // stream exists; the finally block calls it no matter how the run ends.
   let releasePromptStream = () => {};
+  // Дописывает сообщение в канал этого хода; заменяется вместе с потоком.
+  let pushPromptMessage = () => false;
+  // Сообщения «отправить сейчас», которые Claude ещё не забрал. Забранное он
+  // возвращает копией с `isReplay` (флаг --replay-user-messages): посреди хода
+  // — на ближайшем шаге между инструментами, а если шагов больше нет — уже
+  // после `result`, отдельным ходом. Пока здесь что-то есть, `result` не
+  // конец: страница должна видеть, что Claude ещё работает.
+  const pendingSteerIds = new Set();
+  let steerFallbackTimer = null;
+
+  /**
+   * «Отправить сейчас» (Егор 22.09.26: «не ждать, пока закончит — как в
+   * Cursor»). Сообщение уходит в идущий ход, а не в очередь: Claude прочтёт
+   * его на ближайшем шаге и не бросит сделанное. Живая проба 22.09.26:
+   * `sleep A; sleep B; sleep C` + вставка «C не выполняй» → A, B, «C пропускаю».
+   * В ленте сообщение появляется сразу; после перезагрузки его показывает
+   * запись `queued_command` из переписки (claude-sessions.provider).
+   *
+   * @returns {Promise<boolean>} false — ход уже отчитался о конце, пусть
+   *   сообщение идёт обычным путём.
+   */
+  const steerTurn = async ({ content, images, files, cwd }) => {
+    if (turnCompleteSent) {
+      return false;
+    }
+    const [message] = await buildPromptMessages(content, images, files, cwd || options.cwd);
+    const uuid = crypto.randomUUID();
+    const steerMessage = { ...message, uuid, priority: 'next' };
+    if (!pushPromptMessage(steerMessage)) {
+      return false;
+    }
+    pendingSteerIds.add(uuid);
+    const sid = capturedSessionId || sessionId || null;
+    for (const msg of context.normalizeMessage({ ...steerMessage, type: 'user' }, sid)) {
+      ws.send(msg);
+    }
+    return true;
+  };
   let idleReleaseTimer = null;
   // The client is told the turn is over as soon as `result` lands, even though
   // the process lingers, so the UI never waits out the idle hold.
@@ -918,8 +982,14 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       configDir: sdkOptions.env?.CLAUDE_CONFIG_DIR || getClaudeConfigDir(),
     });
 
+    // Копии присланных сообщений нужны, чтобы знать, когда Claude забрал
+    // сообщение «отправить сейчас» (см. pendingSteerIds). Сами копии в ленту
+    // не идут — сообщение человека там уже есть.
+    sdkOptions.extraArgs = { ...(sdkOptions.extraArgs || {}), 'replay-user-messages': null };
+
     let heldPrompt = createHeldPromptStream(promptMessages);
     releasePromptStream = heldPrompt.release;
+    pushPromptMessage = heldPrompt.push;
     try {
       queryInstance = query({
         prompt: heldPrompt.stream,
@@ -934,6 +1004,7 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       heldPrompt.release();
       heldPrompt = createHeldPromptStream(promptMessages);
       releasePromptStream = heldPrompt.release;
+      pushPromptMessage = heldPrompt.push;
       queryInstance = query({
         prompt: heldPrompt.stream,
         options: sdkOptions
@@ -942,7 +1013,7 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
 
     // Track the query instance for abort capability
     if (sessionKey()) {
-      addSession(sessionKey(), queryInstance, ws, releasePromptStream);
+      addSession(sessionKey(), queryInstance, ws, releasePromptStream, steerTurn);
     }
 
     // Process streaming messages
@@ -1014,7 +1085,7 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       if (message.session_id && !capturedSessionId) {
 
         capturedSessionId = message.session_id;
-        addSession(sessionKey(), queryInstance, ws, releasePromptStream);
+        addSession(sessionKey(), queryInstance, ws, releasePromptStream, steerTurn);
         noteSurvivorProviderSession(sessionId, capturedSessionId);
 
         // Set session ID on writer
@@ -1029,6 +1100,17 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
         }
       } else {
         // session_id already captured
+      }
+
+      // Копия присланного сообщения (--replay-user-messages): отмечаем, что
+      // Claude его забрал, и дальше не пускаем — в ленте оно уже есть.
+      if (message.type === 'user' && message.isReplay) {
+        pendingSteerIds.delete(message.uuid);
+        if (pendingSteerIds.size === 0 && steerFallbackTimer) {
+          clearTimeout(steerFallbackTimer);
+          steerFallbackTimer = null;
+        }
+        continue;
       }
 
       // Transform and normalize message via adapter
@@ -1053,6 +1135,26 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
 
       if (startsBackgroundWork(message)) {
         backgroundWorkPending = true;
+      }
+
+      if (message.type === 'result' && pendingSteerIds.size > 0
+        && !(sessionKey() && abortedSessionIds.has(sessionKey()))) {
+        // Сообщение «отправить сейчас» пришло, когда шагов уже не было: Claude
+        // разберёт его следующим ходом в этом же процессе. Конец не объявляем
+        // и канал не закрываем. Страховка: если за 20 с от Claude ничего не
+        // пришло (он не подхватил сообщение), закрываем ход как обычно.
+        steerFallbackTimer = setTimeout(() => {
+          steerFallbackTimer = null;
+          pendingSteerIds.clear();
+          if (!turnCompleteSent && !supersededInstances.has(queryInstance)) {
+            console.warn(`[Claude SDK] сообщение «отправить сейчас» не подхвачено, закрываю ход ${sessionKey() || 'NEW'}`);
+            turnCompleteSent = true;
+            ws.send(createCompleteMessage({ provider: 'claude', sessionId: capturedSessionId || sessionId || null, exitCode: 0 }));
+          }
+          releasePromptStream();
+        }, 20_000);
+        steerFallbackTimer.unref?.();
+        continue;
       }
 
       if (message.type === 'result') {
@@ -1190,6 +1292,10 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       clearTimeout(idleReleaseTimer);
       idleReleaseTimer = null;
     }
+    if (steerFallbackTimer) {
+      clearTimeout(steerFallbackTimer);
+      steerFallbackTimer = null;
+    }
     releasePromptStream();
   }
 }
@@ -1283,6 +1389,23 @@ function getPendingApprovalsForSession(sessionId) {
  * @param {Object} newRawWs - The new raw WebSocket connection
  * @returns {boolean} True if writer was successfully reconnected
  */
+/**
+ * «Отправить сейчас»: дописывает сообщение в идущий ход чата.
+ * @returns {Promise<boolean>} false — хода нет или он уже отчитался о конце.
+ */
+async function steerClaudeSDKSession(sessionId, payload) {
+  const session = getSession(sessionId);
+  if (!session?.steer || session.status !== 'active') {
+    return false;
+  }
+  try {
+    return Boolean(await session.steer(payload));
+  } catch (error) {
+    console.error(`[Claude SDK] не удалось дописать сообщение в ход ${sessionId}:`, error?.message || error);
+    return false;
+  }
+}
+
 function reconnectSessionWriter(sessionId, newRawWs) {
   const session = getSession(sessionId);
   if (!session?.writer?.updateWebSocket) return false;
@@ -1294,6 +1417,7 @@ function reconnectSessionWriter(sessionId, newRawWs) {
 export const claudeRuntime = {
   run: queryClaudeSDK,
   abort: abortClaudeSDKSession,
+  steer: steerClaudeSDKSession,
   permissions: {
     resolve: resolveToolApproval,
     listPending: getPendingApprovalsForSession,
@@ -1304,6 +1428,7 @@ export const claudeRuntime = {
 export {
   queryClaudeSDK,
   abortClaudeSDKSession,
+  steerClaudeSDKSession,
   isClaudeSDKSessionActive,
   getActiveClaudeSDKSessions,
   resolveToolApproval,

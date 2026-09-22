@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronDownIcon, ChevronUpIcon, PencilIcon, XIcon } from 'lucide-react';
+import { ChevronDownIcon, ChevronUpIcon, PencilIcon, SendHorizontalIcon, XIcon } from 'lucide-react';
 
 import { safeLocalStorage } from '../../utils/chatStorage';
 
@@ -14,6 +14,7 @@ interface MessageQueueDockProps {
   items: QueuedMessageView[];
   onEdit: (id: string) => void;
   onDelete: (id: string) => void;
+  onSendNow: (id: string) => void;
   onMove: (id: string, direction: -1 | 1) => void;
   onClear: () => void;
 }
@@ -37,6 +38,7 @@ export default function MessageQueueDock({
   items,
   onEdit,
   onDelete,
+  onSendNow,
   onMove,
   onClear,
 }: MessageQueueDockProps) {
@@ -220,6 +222,21 @@ export default function MessageQueueDock({
                         </button>
                       </>
                     )}
+                    {/* «Сейчас» — не ждать конца ответа (Егор 22.09.26, как
+                        «Send now» у Cursor): Claude прочтёт сообщение на
+                        ближайшем шаге и не бросит сделанное. Подпись словом,
+                        а не одной иконкой — рядом карандаш и крестик, и
+                        безымянная стрелка читалась бы как «отправить в конец». */}
+                    <button
+                      type="button"
+                      onClick={() => onSendNow(item.id)}
+                      aria-label={t('input.queue.sendNowHint', { defaultValue: 'Send now — Claude reads it at the next step' })}
+                      title={t('input.queue.sendNowHint', { defaultValue: 'Send now — Claude reads it at the next step' })}
+                      className="mr-0.5 flex items-center gap-1 rounded-md bg-primary/10 px-2 py-1.5 text-xs font-medium text-primary transition-colors hover:bg-primary/20"
+                    >
+                      <SendHorizontalIcon className="h-3.5 w-3.5" />
+                      {t('input.queue.sendNow', { defaultValue: 'Now' })}
+                    </button>
                     <button
                       type="button"
                       onClick={() => onEdit(item.id)}

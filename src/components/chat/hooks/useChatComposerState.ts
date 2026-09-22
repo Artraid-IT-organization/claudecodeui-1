@@ -327,7 +327,7 @@ export function useChatComposerState({
    * Теперь вкладка очередь только показывает и правит, а снимает и запускает
    * её сервер по концу хода (server/.../chat-queue.service.ts).
    */
-  const { queue: serverQueue, removeQueued, reorderQueued, clearQueued } = useSessionMessageQueue(sessionKey);
+  const { queue: serverQueue, removeQueued, reorderQueued, clearQueued, sendNowQueued } = useSessionMessageQueue(sessionKey);
   // Браузерные File-объекты сообщений, поставленных в очередь В ЭТОЙ вкладке.
   // Нужны только для правки: вернуть сообщение в поле вместе с картинкой.
   // На другом устройстве их нет — там правка опирается на уже загруженные
@@ -815,6 +815,7 @@ export function useChatComposerState({
     второй вызов видит засов сразу, не дожидаясь перерисовки.
   */
   const submitInFlightRef = useRef(false);
+  const sendNowRequestedRef = useRef(false);
   const submitLockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const releaseSubmitLock = useCallback(() => {
@@ -839,6 +840,10 @@ export function useChatComposerState({
       event: FormEvent<HTMLFormElement> | MouseEvent | TouchEvent | KeyboardEvent<HTMLTextAreaElement>,
     ) => {
       event.preventDefault();
+      // Снимаем сразу: признак относится только к этому нажатию, даже если
+      // отправка ниже не состоится (пустое поле).
+      const sendNow = sendNowRequestedRef.current;
+      sendNowRequestedRef.current = false;
       const currentInput = inputValueRef.current;
       // Черновик какого чата отправляется: пока грузятся вложения, человек может
       // открыть другой чат, и стирать надо текст исходного, а не того, что на экране.
@@ -893,10 +898,13 @@ export function useChatComposerState({
         // по нему вкладка узнаёт свои File-объекты при правке.
         const queuedMessageId = newDraftId();
         queuedFilesRef.current.set(queuedMessageId, currentAttachments);
+        // Ctrl/Cmd+Enter — «отправить сейчас»: сервер передаст сообщение в
+        // идущий ход; не выйдет — положит в очередь, как обычное.
         sendMessage({
           type: 'chat.send',
           clientMessageId: queuedMessageId,
           sessionId: queuedSessionKey,
+          ...(sendNow ? { sendNow: true } : {}),
           content: currentInput,
           options: {
             ...buildSendOptions(currentInput),
@@ -1185,6 +1193,11 @@ export function useChatComposerState({
     removeQueued(id);
   }, [removeQueued]);
 
+  const sendNowQueuedDraft = useCallback((id: string) => {
+    queuedFilesRef.current.delete(id);
+    sendNowQueued(id);
+  }, [sendNowQueued]);
+
   // Перенос на одну позицию. Стрелки, а не перетаскивание: очередь живёт на
   // телефоне, внутри прокручиваемой ленты, и палец в такой драг не попадает.
   // Порядок хранит сервер — отправляем ему новый список целиком.
@@ -1345,6 +1358,9 @@ export function useChatComposerState({
 
         if ((event.ctrlKey || event.metaKey) && !event.shiftKey) {
           event.preventDefault();
+          // Во время ответа Ctrl/Cmd+Enter — «отправить сейчас», как в Claude
+          // Code. Кто отправляет по Ctrl+Enter всегда, тому сочетание не меняем.
+          sendNowRequestedRef.current = isLoading && !sendByCtrlEnter;
           handleSubmit(event);
         } else if (
           !event.shiftKey &&
@@ -1363,6 +1379,7 @@ export function useChatComposerState({
       handleCommandMenuKeyDown,
       handleFileMentionsKeyDown,
       handleSubmit,
+      isLoading,
       sendByCtrlEnter,
       showCommandMenu,
       showFileDropdown,
@@ -1497,6 +1514,7 @@ export function useChatComposerState({
     queuedDrafts,
     editQueuedDraft,
     deleteQueuedDraft,
+    sendNowQueuedDraft,
     moveQueuedDraft,
     clearQueuedDrafts,
     handleVoiceTranscript,

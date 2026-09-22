@@ -129,8 +129,8 @@
     "hintText": {
       "ctrlEnter": "Ctrl+Enter to send • Shift+Enter for new line • Tab to change modes • / for slash commands",
       "enter": "Enter to send • Shift+Enter for new line • Tab to change modes • / for slash commands",
-      "queue": "Enter to queue your next message",
-      "queueMore": "Enter to add this to the queue ({{position}} in line)",
+      "queue": "Enter to queue • Ctrl+Enter to send now",
+      "queueMore": "Enter to queue ({{position}} in line) • Ctrl+Enter to send now",
       "touch": "Enter for new line • send with the button on the right",
       "queueTouch": "Button on the right queues your next message",
       "queueMoreTouch": "Button on the right adds this to the queue ({{position}} in line)"
@@ -140,6 +140,8 @@
     "clearInput": "Clear input",
     "scrollToBottom": "Scroll to bottom",
     "queue": {
+      "sendNow": "Now",
+      "sendNowHint": "Send now — Claude reads it at the next step without waiting for the reply to finish",
       "sendNext": "Queue next message",
       "label": "Queued",
       "willSend": "Will send when this finishes",
