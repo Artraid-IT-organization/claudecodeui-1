@@ -325,7 +325,10 @@ export function useChatSessionState({
       setHasMoreMessages(slot.hasMore);
       setTotalMessages(slot.total);
       messagesOffsetRef.current = slot.offset;
-      if (slot.tokenUsage !== undefined) {
+      // Хранилище истории заводит `tokenUsage: null`, а счётчик с историей шлют
+      // только Codex/OpenCode: пустое значение затирало счётчик Claude при каждой
+      // догрузке сообщений («0» у идущего чата, 23.09.26). Берём только настоящее.
+      if (slot.tokenUsage) {
         setTokenBudget((slot.tokenUsage as Record<string, unknown> | null) ?? null);
       }
     }
@@ -568,7 +571,7 @@ export function useChatSessionState({
         setHasMoreMessages(slot.hasMore);
         setTotalMessages(slot.total);
         messagesOffsetRef.current = slot.offset;
-        if (slot.tokenUsage !== undefined) {
+        if (slot.tokenUsage) { // см. пояснение выше: пустое не затирает счётчик
           setTokenBudget((slot.tokenUsage as Record<string, unknown> | null) ?? null);
         }
 
@@ -980,7 +983,7 @@ export function useChatSessionState({
         setHasMoreMessages(slot.hasMore);
         setTotalMessages(slot.total);
         messagesOffsetRef.current = slot.offset;
-        if (slot.tokenUsage !== undefined) {
+        if (slot.tokenUsage) { // см. пояснение выше: пустое не затирает счётчик
           setTokenBudget((slot.tokenUsage as Record<string, unknown> | null) ?? null);
         }
       }
