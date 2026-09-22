@@ -1360,7 +1360,7 @@ export function useChatComposerState({
           event.preventDefault();
           // Во время ответа Ctrl/Cmd+Enter — «отправить сейчас», как в Claude
           // Code. Кто отправляет по Ctrl+Enter всегда, тому сочетание не меняем.
-          sendNowRequestedRef.current = isLoading && !sendByCtrlEnter;
+          sendNowRequestedRef.current = isLoading && !sendByCtrlEnter && provider === 'claude';
           handleSubmit(event);
         } else if (
           !event.shiftKey &&
@@ -1380,6 +1380,7 @@ export function useChatComposerState({
       handleFileMentionsKeyDown,
       handleSubmit,
       isLoading,
+      provider,
       sendByCtrlEnter,
       showCommandMenu,
       showFileDropdown,

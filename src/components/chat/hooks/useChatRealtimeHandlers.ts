@@ -268,7 +268,11 @@ export function useChatRealtimeHandlers({
           if (sid) {
             // Surface the failure in the conversation and stop the spinner —
             // the run never started (or was rejected), so no `complete` follows.
-            onSessionIdle?.(sid);
+            // Исключение — «Сейчас» не удалось: ход при этом ИДЁТ, сообщение
+            // вернулось в очередь, и плашка «думает» должна остаться.
+            if (msg.code !== 'SEND_NOW_UNAVAILABLE') {
+              onSessionIdle?.(sid);
+            }
             sessionStore.appendRealtime(sid, {
               id: `protocol_error_${Date.now()}`,
               sessionId: sid,

@@ -574,7 +574,8 @@ function ChatInterface({
           queuedDrafts={queuedDrafts}
           onEditQueuedDraft={editQueuedDraft}
           onDeleteQueuedDraft={deleteQueuedDraft}
-          onSendNowQueuedDraft={sendNowQueuedDraft}
+          // Вставить сообщение в идущий ход умеет только Claude.
+          onSendNowQueuedDraft={provider === 'claude' ? sendNowQueuedDraft : undefined}
           onMoveQueuedDraft={moveQueuedDraft}
           onClearQueuedDrafts={clearQueuedDrafts}
           attachedFiles={attachedFiles}

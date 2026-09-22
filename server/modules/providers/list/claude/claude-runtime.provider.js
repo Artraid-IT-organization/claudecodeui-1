@@ -1151,7 +1151,15 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
             turnCompleteSent = true;
             ws.send(createCompleteMessage({ provider: 'claude', sessionId: capturedSessionId || sessionId || null, exitCode: 0 }));
           }
-          releasePromptStream();
+          // Как в обычной ветке `result` ниже: начатая в ходе фоновая работа
+          // держит канал открытым, иначе её убило бы закрытие канала.
+          if (backgroundWorkPending) {
+            backgroundWorkPending = false;
+            heldForBackgroundWork = true;
+            scheduleRelease();
+          } else {
+            releasePromptStream();
+          }
         }, 20_000);
         steerFallbackTimer.unref?.();
         continue;
