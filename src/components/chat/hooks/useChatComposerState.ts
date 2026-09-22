@@ -33,6 +33,7 @@ import type {
 } from '../types/types';
 
 import { usePromptPresetsContext } from '../../../contexts/PromptPresetsContext';
+import { isTouchKeyboard } from '../../../utils/touchKeyboard';
 import type { Project, ProjectSession, LLMProvider, ProviderModelOption } from '../../../types/app';
 import { escapeRegExp } from '../utils/chatFormatting';
 
@@ -1345,7 +1346,13 @@ export function useChatComposerState({
         if ((event.ctrlKey || event.metaKey) && !event.shiftKey) {
           event.preventDefault();
           handleSubmit(event);
-        } else if (!event.shiftKey && !event.ctrlKey && !event.metaKey && !sendByCtrlEnter) {
+        } else if (
+          !event.shiftKey &&
+          !event.ctrlKey &&
+          !event.metaKey &&
+          !sendByCtrlEnter &&
+          !isTouchKeyboard()
+        ) {
           event.preventDefault();
           handleSubmit(event);
         }

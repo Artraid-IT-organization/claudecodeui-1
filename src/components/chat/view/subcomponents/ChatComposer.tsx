@@ -13,6 +13,7 @@ import type {
 import { PaperclipIcon, Loader2, ArrowUpIcon } from 'lucide-react';
 
 import { useVoiceInput } from '../../hooks/useVoiceInput';
+import { isTouchKeyboard } from '../../../../utils/touchKeyboard';
 import { useVoiceAvailable } from '../../hooks/useVoiceAvailable';
 import type { QueuedDraft } from '../../hooks/useChatComposerState';
 import type { SessionActivity } from '../../../../hooks/useSessionProtection';
@@ -246,16 +247,23 @@ export default function ChatComposer({
 
   const hasQueuedDraft = queuedDrafts.length > 0;
   const canQueueDraft = isLoading && Boolean(input.trim() || attachedFiles.length > 0);
+  // On a phone Enter is a line break (see isTouchKeyboard), so the hint names
+  // the send button instead of a key.
+  const touchKeyboard = isTouchKeyboard();
   const submitHint = canQueueDraft
     ? hasQueuedDraft
-      ? t('input.hintText.queueMore', {
+      ? t(touchKeyboard ? 'input.hintText.queueMoreTouch' : 'input.hintText.queueMore', {
           defaultValue: 'Enter to add this to the queue ({{position}} in line)',
           position: queuedDrafts.length + 1,
         })
-      : t('input.hintText.queue', { defaultValue: 'Enter to queue your next message' })
-    : sendByCtrlEnter
-      ? t('input.hintText.ctrlEnter')
-      : t('input.hintText.enter');
+      : t(touchKeyboard ? 'input.hintText.queueTouch' : 'input.hintText.queue', {
+          defaultValue: 'Enter to queue your next message',
+        })
+    : touchKeyboard
+      ? t('input.hintText.touch')
+      : sendByCtrlEnter
+        ? t('input.hintText.ctrlEnter')
+        : t('input.hintText.enter');
   // The hint is shown only when the WHOLE string fits on one line. It used to
   // be gated on a viewport breakpoint (xl) plus an ellipsis class, which meant
   // it still got visibly chopped mid-sentence whenever the text was longer
