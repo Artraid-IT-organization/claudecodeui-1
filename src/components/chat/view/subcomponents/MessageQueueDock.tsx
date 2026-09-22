@@ -237,7 +237,13 @@ export default function MessageQueueDock({
                       className="mr-0.5 flex items-center gap-1 rounded-md bg-primary/10 px-2 py-1.5 text-xs font-medium text-primary transition-colors hover:bg-primary/20"
                     >
                       <SendHorizontalIcon className="h-3.5 w-3.5" />
-                      {t('input.queue.sendNow', { defaultValue: 'Now' })}
+                      {/* При нескольких сообщениях на телефоне рядом ещё две
+                          стрелки, и подпись сжимала текст сообщения до одного
+                          слова (снимок 390px, 22.09.26) — там только иконка
+                          на синем фоне, подсказка остаётся в title. */}
+                      <span className={many ? 'hidden sm:inline' : undefined}>
+                        {t('input.queue.sendNow', { defaultValue: 'Now' })}
+                      </span>
                     </button>
                     )}
                     <button
