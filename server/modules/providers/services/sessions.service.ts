@@ -65,6 +65,7 @@ type SessionDetails = {
     displayName: string;
     isStarred: boolean;
     isArchived: boolean;
+    serverScope: ServerScope;
   } | null;
 };
 
@@ -389,6 +390,9 @@ export const sessionsService = {
             displayName: resolveProjectDisplayName(projectPath, project.custom_project_name),
             isStarred: Boolean(project.isStarred),
             isArchived: Boolean(project.isArchived),
+            // Блок папки: без него чат второго сервера, открытый ссылкой,
+            // выглядел бы в интерфейсе чатом основного.
+            serverScope: normalizeServerScope(project.server_scope),
           }
         : null,
     };

@@ -75,6 +75,7 @@ type SessionDetailsApiPayload = {
       fullPath?: string;
       displayName?: string;
       isStarred?: boolean;
+      serverScope?: string;
     } | null;
   };
 };
@@ -937,6 +938,7 @@ export function useProjectsState({
             fullPath: details.project?.fullPath ?? details.project?.path ?? '',
             displayName: details.project?.displayName ?? '',
             isStarred: Boolean(details.project?.isStarred),
+            serverScope: details.project?.serverScope === 'second' ? 'second' : 'main',
             sessions: [],
             sessionMeta: { hasMore: false, total: 0 },
           };
