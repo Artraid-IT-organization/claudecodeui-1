@@ -1147,8 +1147,12 @@ export function useChatSessionState({
       }
     };
     fetchTokenUsage();
+    // Конец ответа: последняя строка файла переписки может дописаться чуть
+    // позже сигнала «готово» — ещё один запрос через 3 с.
+    const settleTimer = isProcessing ? null : setTimeout(fetchTokenUsage, 3000);
     return () => {
       cancelled = true;
+      if (settleTimer) clearTimeout(settleTimer);
     };
   }, [tokenUsageSessionId, isActive, isProcessing]);
 
