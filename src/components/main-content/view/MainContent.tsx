@@ -158,6 +158,15 @@ function MainContent({
     );
   }
 
+  // Окно командной строки открыли с главного экрана, когда чат не выбран:
+  // показываем окно в его папке, а не заставку поверх него.
+  const activeTerminalProject = activeTerminalId
+    ? projects.find((candidate) => candidate.projectId === terminals.find((term) => term.id === activeTerminalId)?.projectId)
+    : undefined;
+  if (!selectedProject && activeTerminalProject) {
+    selectedProject = activeTerminalProject;
+  }
+
   if (!selectedProject) {
     return (
       <MainContentStateView

@@ -109,8 +109,21 @@ function AppContentInner() {
   // в папке второго сервера. Без этой сверки блок оставался от прошлого
   // нажатия, и новый чат заводился во втором сервере незаметно для человека.
   const [, setServerScope] = useServerScope();
+  // Блок папки берётся из общего списка папок: чат, открытый по ссылке или
+  // вкладкой сверху, приносит папку из другого ответа сервера, где этого
+  // признака нет, — и папка второго сервера выглядела бы обычной.
+  const scopeOfProject = useCallback(
+    (project: Project | null | undefined): ServerScope => (
+      project
+        ? (projects.find((candidate: Project) => candidate.projectId === project.projectId)?.serverScope
+          ?? project.serverScope
+          ?? 'main')
+        : 'main'
+    ),
+    [projects],
+  );
   const openChatScope: ServerScope | null = selectedProject
-    ? effectiveScope(selectedSession?.serverScope, selectedProject.serverScope)
+    ? effectiveScope(selectedSession?.serverScope, scopeOfProject(selectedProject))
     : null;
   useEffect(() => {
     if (openChatScope) setServerScope(openChatScope);
@@ -119,19 +132,18 @@ function AppContentInner() {
   // Командная строка всегда работает на ЭТОМ сервере: папка второго сервера
   // здесь лишь дверь, и оболочка в ней не подключена ко второй машине — а
   // подпись «2-й сервер» обещала бы именно это. Поэтому из чата второго блока
-  // окно открывается в главной папке этого сервера (со звёздочкой, иначе
-  // с наибольшим числом чатов).
+  // и с главного экрана (чат не выбран) окно открывается в главной папке
+  // этого сервера: со звёздочкой, иначе с наибольшим числом чатов.
   const terminalProjectId = useMemo(() => {
-    if (!selectedProject) return null;
-    if ((selectedProject.serverScope ?? 'main') !== 'second') return selectedProject.projectId;
-    const mainProjects = projects.filter((project: Project) => (project.serverScope ?? 'main') === 'main');
-    if (mainProjects.length === 0) return selectedProject.projectId;
+    if (selectedProject && scopeOfProject(selectedProject) !== 'second') return selectedProject.projectId;
+    const mainProjects = projects.filter((project: Project) => scopeOfProject(project) === 'main');
+    if (mainProjects.length === 0) return selectedProject?.projectId ?? null;
     const starred = mainProjects.find((project: Project) => project.isStarred);
     const busiest = mainProjects.reduce((best: Project, project: Project) => (
       (project.sessionMeta?.total ?? 0) > (best.sessionMeta?.total ?? 0) ? project : best
     ));
     return (starred ?? busiest).projectId;
-  }, [projects, selectedProject]);
+  }, [projects, scopeOfProject, selectedProject]);
 
   // Окна командной строки. Живут рядом с чатами: своя вкладка наверху, свой
   // крестик, несколько сразу. Открываются одной дверью — запросом вкладки
