@@ -145,3 +145,57 @@ test('a refresh deferred after visibility changes remains pending', async () => 
   assert.equal(callCount, 2);
   assert.equal(coordinator.hasPending('session-1'), false);
 });
+
+test('failed refresh retries by itself until it succeeds (iPhone back from background)', async () => {
+  const outcomes: Array<'failed' | true> = ['failed', 'failed', true];
+  const calls: number[] = [];
+  const coordinator = createMessageHistoryRefreshCoordinator(
+    async () => { calls.push(Date.now()); return outcomes.shift() ?? true; },
+    () => true,
+    [5, 5, 5],
+  );
+
+  await coordinator.request('session-1');
+  assert.equal(calls.length, 1);
+  assert.equal(coordinator.hasPending('session-1'), true);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(calls.length, 3);
+  assert.equal(coordinator.hasPending('session-1'), false);
+});
+
+test('retries stop after the schedule runs out and resume on the next signal', async () => {
+  let calls = 0;
+  const coordinator = createMessageHistoryRefreshCoordinator(
+    async () => { calls++; return 'failed' as const; },
+    () => true,
+    [5],
+  );
+
+  await coordinator.request('session-1');
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(calls, 2);
+  assert.equal(coordinator.hasPending('session-1'), true);
+
+  await coordinator.request('session-1');
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(calls, 4);
+});
+
+test('retry waits while the chat is hidden and flushes when shown', async () => {
+  let visible = true;
+  let calls = 0;
+  const coordinator = createMessageHistoryRefreshCoordinator(
+    async () => { calls++; return calls === 1 ? 'failed' as const : true; },
+    () => visible,
+    [5],
+  );
+
+  await coordinator.request('session-1');
+  visible = false;
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(calls, 1);
+  visible = true;
+  await coordinator.flushPending('session-1');
+  assert.equal(calls, 2);
+  assert.equal(coordinator.hasPending('session-1'), false);
+});

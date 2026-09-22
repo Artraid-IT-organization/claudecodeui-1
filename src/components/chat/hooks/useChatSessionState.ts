@@ -120,6 +120,26 @@ function chatMessageToNormalized(
 /*  Hook                                                              */
 /* ------------------------------------------------------------------ */
 
+// Зонд догрузки: строка в журнал сайта (`[catchup-probe]`) о каждой догрузке
+// хвоста после возврата, переподключения или конца хода, о неудачах и о долгих
+// запросах. Застывший экран на iPhone в эмуляторе не повторился (22.09.26) —
+// причину ищем по данным с самого телефона. Не больше 40 строк за загрузку.
+let catchupProbesLeft = 40;
+function reportCatchupProbe(entry: Record<string, string | number | boolean>) {
+  const notable = entry.outcome === 'failed'
+    || entry.outcome === 'unbridged'
+    || Number(entry.ms) > 3_000
+    || String(entry.reason) !== 'other';
+  if (!notable || catchupProbesLeft <= 0) return;
+  catchupProbesLeft -= 1;
+  void authenticatedFetch('/api/user/catchup-probe', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(entry),
+    keepalive: true,
+  }).catch(() => undefined);
+}
+
 export function useChatSessionState({
   isActive,
   selectedProject,
@@ -302,10 +322,16 @@ export function useChatSessionState({
   isActiveRef.current = isActive;
   activeSessionIdRef.current = activeSessionId;
 
-  const latestRefreshExecutorRef = useRef<(sessionId: string) => Promise<boolean | void>>(
+  const latestRefreshExecutorRef = useRef<(sessionId: string) => Promise<boolean | 'failed' | void>>(
     async () => true,
   );
+  // Почему запрошена догрузка — только для зонда: сигналы сливаются в один
+  // запрос, в строку журнала идёт последний.
+  const refreshReasonRef = useRef(new Map<string, string>());
   latestRefreshExecutorRef.current = async (sessionId: string) => {
+    const reason = refreshReasonRef.current.get(sessionId) ?? 'other';
+    refreshReasonRef.current.delete(sessionId);
+    const startedAt = Date.now();
     const result = await sessionStore.refreshLatestFromServer(sessionId, {
       limit: SESSION_MESSAGES_PAGE_SIZE,
       canRequest: () => (
@@ -322,6 +348,19 @@ export function useChatSessionState({
         setTokenBudget((slot.tokenUsage as Record<string, unknown> | null) ?? null);
       }
     }
+    reportCatchupProbe({
+      reason,
+      ms: Date.now() - startedAt,
+      outcome: result.failed ? 'failed' : result.unbridged ? 'unbridged' : result.deferred ? 'deferred' : result.changed ? 'changed' : 'same',
+      error: result.failed ?? '',
+      processing: processingSessionsRef.current?.has(sessionId) ?? false,
+      visible: typeof document === 'undefined' || document.visibilityState === 'visible',
+      online: typeof navigator === 'undefined' || navigator.onLine,
+    });
+    if (result.failed) {
+      refreshReasonRef.current.set(sessionId, `${reason}-retry`);
+      return 'failed' as const;
+    }
     return !result.deferred;
   };
 
@@ -333,9 +372,50 @@ export function useChatSessionState({
     );
   }
 
-  const requestLatestMessages = useCallback((sessionId: string, allowNetwork = isActiveRef.current) => (
-    refreshCoordinatorRef.current?.request(sessionId, allowNetwork) ?? Promise.resolve()
-  ), []);
+  const requestLatestMessages = useCallback((sessionId: string, allowNetwork = isActiveRef.current, reason?: string) => {
+    if (reason) refreshReasonRef.current.set(sessionId, reason);
+    return refreshCoordinatorRef.current?.request(sessionId, allowNetwork) ?? Promise.resolve();
+  }, []);
+
+  // Возврат приложения на экран. Сокет после фона переподключается не сразу
+  // (а на iPhone иногда числится живым, хотя мёртв), и всё, что чат сделал за
+  // это время, приходило только с его сигналом. Открытый чат перечитывает
+  // хвост сам — один запрос, если данные старше порога свежести.
+  useEffect(() => {
+    const onResume = () => {
+      if (document.visibilityState !== 'visible') return;
+      const sessionId = activeSessionIdRef.current;
+      if (!sessionId || !isActiveRef.current) return;
+      if (!sessionStore.isStale(sessionId)) return;
+      void requestLatestMessages(sessionId, true, 'resume');
+    };
+    document.addEventListener('visibilitychange', onResume);
+    window.addEventListener('pageshow', onResume);
+    return () => {
+      document.removeEventListener('visibilitychange', onResume);
+      window.removeEventListener('pageshow', onResume);
+    };
+  }, [requestLatestMessages, sessionStore]);
+
+  // Ход закончился, а страница перечитать не успела: событие конца ушло в
+  // мёртвый сокет, и о конце страница узнала из ответа на подписку («уже не
+  // работает»). Перечитываем хвост, если после конца его никто не обновил —
+  // обычный конец хода уже обновил его сам по событию `complete`.
+  const processingSeenRef = useRef<{ sessionId: string | null; processing: boolean }>({ sessionId: null, processing: false });
+  useEffect(() => {
+    const previous = processingSeenRef.current;
+    processingSeenRef.current = { sessionId: activeSessionId, processing: isProcessing };
+    if (!activeSessionId || previous.sessionId !== activeSessionId) return;
+    if (!previous.processing || isProcessing) return;
+    const endedAt = Date.now();
+    const timer = window.setTimeout(() => {
+      if (activeSessionIdRef.current !== activeSessionId || !isActiveRef.current) return;
+      const fetchedAt = sessionStore.getSessionSlot(activeSessionId)?.fetchedAt ?? 0;
+      if (fetchedAt >= endedAt) return;
+      void requestLatestMessages(activeSessionId, true, 'turn-ended');
+    }, 1_500);
+    return () => window.clearTimeout(timer);
+  }, [activeSessionId, isProcessing, requestLatestMessages, sessionStore]);
 
   /* ---------------------------------------------------------------- */
   /*  Derive chatMessages from the store                              */

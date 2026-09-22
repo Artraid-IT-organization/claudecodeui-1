@@ -364,7 +364,7 @@ function ChatInterface({
   // missed live events, and re-attaches a still-running stream to this socket.
   const handleWebSocketReconnect = useCallback(async () => {
     if (!selectedProject || !selectedSession) return;
-    await requestLatestMessages(selectedSession.id, isActive);
+    await requestLatestMessages(selectedSession.id, isActive, 'reconnect');
     statusCheckSentAtRef.current.set(selectedSession.id, Date.now());
     sendMessage({
       type: 'chat.subscribe',

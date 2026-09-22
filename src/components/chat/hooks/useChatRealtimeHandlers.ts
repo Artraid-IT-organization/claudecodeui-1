@@ -51,7 +51,7 @@ interface UseChatRealtimeHandlersArgs {
   onSessionProcessing?: MarkSessionProcessing;
   onSessionIdle?: MarkSessionIdle;
   onWebSocketReconnect?: () => void;
-  requestLatestMessages: (sessionId: string, allowNetwork?: boolean) => Promise<void>;
+  requestLatestMessages: (sessionId: string, allowNetwork?: boolean, reason?: string) => Promise<void>;
   sessionStore: SessionStore;
 }
 

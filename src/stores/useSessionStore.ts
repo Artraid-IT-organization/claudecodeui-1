@@ -142,6 +142,10 @@ export interface SessionSlot {
 
 const EMPTY: NormalizedMessage[] = [];
 const SESSION_HISTORY_REQUEST_TIMEOUT_MS = 30_000;
+// Хвост — 60 строк, сервер отдаёт его за сотые доли секунды. Долгий срок тут
+// только держал застывший экран: запрос в мёртвое соединение после фона висел
+// все 30 с. Короче срок — раньше повтор (messageHistoryRefreshCoordinator).
+const LATEST_TAIL_REQUEST_TIMEOUT_MS = 10_000;
 
 function createEmptySlot(): SessionSlot {
   return {
@@ -184,9 +188,10 @@ function enqueueHistoryMutation<T>(
 async function requestSessionHistoryPage(
   sessionId: string,
   options: SessionMessagesRequestOptions,
+  timeoutMs = SESSION_HISTORY_REQUEST_TIMEOUT_MS,
 ): Promise<SessionHistoryPage> {
   const response = await authenticatedFetch(buildSessionMessagesUrl(sessionId, options), {
-    signal: AbortSignal.timeout(SESSION_HISTORY_REQUEST_TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
@@ -600,6 +605,10 @@ type LatestHistoryRefreshResult = {
   applied: boolean;
   changed: boolean;
   deferred: boolean;
+  /** Запрос не удался (сеть, срок, ответ сервера) — догрузку надо повторить. */
+  failed?: string;
+  /** Стык старого и нового хвоста не найден — экран оставлен как был (виден в зонде). */
+  unbridged?: boolean;
 };
 
 type CanRequestHistory = () => boolean;
@@ -644,7 +653,7 @@ async function refreshLatestSlotFromServer(
   const latestPage = await requestSessionHistoryPage(sessionId, {
     limit,
     offset: 0,
-  });
+  }, LATEST_TAIL_REQUEST_TIMEOUT_MS);
 
   let nextServerMessages: NormalizedMessage[] | null = null;
   let nextHasMore = previousHasMore;
@@ -680,10 +689,10 @@ async function refreshLatestSlotFromServer(
         return { applied: false, changed: false, deferred: true };
       }
 
-      const bridgePage = await requestSessionHistoryPage(sessionId, bridgeRequest);
+      const bridgePage = await requestSessionHistoryPage(sessionId, bridgeRequest, LATEST_TAIL_REQUEST_TIMEOUT_MS);
       if (bridgePage.total !== latestPage.total) {
         console.warn(`[SessionStore] History changed while bridging ${sessionId}; retaining cached suffix.`);
-        return { applied: false, changed: false, deferred: false };
+        return { applied: false, changed: false, deferred: false, failed: 'history-changed-while-bridging' };
       }
       if (bridgePage.messages.length === 0) break;
 
@@ -693,7 +702,7 @@ async function refreshLatestSlotFromServer(
         || !olderPagePrecedesCachedHistory(bridgePage.messages, fetchedWindow)
       ) {
         console.warn(`[SessionStore] History shifted while bridging ${sessionId}; retaining cached suffix.`);
-        return { applied: false, changed: false, deferred: false };
+        return { applied: false, changed: false, deferred: false, failed: 'history-shifted-while-bridging' };
       }
 
       fetchedWindow = bridgeMerge.messages;
@@ -732,7 +741,7 @@ async function refreshLatestSlotFromServer(
 
   if (!nextServerMessages) {
     console.warn(`[SessionStore] Could not bridge latest history for ${sessionId}; retaining cached suffix.`);
-    return { applied: false, changed, deferred: false };
+    return { applied: false, changed, deferred: false, unbridged: true };
   }
 
   slot.serverMessages = nextServerMessages;
@@ -987,7 +996,8 @@ export function useSessionStore() {
         return { slot, ...result };
       } catch (error) {
         console.error(`[SessionStore] latest refresh failed for ${sessionId}:`, error);
-        return { slot, applied: false, changed: false, deferred: false };
+        const failed = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+        return { slot, applied: false, changed: false, deferred: false, failed: failed.slice(0, 80) || 'error' };
       }
     });
   }, [getSlot, notify]);
