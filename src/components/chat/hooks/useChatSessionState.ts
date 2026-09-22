@@ -1182,6 +1182,8 @@ export function useChatSessionState({
   // запрос шёл только при смене чата, а обнуление в эффекте загрузки истории
   // могло сработать уже ПОСЛЕ ответа сервера — окно показывало «0» (22.09.26).
   const tokenUsageSessionId = selectedSession?.id || null;
+  const tokenUsageSessionRef = useRef(tokenUsageSessionId);
+  tokenUsageSessionRef.current = tokenUsageSessionId;
   useEffect(() => {
     setTokenBudget(null);
   }, [tokenUsageSessionId]);
@@ -1190,18 +1192,18 @@ export function useChatSessionState({
     if (!tokenUsageSessionId || !isActive) {
       return undefined;
     }
-    let cancelled = false;
+    // Ответ отбрасывается, только если открыт уже другой чат: перезапуск
+    // эффекта из-за смены «идёт ответ» / вкладки прежний запрос не отменяет
+    // (иначе кнопка ждала второго запроса — 7 с «0 токенов», замер 23.09.26).
     const fetchTokenUsage = async () => {
       try {
         // The provider module resolves storage and provider details from the session id.
         const url = `/api/providers/sessions/${encodeURIComponent(tokenUsageSessionId)}/token-usage`;
         const response = await authenticatedFetch(url);
-        if (cancelled) return;
-        if (response.ok) {
-          const payload = await response.json();
-          if (!cancelled && payload?.data) {
-            setTokenBudget(payload.data);
-          }
+        if (tokenUsageSessionRef.current !== tokenUsageSessionId || !response.ok) return;
+        const payload = await response.json();
+        if (tokenUsageSessionRef.current === tokenUsageSessionId && payload?.data) {
+          setTokenBudget(payload.data);
         }
       } catch (error) {
         console.error('Failed to fetch token usage:', error);
@@ -1212,7 +1214,6 @@ export function useChatSessionState({
     // позже сигнала «готово» — ещё один запрос через 3 с.
     const settleTimer = isProcessing ? null : setTimeout(fetchTokenUsage, 3000);
     return () => {
-      cancelled = true;
       if (settleTimer) clearTimeout(settleTimer);
     };
   }, [tokenUsageSessionId, isActive, isProcessing]);
