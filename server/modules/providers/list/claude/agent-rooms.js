@@ -26,6 +26,7 @@
  */
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 
 const SLICE = process.env.CLOUDCLI_AGENT_SLICE || 'ccui-agents.slice';
 const AGENT_MEMORY_HIGH = process.env.CLOUDCLI_AGENT_MEMORY_HIGH || '2G';
@@ -66,6 +67,7 @@ function probe() {
         : `[agent-rooms] комнаты недоступны (${reason}) — агенты запускаются напрямую`);
     }
     available = ok;
+    if (!ok) alarm(`комнаты недоступны (${reason}) — агенты снова живут в группе сайта и могут его душить`);
     schedule(ok ? PROBE_OK_MS : PROBE_FAIL_MS);
   };
   try {
@@ -88,6 +90,37 @@ function schedule(ms) {
   if (probeTimer) clearTimeout(probeTimer);
   probeTimer = setTimeout(probe, ms);
   probeTimer.unref();
+}
+
+// Тихий откат к прямому запуску воспроизводит исходную беду незаметно —
+// поэтому о нём сообщаем в Telegram (не чаще раза в час).
+const NOTIFY = '/home/claude/scripts/notify.sh';
+let lastAlarm = 0;
+function alarm(text) {
+  console.error(`[agent-rooms] ${text}`);
+  if (Date.now() - lastAlarm < 60 * 60 * 1000 || !fs.existsSync(NOTIFY)) return;
+  lastAlarm = Date.now();
+  try {
+    spawn(NOTIFY, [`Claude UI: ${text}`, 'error'], { stdio: 'ignore', detached: false }).on('error', () => {});
+  } catch {
+    // оповещение — не повод ронять запуск чата
+  }
+}
+
+/** Через 3 с после запуска: агент действительно в своей комнате? */
+export function verifyAgentRoom(pid, room) {
+  if (!pid || !room) return;
+  setTimeout(() => {
+    let cgroup = '';
+    try {
+      cgroup = fs.readFileSync(`/proc/${pid}/cgroup`, 'utf8');
+    } catch {
+      return; // процесс уже закончил
+    }
+    if (!cgroup.includes(room)) {
+      alarm(`агент ${pid} не попал в свою комнату (${cgroup.trim()})`);
+    }
+  }, 3000).unref();
 }
 
 probe();
