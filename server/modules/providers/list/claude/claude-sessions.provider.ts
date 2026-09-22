@@ -276,6 +276,26 @@ async function getSessionMessages(
       }
     }
 
+    // У вставки queued_command (сообщение «отправить сейчас», прочитанное
+    // посреди хода) стоит время НАЖАТИЯ, а в файле она лежит там, где Claude
+    // её прочёл. Нажатие в первые секунды хода по времени обгоняло само
+    // задание, и лента (она тоже упорядочивает по времени) ставила его над
+    // заданием (живая проба 22.09.26). Такой вставке даём время записи перед
+    // ней, если оно позже: сообщение стоит там, где Claude его прочёл.
+    let previousTimestamp: string | null = null;
+    for (const message of messages) {
+      if (
+        message.type === 'attachment'
+        && message.attachment?.type === 'queued_command'
+        && previousTimestamp
+        && new Date(previousTimestamp).getTime() > new Date(message.timestamp || 0).getTime()
+      ) {
+        message.timestamp = previousTimestamp;
+      }
+      if (message.timestamp) {
+        previousTimestamp = message.timestamp;
+      }
+    }
     const sortedMessages = messages.sort(
       (a, b) => new Date(a.timestamp || 0).getTime() - new Date(b.timestamp || 0).getTime(),
     );
