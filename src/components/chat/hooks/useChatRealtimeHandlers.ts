@@ -12,6 +12,7 @@ import type { SessionStore, NormalizedMessage } from '../../../stores/useSession
 import { noteRun } from '../utils/liveRunCursor';
 import { isSubagentToolName } from '../tools/configs/toolConfigs';
 import { toolInputDescription } from '../utils/workStretch';
+import { reportCatchupProbe } from '../utils/catchupProbe';
 
 const isActionablePermissionRequest = (request: { toolName?: unknown } | null | undefined): boolean => {
   return request?.toolName !== 'ExitPlanMode' && request?.toolName !== 'exit_plan_mode';
@@ -174,6 +175,16 @@ export function useChatRealtimeHandlers({
           // Ответ на подписку тоже несёт метку работы: досылка пропущенного
           // идёт сразу после него и должна приниматься с нуля.
           noteRun(sid, msg.runStartedAt, lastSeqRef.current);
+
+          if (sid === activeViewSessionId) {
+            reportCatchupProbe({
+              reason: 'subscribe-ack',
+              processing: Boolean(msg.isProcessing),
+              serverSeq: typeof msg.lastSeq === 'number' ? msg.lastSeq : -1,
+              clientSeq: lastSeqRef.current.get(sid) ?? 0,
+              visible: document.visibilityState === 'visible',
+            });
+          }
 
           if (msg.isProcessing) {
             // Этап приходит только для чата, пережившего перезапуск сайта
