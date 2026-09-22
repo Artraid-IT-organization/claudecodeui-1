@@ -71,6 +71,21 @@ export function createUserRouter(service: ReturnType<typeof createUserService>):
     res.json({ ok: true });
   });
 
+  // Догрузка хвоста чата после возврата из фона, переподключения, конца хода —
+  // только в журнал службы (`[catchup-probe]`). Застывший экран на iPhone в
+  // эмуляторе не повторился (22.09.26): ищем причину по данным с телефона.
+  router.post('/catchup-probe', (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const fields: Record<string, number | boolean | string> = {};
+    for (const [key, value] of Object.entries(body).slice(0, 20)) {
+      if (typeof value === 'number' && Number.isFinite(value)) fields[key] = Math.round(value);
+      else if (typeof value === 'boolean') fields[key] = value;
+      else if (typeof value === 'string') fields[key] = value.slice(0, 80);
+    }
+    console.log(`[catchup-probe] user=${readUserId(req)} ${JSON.stringify(fields)}`);
+    res.json({ ok: true });
+  });
+
   router.get('/usage-limits', async (req, res, next) => {
     try {
       res.json(await service.getUsageLimits(readUserId(req)));
