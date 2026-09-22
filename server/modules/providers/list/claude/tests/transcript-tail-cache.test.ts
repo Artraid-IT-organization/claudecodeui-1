@@ -116,3 +116,54 @@ test('запрос «всю историю» у обычного файла от
   assert.equal(result.total, 60);
   assert.equal(result.complete, true);
 });
+
+/** Кадр, который ИИ посмотрел действием: картинка внутри tool_result. */
+function frameRow(session: string, index: number, kb: number): string {
+  return JSON.stringify({
+    sessionId: session,
+    n: index,
+    message: {
+      role: 'user',
+      content: [{
+        type: 'tool_result',
+        tool_use_id: `t${index}`,
+        content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'A'.repeat(kb * 1024) } }],
+      }],
+    },
+    toolUseResult: { type: 'image', file: { base64: 'A'.repeat(kb * 1024), type: 'image/png' } },
+  });
+}
+
+test('кадры в результатах действий не вытесняют начало переписки (22.09.26)', async () => {
+  forgetTranscriptTail();
+  // 16 кадров по 2×600 КБ — около 19 МБ, больше потолка полного чтения.
+  const rows = [row(SESSION, 1), row(SESSION, 2)];
+  for (let i = 3; i < 19; i += 1) rows.push(frameRow(SESSION, i, 600));
+  rows.push(row(SESSION, 19));
+  const file = await makeFile(rows);
+
+  const all = await readSessionLines(file, SESSION, null);
+  assert.equal(all.complete, true);
+  assert.deepEqual(all.lines.map((l) => JSON.parse(l).n), Array.from({ length: 19 }, (_, i) => i + 1));
+  const frame = JSON.parse(all.lines[2]);
+  assert.equal(frame.message.content[0].content[0].source.data, '');
+  assert.equal(frame.toolUseResult.file.base64, '');
+
+  forgetTranscriptTail();
+  await readSessionLines(file, SESSION, 5);
+  const deeper = await readSessionLines(file, SESSION, 200);
+  assert.equal(deeper.complete, true);
+  assert.equal(JSON.parse(deeper.lines[0]).n, 1);
+});
+
+test('картинку, которую приложил человек, облегчение не трогает', async () => {
+  forgetTranscriptTail();
+  const attached = JSON.stringify({
+    sessionId: SESSION,
+    n: 1,
+    message: { role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'B'.repeat(200 * 1024) } }] },
+  });
+  const file = await makeFile([attached]);
+  const all = await readSessionLines(file, SESSION, null);
+  assert.equal(JSON.parse(all.lines[0]).message.content[0].source.data.length, 200 * 1024);
+});
