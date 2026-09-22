@@ -29,7 +29,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { wrapInAgentRoom } from './agent-rooms.js';
+import { verifyAgentRoom, wrapInAgentRoom } from './agent-rooms.js';
 
 let shuttingDown = false;
 /** appSessionId → { pid, providerSessionId, configDir, startedAt, transcriptPath, transcriptMtime } */
@@ -89,7 +89,7 @@ export function markShuttingDown() {
 export function spawnSurvivableClaude(spawnOptions, context = {}) {
   const { cwd, signal } = spawnOptions;
   // Своя комната (cgroup) для агента — см. agent-rooms.js. PID тот же.
-  const { command, args, env } = wrapInAgentRoom(
+  const { command, args, env, room } = wrapInAgentRoom(
     spawnOptions.command, spawnOptions.args, spawnOptions.env, context.appSessionId,
   );
   const child = spawn(command, args, {
@@ -99,6 +99,8 @@ export function spawnSurvivableClaude(spawnOptions, context = {}) {
     stdio: ['pipe', 'pipe', 'ignore'],
     windowsHide: true,
   });
+
+  verifyAgentRoom(child.pid, room);
 
   if (child.pid && context.appSessionId) {
     writeRecord(child.pid, {

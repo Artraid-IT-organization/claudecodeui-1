@@ -121,7 +121,7 @@ websocket-шлюз передавал запрос чату, но не терм�
 - Агент запускается через `agent-rooms.js`: `systemd-run --user --scope --slice=ccui-agents.slice -p MemoryHigh=2G -- claude …` (обёртка в `spawnSurvivableClaude`). `--scope` делает exec — PID, каналы, «Стоп», live-runs те же. Образец — jupyterhub/systemdspawner.
 - Зачем: 22.09 агенты + их ffmpeg/сборки заняли 2,73 ГБ группы службы при MemoryHigh 2,5 ГБ, ядро душило всю группу вместе с сервером (memory.pressure full ~90%), новый сервер после перезапуска 15+ мин не открывал порт → «Секунду, обновляюсь».
 - Срез `~/.config/systemd/user/ccui-agents.slice` (копия `deploy/ccui-agents.slice`): MemoryHigh 4G, MemoryMax 5G, MemorySwapMax 1G, CPUWeight 40. Пользовательскому менеджеру делегированы только cpu/memory/pids — IOWeight там не работает.
-- Проба на старте и раз в 10 мин (раз в минуту после неудачи) создаёт пустую комнату; не прошла — агенты запускаются напрямую, как раньше. Выключить: `CLOUDCLI_AGENT_ROOMS=off`. Проверка: `cat /proc/<pid агента>/cgroup` → `…/ccui-agents.slice/ccui-agent-….scope`.
+- Проба на старте и раз в 10 мин (раз в минуту после неудачи) создаёт пустую комнату; не прошла — агенты запускаются напрямую, как раньше, и уходит оповещение в TG (не чаще раза в час). Каждый агент через 3 с сверяется по /proc/<pid>/cgroup — не в своей комнате → тоже оповещение. Выключить: `CLOUDCLI_AGENT_ROOMS=off`. Проверка: `cat /proc/<pid агента>/cgroup` → `…/ccui-agents.slice/ccui-agent-….scope`.
 
 ## Чаты переживают перезапуск сайта (13.09.26)
 
