@@ -419,6 +419,13 @@ function ModelsContent({
   );
 }
 
+function formatCompactTokens(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '0';
+  if (value >= 1_000_000) return `${Number((value / 1_000_000).toFixed(value % 1_000_000 === 0 ? 0 : 2))}M`;
+  if (value >= 1_000) return `${Math.round(value / 1_000)}K`;
+  return String(Math.round(value));
+}
+
 function CostContent({ data }: { data: CostCommandData }) {
   const used = Number(data.tokenUsage?.used ?? 0);
   const total = Number(data.tokenUsage?.total ?? 0);
@@ -454,7 +461,8 @@ function CostContent({ data }: { data: CostCommandData }) {
           label: 'Context window',
           // Занято / всего (%), как счётчик контекста в терминальном Claude Code.
           value: typeof data.tokenUsage?.contextUsed === 'number'
-            ? `${formatNumber(Number(data.tokenUsage.contextUsed))} / ${formatNumber(total)} (${Number(data.tokenUsage.contextPercent ?? 0).toLocaleString('ru-RU')}%)`
+            // Коротко («261K / 1M (26,1%)»): полные числа на телефоне вытесняли подпись до «C..».
+            ? `${formatCompactTokens(Number(data.tokenUsage.contextUsed))} / ${formatCompactTokens(total)} (${Number(data.tokenUsage.contextPercent ?? 0).toLocaleString('ru-RU')}%)`
             : formatNumber(total),
           icon: Gauge,
         }]
