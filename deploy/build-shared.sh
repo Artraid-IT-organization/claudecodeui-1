@@ -118,6 +118,46 @@ fi
 say "Замок взят (ждал $((SECONDS - LOCK_WAIT_START)) с)"
 LOCK_HELD_START=$SECONDS
 
+# Перезапуск в забитую группу памяти = долгий простой. 22.09.26 агенты чатов
+# с их ffmpeg и сборками заняли 2,73 ГБ группы службы при потолке 2,5 ГБ;
+# новый сервер больше 15 минут не открывал порт — «Секунду, обновляюсь».
+# С 22.09 новые агенты живут в ccui-agents.slice (agent-rooms.js), но
+# пережившие перезапуск старые остаются в группе, пока не закончат.
+CG=/sys/fs/cgroup/system.slice/claudecodeui-shared.service
+wait_room_free() {
+    local high cur waited=0
+    high="$(cat "$CG/memory.high" 2>/dev/null)"
+    [[ "$high" =~ ^[0-9]+$ ]] || return 0
+    while :; do
+        cur="$(cat "$CG/memory.current" 2>/dev/null || echo 0)"
+        [ "$cur" -lt $((high * 85 / 100)) ] && return 0
+        if [ "$waited" -ge 300 ]; then
+            say "ВНИМАНИЕ: группа сайта всё ещё забита ($((cur/1048576)) из $((high/1048576)) МБ) — перезапускаю, подъём может быть долгим"
+            return 0
+        fi
+        [ "$waited" -eq 0 ] && {
+            say "Группа сайта забита: $((cur/1048576)) из $((high/1048576)) МБ — жду до 5 мин, иначе новый сервер застрянет. Кто занял:"
+            for p in $(cat "$CG/cgroup.procs"); do ps -o rss=,etime=,args= -p "$p" 2>/dev/null; done | sort -n -r | head -5 | cut -c1-120
+        }
+        sleep 15; waited=$((waited + 15))
+    done
+}
+
+wait_site_up() {
+    local t0=$SECONDS
+    while [ $((SECONDS - t0)) -lt 300 ]; do
+        if curl -s -o /dev/null --max-time 5 -w '%{http_code}' http://127.0.0.1:3003/ | grep -q 200; then
+            say "Сайт ответил через $((SECONDS - t0)) с после перезапуска"
+            [ $((SECONDS - t0)) -gt 60 ] && /home/claude/scripts/notify.sh "Claude UI поднимался $((SECONDS - t0)) с после выкатки — дольше минуты, разобраться" error >/dev/null 2>&1
+            return 0
+        fi
+        sleep 2
+    done
+    say "ОШИБКА: сайт не ответил за 5 мин после перезапуска"
+    /home/claude/scripts/notify.sh "Claude UI не поднялся за 5 мин после выкатки" error >/dev/null 2>&1
+    return 0
+}
+
 swap() {
     cd "$SHARED" || return 1
     # Живой коммит обязан входить в собираемый. 16.09.26 два чата выкатили
@@ -141,7 +181,9 @@ swap() {
     done
 
     cp -a "$DB" "$BACKUP"
+    wait_room_free
     sudo -n systemctl restart claudecodeui-shared
+    wait_site_up
 }
 
 if swap; then
