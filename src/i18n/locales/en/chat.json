@@ -130,7 +130,10 @@
       "ctrlEnter": "Ctrl+Enter to send • Shift+Enter for new line • Tab to change modes • / for slash commands",
       "enter": "Enter to send • Shift+Enter for new line • Tab to change modes • / for slash commands",
       "queue": "Enter to queue your next message",
-      "queueMore": "Enter to add this to the queue ({{position}} in line)"
+      "queueMore": "Enter to add this to the queue ({{position}} in line)",
+      "touch": "Enter for new line • send with the button on the right",
+      "queueTouch": "Button on the right queues your next message",
+      "queueMoreTouch": "Button on the right adds this to the queue ({{position}} in line)"
     },
     "clickToChangeMode": "Click to change permission mode (or press Tab in input)",
     "showAllCommands": "Show all commands",
