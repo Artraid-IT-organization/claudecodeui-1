@@ -339,7 +339,7 @@ export function useChatSessionState({
       online: typeof navigator === 'undefined' || navigator.onLine,
     });
     if (result.failed) {
-      refreshReasonRef.current.set(sessionId, `${reason}-retry`);
+      refreshReasonRef.current.set(sessionId, reason.endsWith('-retry') ? reason : `${reason}-retry`);
       return 'failed' as const;
     }
     return !result.deferred;

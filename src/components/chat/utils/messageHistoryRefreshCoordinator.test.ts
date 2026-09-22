@@ -3,6 +3,15 @@ import test from 'node:test';
 
 import { createMessageHistoryRefreshCoordinator } from './messageHistoryRefreshCoordinator';
 
+// Повторы идут по настоящим таймерам: ждём условие, а не фиксированное окно —
+// под нагрузкой соседних тестов 60 мс не хватало (мигающий тест).
+async function waitFor(check: () => boolean, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!check() && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 test('hidden refresh signals make no requests and flush once on activation', async () => {
   let activeSessionId: string | null = null;
   const calls: string[] = [];
@@ -158,7 +167,7 @@ test('failed refresh retries by itself until it succeeds (iPhone back from backg
   await coordinator.request('session-1');
   assert.equal(calls.length, 1);
   assert.equal(coordinator.hasPending('session-1'), true);
-  await new Promise((resolve) => setTimeout(resolve, 60));
+  await waitFor(() => calls.length === 3 && !coordinator.hasPending('session-1'));
   assert.equal(calls.length, 3);
   assert.equal(coordinator.hasPending('session-1'), false);
 });
@@ -172,12 +181,13 @@ test('retries stop after the schedule runs out and resume on the next signal', a
   );
 
   await coordinator.request('session-1');
-  await new Promise((resolve) => setTimeout(resolve, 40));
+  await waitFor(() => calls === 2);
+  await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal(calls, 2);
   assert.equal(coordinator.hasPending('session-1'), true);
 
   await coordinator.request('session-1');
-  await new Promise((resolve) => setTimeout(resolve, 40));
+  await waitFor(() => calls === 4);
   assert.equal(calls, 4);
 });
 
