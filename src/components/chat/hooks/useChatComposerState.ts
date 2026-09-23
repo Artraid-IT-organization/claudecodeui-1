@@ -50,6 +50,40 @@ const COMPOSER_ROOM_FLOOR_PX = 96;
  * может пересоздать экран, а выжимка должна дожить до него.
  */
 let pendingHandoff: { projectId: string; message: string } | null = null;
+/** Идёт ли опрос задачи — один на вкладку, даже если экран чата пересоздан. */
+let handoffPolling = false;
+
+/** Начатая задача переноса — в браузере, чтобы пережить выгрузку вкладки. */
+type HandoffJobRecord = { sessionId: string; projectId: string; startedAt: number };
+const HANDOFF_JOB_KEY = 'handoff_job';
+/** Сервер хранит задачу 30 минут после конца; дольше ждать нечего. */
+const HANDOFF_JOB_MAX_AGE_MS = 30 * 60 * 1000;
+
+function readHandoffJob(): HandoffJobRecord | null {
+  try {
+    const job = JSON.parse(localStorage.getItem(HANDOFF_JOB_KEY) || 'null') as HandoffJobRecord | null;
+    if (!job || typeof job.sessionId !== 'string' || Date.now() - job.startedAt > HANDOFF_JOB_MAX_AGE_MS) return null;
+    return job;
+  } catch {
+    return null;
+  }
+}
+
+function writeHandoffJob(job: HandoffJobRecord): void {
+  try {
+    localStorage.setItem(HANDOFF_JOB_KEY, JSON.stringify(job));
+  } catch {
+    // Нет хранилища — перенос всё равно идёт, только не переживёт выгрузку.
+  }
+}
+
+function clearHandoffJob(): void {
+  try {
+    localStorage.removeItem(HANDOFF_JOB_KEY);
+  } catch {
+    // Нечего убирать.
+  }
+}
 
 interface UseChatComposerStateArgs {
   selectedProject: Project | null;
@@ -1312,18 +1346,25 @@ export function useChatComposerState({
   const [handoffTick, setHandoffTick] = useState(0);
   const canHandoff = Boolean(sessionKey && selectedProject && onStartNewChat && provider === 'claude');
 
-  const startHandoff = useCallback(async () => {
-    const sourceSessionId = sessionKeyRef.current;
-    const sourceProject = selectedProject;
-    if (!sourceSessionId || !sourceProject || !onStartNewChat || handoffStatus === 'running') return;
+  /**
+   * Опрос задачи до готовности. `resumeSessionId` — продолжить уже начатую
+   * (вкладку выгрузили, пока модель писала): тогда без нового POST.
+   */
+  const runHandoff = useCallback(async (sourceProject: Project, sourceSessionId: string, resume: boolean) => {
+    if (!onStartNewChat || handoffPolling) return;
+    handoffPolling = true;
     setHandoffStatus('running');
+    if (!resume) {
+      writeHandoffJob({ sessionId: sourceSessionId, projectId: sourceProject.projectId, startedAt: Date.now() });
+    }
     const fail = (message: string) => {
+      clearHandoffJob();
       setHandoffStatus('idle');
       addMessage({ type: 'error', content: `Не получилось продолжить в новом чате: ${message}`, timestamp: new Date() });
     };
     try {
       const url = `/api/handoff/${encodeURIComponent(sourceSessionId)}`;
-      let response = await authenticatedFetch(url, { method: 'POST' });
+      let response = await authenticatedFetch(url, resume ? undefined : { method: 'POST' });
       let body = await response.json().catch(() => ({}));
       if (!response.ok) return fail(body?.error || `ошибка ${response.status}`);
       const deadline = Date.now() + 12 * 60 * 1000;
@@ -1336,15 +1377,41 @@ export function useChatComposerState({
       if (body?.status !== 'done' || typeof body.message !== 'string') {
         return fail(body?.error || 'выжимка не собралась вовремя');
       }
+      clearHandoffJob();
       pendingHandoff = { projectId: sourceProject.projectId, message: body.message };
       setHandoffStatus('idle');
       onStartNewChat(sourceProject);
       handoffTickRef.current += 1;
       setHandoffTick(handoffTickRef.current);
     } catch (error) {
-      fail(error instanceof Error ? error.message : 'нет связи с сервером');
+      // Обрыв сети (телефон уснул) — не провал: задача живёт на сервере,
+      // при возврате в приложение опрос продолжится по записи в браузере.
+      setHandoffStatus('idle');
+      if (!readHandoffJob()) fail(error instanceof Error ? error.message : 'нет связи с сервером');
+    } finally {
+      handoffPolling = false;
     }
-  }, [addMessage, handoffStatus, onStartNewChat, selectedProject]);
+  }, [addMessage, onStartNewChat]);
+
+  const startHandoff = useCallback(() => {
+    const sourceSessionId = sessionKeyRef.current;
+    if (!sourceSessionId || !selectedProject || handoffStatus === 'running') return;
+    void runHandoff(selectedProject, sourceSessionId, false);
+  }, [handoffStatus, runHandoff, selectedProject]);
+
+  // iPhone выгружает свёрнутое приложение, и опрос в памяти вкладки умирает.
+  // Начатая задача записана в браузере: вернулись — опрос продолжается.
+  useEffect(() => {
+    const resume = () => {
+      if (document.visibilityState !== 'visible' || handoffPolling) return;
+      const job = readHandoffJob();
+      if (!job || !selectedProject || selectedProject.projectId !== job.projectId) return;
+      void runHandoff(selectedProject, job.sessionId, true);
+    };
+    resume();
+    document.addEventListener('visibilitychange', resume);
+    return () => document.removeEventListener('visibilitychange', resume);
+  }, [runHandoff, selectedProject]);
 
   useEffect(() => {
     const pending = pendingHandoff;
