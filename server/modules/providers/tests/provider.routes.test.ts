@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -8,7 +8,7 @@ import test from 'node:test';
 
 import express, { type NextFunction, type Request, type Response } from 'express';
 
-import { closeConnection, initializeDatabase, sessionsDb } from '@/modules/database/index.js';
+import { closeConnection, initializeDatabase, projectsDb, sessionsDb } from '@/modules/database/index.js';
 import providerRouter from '@/modules/providers/provider.routes.js';
 import { AppError } from '@/shared/utils.js';
 
@@ -240,5 +240,57 @@ test('model routes expose immutable defaults and full custom model CRUD', async 
       deletePayload.data.models.OPTIONS.some((option) => option.recordId === customRecordId),
       false,
     );
+  });
+});
+
+test('conversation search reads only the asked folder and picks up new messages', async () => {
+  await withProviderServer(async (baseUrl, workspacePath) => {
+    const otherWorkspace = `${workspacePath}-other`;
+    const claudeLine = (sessionId: string, uuid: string, role: 'user' | 'assistant', text: string) => `${JSON.stringify({
+      type: role,
+      sessionId,
+      uuid,
+      timestamp: '2026-09-23T07:00:00.000Z',
+      message: { role, content: role === 'user' ? text : [{ type: 'text', text }] },
+    })}\n`;
+
+    const mainTranscript = path.join(path.dirname(workspacePath), 'main.jsonl');
+    await writeFile(mainTranscript, claudeLine('claude-main', 'u1', 'user', 'Где лежит отчёт про солнечную школу?')
+      + `${JSON.stringify({ type: 'user', sessionId: 'claude-main', message: { role: 'user', content: [{ type: 'tool_result', content: 'солнечную '.repeat(50) }] } })}\n`);
+    sessionsDb.createSession('claude-main', 'claude', workspacePath, 'Отчёты', undefined, undefined, mainTranscript);
+
+    const otherTranscript = path.join(path.dirname(workspacePath), 'other.jsonl');
+    await writeFile(otherTranscript, claudeLine('claude-other', 'u9', 'user', 'Про солнечную школу тоже'));
+    sessionsDb.createSession('claude-other', 'claude', otherWorkspace, 'Чужая папка', undefined, undefined, otherTranscript);
+
+    const projectId = projectsDb.getProjectPath(workspacePath)?.project_id;
+    assert.ok(projectId);
+
+    const search = async (q: string) => {
+      const response = await fetch(
+        `${baseUrl}/api/providers/search/sessions?q=${encodeURIComponent(q)}&limit=50&projectId=${projectId}`,
+      );
+      const stream = await response.text();
+      return stream
+        .split('\n\n')
+        .filter((block) => block.startsWith('event: result'))
+        .map((block) => JSON.parse(block.split('\n').find((line) => line.startsWith('data: '))!.slice(6)) as {
+          projectResult: { projectId: string; sessions: Array<{ sessionId: string; matches: Array<{ snippet: string; messageUuid?: string }> }> };
+        });
+    };
+
+    const first = await search('солнечную');
+    assert.equal(first.length, 1);
+    assert.equal(first[0].projectResult.projectId, projectId);
+    assert.equal(first[0].projectResult.sessions[0].sessionId, 'claude-main');
+    // Вывод инструмента в выжимку не попадает — одна находка, из сообщения.
+    assert.equal(first[0].projectResult.sessions[0].matches.length, 1);
+    assert.equal(first[0].projectResult.sessions[0].matches[0].messageUuid, 'u1');
+
+    assert.equal((await search('лунную')).length, 0);
+    await appendFile(mainTranscript, claudeLine('claude-main', 'u2', 'assistant', 'Про лунную школу отчёта нет'));
+    const afterAppend = await search('лунную');
+    assert.equal(afterAppend.length, 1);
+    assert.equal(afterAppend[0].projectResult.sessions[0].matches[0].messageUuid, 'u2');
   });
 });

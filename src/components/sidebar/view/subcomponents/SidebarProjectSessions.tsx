@@ -12,6 +12,7 @@ import { useSessionMessageSearch } from '../../../command-palette/sources/useSes
 
 import SidebarSessionItem from './SidebarSessionItem';
 import { useSessionListView } from '../../hooks/useSessionListView';
+import { useServerScope } from '../../hooks/useServerScope';
 
 /*
  * Поиск по чатам в списке слева.
@@ -184,7 +185,14 @@ export default function SidebarProjectSessions({
   );
   // По тексту переписки ищет сервер; из его ответа убираем то, что уже
   // нашлось по названию, чтобы один чат не стоял в списке дважды.
-  const messageMatches = useSessionMessageSearch(project.projectId, trimmedQuery, isExpanded && isSearching, true);
+  const [serverScope] = useServerScope();
+  const { items: messageMatches, searching: messageSearching } = useSessionMessageSearch(
+    project.projectId,
+    trimmedQuery,
+    isExpanded && isSearching,
+    true,
+    serverScope,
+  );
   const extraMessageMatches = useMemo(() => {
     const shown = new Set(visibleSessions.map((session) => session.id));
     return messageMatches.filter((match) => !shown.has(match.sessionId));
@@ -286,7 +294,11 @@ export default function SidebarProjectSessions({
           <div className="flex items-start gap-2 px-3 py-2 text-left">
             <SearchX className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-muted-foreground" />
             <p className="text-xs text-muted-foreground">
-              В названиях чатов «{trimmedQuery}» нет. Ищу в тексте переписки…
+              {messageSearching
+                ? `В названиях чатов «${trimmedQuery}» нет. Ищу в тексте переписки…`
+                : trimmedQuery.length < 2
+                  ? `В названиях чатов «${trimmedQuery}» нет.`
+                  : `«${trimmedQuery}» нет ни в названиях чатов, ни в переписке.`}
             </p>
           </div>
         ) : null
@@ -372,6 +384,10 @@ export default function SidebarProjectSessions({
             </button>
           ))}
         </div>
+      )}
+
+      {isSearching && messageSearching && (hasSessions || extraMessageMatches.length > 0) && (
+        <p className="px-3 py-1 text-[11px] text-muted-foreground/70">Ищу ещё в тексте переписки…</p>
       )}
     </div>
   );

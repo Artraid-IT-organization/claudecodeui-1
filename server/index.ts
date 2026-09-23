@@ -13,6 +13,7 @@ import cors from 'cors';
 
 import { installProcessGuards } from '@/shared/process-guards.js';
 import { adoptSurvivors, markShuttingDown } from '@/modules/providers/list/claude/survivor-runs.js';
+import { warmSearchIndexes } from '@/modules/providers/services/session-conversations-search.service.js';
 import { connectedClients, WS_OPEN_STATE } from '@/modules/websocket/services/websocket-state.service.js';
 import { AppError, findApplicationRoot, getClaudeJsonPath, getModuleDirectory, IS_PLATFORM, OPEN_REGISTRATION, terminalTextStyles } from '@/shared/utils.js';
 import {
@@ -560,6 +561,16 @@ async function startServer() {
                     dispatchChatQueues();
                 },
             });
+
+            // Выжимки переписки для поиска — заранее и не сразу после старта:
+            // первый поиск после выкатки не ждёт разбора всей переписки.
+            // Готовые выжимки лежат на диске, повторный прогрев только сверяет
+            // размеры файлов (session-search-index.service.ts).
+            setTimeout(() => {
+                warmSearchIndexes()
+                    .then(({ files, ms }) => console.log(`[search-index] выжимки готовы: ${files} файлов за ${ms} мс`))
+                    .catch((error) => console.warn('[search-index] прогрев не удался:', error?.message ?? error));
+            }, 30_000).unref();
 
             // Start server-side plugin processes for enabled plugins
             startEnabledPluginServers().catch(err => {
