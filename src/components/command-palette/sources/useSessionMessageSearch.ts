@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import { api } from '../../../utils/api';
 import type { LLMProvider } from '../../../types/app';
+import type { ServerScope } from '../../sidebar/hooks/useServerScope';
 
 export type SessionMessageMatch = {
   sessionId: string;
@@ -31,8 +32,12 @@ export function useSessionMessageSearch(
   // Список слева просит ещё и совпадения по названиям среди ВСЕХ чатов папки:
   // сам он видит только загруженную первую страницу (20 чатов).
   includeTitles = false,
+  // Вкладка панели («Проекты» / «2-й сервер»): сервер ищет только её чаты.
+  serverScope: ServerScope | null = null,
 ) {
   const [items, setItems] = useState<SessionMessageMatch[]>([]);
+  // Идёт ли поиск: список пишет «Ищу…» только пока сервер не ответил «готово».
+  const [searching, setSearching] = useState(false);
   const seqRef = useRef(0);
   const esRef = useRef<EventSource | null>(null);
 
@@ -40,6 +45,7 @@ export function useSessionMessageSearch(
     const trimmed = query.trim();
     if (!enabled || !projectId || trimmed.length < MIN_QUERY) {
       setItems([]);
+      setSearching(false);
       esRef.current?.close();
       esRef.current = null;
       return;
@@ -51,10 +57,13 @@ export function useSessionMessageSearch(
     // Новый запрос — старые результаты сразу убрать, иначе под «sunschool»
     // висели находки прошлого слова, пока не придёт новый ответ.
     setItems([]);
+    setSearching(true);
 
     const handle = setTimeout(() => {
       const seq = ++seqRef.current;
-      const url = api.searchConversationsUrl(trimmed);
+      // Сервер ищет только в этой папке: раньше каждая раскрытая папка
+      // запускала поиск по всем чатам всех папок и выбрасывала чужое.
+      const url = api.searchConversationsUrl(trimmed, 50, { projectId, serverScope });
       const es = new EventSource(url);
       esRef.current = es;
       const accumulated: SessionMessageMatch[] = [];
@@ -105,6 +114,7 @@ export function useSessionMessageSearch(
         if (seq !== seqRef.current) return;
         es.close();
         esRef.current = null;
+        setSearching(false);
       };
       es.addEventListener('done', finish);
       es.addEventListener('error', finish);
@@ -113,7 +123,7 @@ export function useSessionMessageSearch(
     return () => {
       clearTimeout(handle);
     };
-  }, [projectId, query, enabled, includeTitles]);
+  }, [projectId, query, enabled, includeTitles, serverScope]);
 
   useEffect(() => {
     return () => {
@@ -122,5 +132,5 @@ export function useSessionMessageSearch(
     };
   }, []);
 
-  return items;
+  return { items, searching };
 }

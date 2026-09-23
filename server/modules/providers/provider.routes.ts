@@ -837,6 +837,13 @@ router.get(
 router.get('/search/sessions', asyncHandler(async (req: Request, res: Response) => {
   const query = parseSessionSearchQuery(req.query.q);
   const limit = parseSessionSearchLimit(req.query.limit);
+  // Панель ищет внутри одной папки и одной вкладки; без них — по всем чатам.
+  const projectId = typeof req.query.projectId === 'string' && req.query.projectId.trim()
+    ? req.query.projectId.trim()
+    : null;
+  const serverScope = typeof req.query.serverScope === 'string' && req.query.serverScope
+    ? normalizeServerScope(req.query.serverScope)
+    : null;
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -856,6 +863,8 @@ router.get('/search/sessions', asyncHandler(async (req: Request, res: Response) 
     await sessionConversationsSearchService.search({
       query,
       limit,
+      projectId,
+      serverScope,
       signal: abortController.signal,
       onTitleResults: (titleResults) => {
         if (!closed) {

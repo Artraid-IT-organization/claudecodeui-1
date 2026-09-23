@@ -304,9 +304,11 @@ export const api = {
       method: 'DELETE',
     });
   },
-  searchConversationsUrl: (query, limit = 50) => {
+  searchConversationsUrl: (query, limit = 50, scope = {}) => {
     const token = getStoredAuthToken();
     const params = new URLSearchParams({ q: query, limit: String(limit) });
+    if (scope.projectId) params.set('projectId', scope.projectId);
+    if (scope.serverScope) params.set('serverScope', scope.serverScope);
     if (token) params.set('token', token);
     return `/api/providers/search/sessions?${params.toString()}`;
   },

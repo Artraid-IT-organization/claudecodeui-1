@@ -105,7 +105,7 @@ export default function CommandPalette({
   const showBranches = !page || page === 'branches' || page === 'actions';
 
   const sessions = useSessionsSource(projectId, open && showSessions);
-  const messageMatches = useSessionMessageSearch(projectId, search, open && showSessions);
+  const { items: messageMatches } = useSessionMessageSearch(projectId, search, open && showSessions);
   const files = useFilesSource(projectId, open && showFiles);
   const commits = useCommitsSource(projectId, open && showCommits);
   const branches = useBranchesSource(projectId, open && showBranches);
