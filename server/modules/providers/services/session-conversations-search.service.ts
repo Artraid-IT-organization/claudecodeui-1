@@ -91,7 +91,6 @@ const MAX_MATCHES_PER_SESSION = 2;
 const SEARCH_FIRST_BATCH = 8;
 const SEARCH_NEXT_BATCH = 64;
 const INDEX_CHECK_CONCURRENCY = 8;
-const RIPGREP_MAX_LINES_PER_FILE = 60;
 const UNKNOWN_PROJECT_KEY = '__unknown_project__';
 
 const INTERNAL_CONTENT_PREFIXES = [
@@ -760,8 +759,9 @@ function pickGrepWord(words: string[]): string {
 
 /**
  * Ищет строки выжимок, где есть слово. Возвращает строки по файлам выжимок.
- * На файл — не больше RIPGREP_MAX_LINES_PER_FILE строк: в чате нужны две
- * находки, остальные строки нужны только если первые отсеет точная проверка.
+ * Без предела на файл: в одном файле Claude бывает несколько разговоров, и
+ * предел по строкам отрезал бы поздние. Все выжимки вместе — десятки
+ * мегабайт, поэтому вывод и так ограничен.
  */
 async function grepIndexLines(
   word: string,
@@ -782,8 +782,6 @@ async function grepIndexLines(
       '--no-heading',
       '--no-line-number',
       '--null',
-      '--max-count',
-      String(RIPGREP_MAX_LINES_PER_FILE),
       '--',
       word,
       ...indexPaths,

@@ -292,5 +292,20 @@ test('conversation search reads only the asked folder and picks up new messages'
     const afterAppend = await search('лунную');
     assert.equal(afterAppend.length, 1);
     assert.equal(afterAppend[0].projectResult.sessions[0].matches[0].messageUuid, 'u2');
+
+    // Два разговора в одном файле: поздний находится, даже если в раннем
+    // слово встречается сотни раз.
+    const sharedTranscript = path.join(path.dirname(workspacePath), 'shared.jsonl');
+    let sharedLines = '';
+    for (let i = 0; i < 200; i += 1) {
+      sharedLines += claudeLine('claude-early', `e${i}`, 'user', `звезда номер ${i}`);
+    }
+    sharedLines += claudeLine('claude-late', 'late1', 'user', 'звезда в позднем разговоре');
+    await writeFile(sharedTranscript, sharedLines);
+    sessionsDb.createSession('claude-early', 'claude', workspacePath, 'Ранний', undefined, undefined, sharedTranscript);
+    sessionsDb.createSession('claude-late', 'claude', workspacePath, 'Поздний', undefined, undefined, sharedTranscript);
+    const shared = (await search('звезда')).flatMap((event) => event.projectResult.sessions.map((s) => s.sessionId));
+    assert.ok(shared.includes('claude-early'));
+    assert.ok(shared.includes('claude-late'));
   });
 });
