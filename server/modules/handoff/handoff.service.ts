@@ -354,7 +354,7 @@ async function resolveSource(sessionId: string): Promise<HandoffSource> {
     }
   }
   if (!transcriptPath || !fs.existsSync(transcriptPath)) {
-    throw new HandoffError(404, 'у чата ещё нет переписки на диске');
+    throw new HandoffError(404, 'в чате ещё нет ни одного ответа — дождитесь первого и нажмите снова');
   }
   // Чужой чат не прочитать: файл обязан лежать в папке аккаунта запроса.
   const realTranscript = canonicalizeAccountDir(transcriptPath);
