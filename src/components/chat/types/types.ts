@@ -147,6 +147,8 @@ export interface ChatInterfaceProps {
   sendByCtrlEnter?: boolean;
   externalMessageUpdate?: number;
   newSessionTrigger?: number;
+  /** Открыть новый пустой чат в папке — нужен кнопке «Продолжить в новом чате». */
+  onStartNewChat?: (project: Project) => void;
   onTaskClick?: (...args: unknown[]) => void;
   onShowAllTasks?: (() => void) | null;
 }

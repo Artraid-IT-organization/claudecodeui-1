@@ -787,6 +787,7 @@ function AppContentInner() {
           onShowSettings={openSettings}
           externalMessageUpdate={externalMessageUpdate}
           newSessionTrigger={newSessionTrigger}
+          onStartNewChat={handleNewSession}
           onProjectSelect={handleProjectSelect}
           onSessionSelect={handleSessionSelect}
           onProjectsRefresh={() => void refreshProjectsSilently()}

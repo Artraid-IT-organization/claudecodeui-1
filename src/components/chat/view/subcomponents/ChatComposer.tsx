@@ -10,7 +10,7 @@ import type {
   RefObject,
   TouchEvent,
 } from 'react';
-import { PaperclipIcon, Loader2, ArrowUpIcon } from 'lucide-react';
+import { PaperclipIcon, Loader2, ArrowUpIcon, MessageSquareShare } from 'lucide-react';
 
 import { useVoiceInput } from '../../hooks/useVoiceInput';
 import { isTouchKeyboard } from '../../../../utils/touchKeyboard';
@@ -78,6 +78,10 @@ interface ChatComposerProps {
   modelsLoading: boolean;
   tokenBudget: Record<string, unknown> | null;
   onShowTokenUsage: () => void;
+  /** Идёт ли сборка выжимки для «Продолжить в новом чате». */
+  handoffStatus?: 'idle' | 'running';
+  /** Нет — кнопки нет (новый чат, не Claude). */
+  onStartHandoff?: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement> | MouseEvent<HTMLButtonElement> | TouchEvent<HTMLButtonElement>) => void;
   isDragActive: boolean;
   queuedDrafts: QueuedDraft[];
@@ -141,6 +145,8 @@ export default function ChatComposer({
   modelsLoading,
   tokenBudget,
   onShowTokenUsage,
+  handoffStatus = 'idle',
+  onStartHandoff,
   onSubmit,
   isDragActive,
   queuedDrafts,
@@ -183,6 +189,7 @@ export default function ChatComposer({
   isTextareaExpanded,
   sendByCtrlEnter,
 }: ChatComposerProps) {
+  const handoffRunning = handoffStatus === 'running';
   const { t } = useTranslation('chat');
   const fileDropdownRef = useRef<HTMLDivElement | null>(null);
   const selectedFileRef = useRef<HTMLDivElement | null>(null);
@@ -481,6 +488,21 @@ export default function ChatComposer({
             )}
 
             <TokenUsageSummary usage={tokenBudget} onClick={onShowTokenUsage} />
+
+            {/* «Продолжить в новом чате» — рядом со счётчиком контекста, как у
+                Cursor: счётчик показывает, что чат разросся, кнопка рядом
+                переносит главное в новый чат. Бледная, пока не нужна. */}
+            {onStartHandoff && (
+              <PromptInputButton
+                tooltip={{ content: handoffRunning ? 'Собираю главное для нового чата…' : 'Продолжить в новом чате — перенести главное' }}
+                onClick={handoffRunning ? undefined : onStartHandoff}
+                aria-label="Продолжить в новом чате"
+                aria-busy={handoffRunning}
+                className={handoffRunning ? 'text-primary' : 'text-muted-foreground/60 hover:text-foreground'}
+              >
+                {handoffRunning ? <Loader2 className="animate-spin" /> : <MessageSquareShare />}
+              </PromptInputButton>
+            )}
 
             {/* Кнопок в этом ряду намеренно меньше, чем было.
                 Убраны две: список команд и очистка поля.

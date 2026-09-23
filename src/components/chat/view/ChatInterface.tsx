@@ -45,6 +45,7 @@ function ChatInterface({
   sendByCtrlEnter,
   externalMessageUpdate,
   newSessionTrigger,
+  onStartNewChat,
   onShowAllTasks,
 }: ChatInterfaceProps) {
   const { tasksEnabled, isTaskMasterInstalled } = useTasksSettings();
@@ -227,6 +228,9 @@ function ChatInterface({
     commandModalPayload,
     closeCommandModal,
     showCostModal,
+    handoffStatus,
+    startHandoff,
+    canHandoff,
   } = useChatComposerState({
     selectedProject,
     selectedSession,
@@ -243,6 +247,7 @@ function ChatInterface({
     sendMessage,
     sendByCtrlEnter,
     newSessionTrigger,
+    onStartNewChat,
     onSessionProcessing,
     onSessionEstablished: handleSessionEstablished,
     onInputFocusChange,
@@ -569,6 +574,8 @@ function ChatInterface({
           modelsLoading={providerModelsLoading}
           tokenBudget={tokenBudget}
           onShowTokenUsage={showCostModal}
+          handoffStatus={handoffStatus}
+          onStartHandoff={canHandoff ? startHandoff : undefined}
           onSubmit={handleSubmit}
           isDragActive={isDragActive}
           queuedDrafts={queuedDrafts}

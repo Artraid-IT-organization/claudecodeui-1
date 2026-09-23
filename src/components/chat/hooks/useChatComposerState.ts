@@ -45,6 +45,12 @@ import { type SlashCommand, useSlashCommands } from './useSlashCommands';
 const COMPOSER_FEED_MIN_PX = 80;
 const COMPOSER_ROOM_FLOOR_PX = 96;
 
+/**
+ * Выжимка, ждущая открытия нового чата. Вне компонента: переход в новый чат
+ * может пересоздать экран, а выжимка должна дожить до него.
+ */
+let pendingHandoff: { projectId: string; message: string } | null = null;
+
 interface UseChatComposerStateArgs {
   selectedProject: Project | null;
   selectedSession: ProjectSession | null;
@@ -67,6 +73,8 @@ interface UseChatComposerStateArgs {
   sendByCtrlEnter?: boolean;
   /** Растёт на каждое нажатие «Новый сеанс»: новый чат всегда открывается с пустым полем. */
   newSessionTrigger?: number;
+  /** Открыть новый пустой чат в папке — для «Продолжить в новом чате». */
+  onStartNewChat?: (project: Project) => void;
   onSessionProcessing?: MarkSessionProcessing;
   /**
    * Invoked with the freshly allocated session id when the user sends the
@@ -268,6 +276,7 @@ export function useChatComposerState({
   sendMessage,
   sendByCtrlEnter,
   newSessionTrigger,
+  onStartNewChat,
   onSessionProcessing,
   onSessionEstablished,
   onInputFocusChange,
@@ -1283,6 +1292,76 @@ export function useChatComposerState({
     setInput(saved);
   }, [draftScope, selectedProjectId]);
 
+  /*
+   * «Продолжить в новом чате» (Егор 23.09.26): контекст разросся — открыть
+   * новый пустой чат, в котором уже лежит выжимка главного из этого.
+   *
+   * Выжимку пишет сервер (server/modules/handoff) до пары минут, поэтому
+   * задача ставится и опрашивается. Готово — открывается новый чат той же
+   * папки, и выжимка уходит в него первым сообщением ОБЫЧНОЙ отправкой: так
+   * новый чат получает номер, название и защиту от потери сообщения тем же
+   * путём, что и набранный руками.
+   *
+   * Порядок важен. После «Нового сеанса» номер чата обнуляется не сразу, а
+   * кадром позже; отправка раньше ушла бы в СТАРЫЙ чат. Поэтому выжимка
+   * ждёт, пока открыт именно новый чат этой папки и в поле его черновик
+   * (эффект стоит ниже подмены черновика — его текст не затирается).
+   */
+  const [handoffStatus, setHandoffStatus] = useState<'idle' | 'running'>('idle');
+  const handoffTickRef = useRef(0);
+  const [handoffTick, setHandoffTick] = useState(0);
+  const canHandoff = Boolean(sessionKey && selectedProject && onStartNewChat && provider === 'claude');
+
+  const startHandoff = useCallback(async () => {
+    const sourceSessionId = sessionKeyRef.current;
+    const sourceProject = selectedProject;
+    if (!sourceSessionId || !sourceProject || !onStartNewChat || handoffStatus === 'running') return;
+    setHandoffStatus('running');
+    const fail = (message: string) => {
+      setHandoffStatus('idle');
+      addMessage({ type: 'error', content: `Не получилось продолжить в новом чате: ${message}`, timestamp: new Date() });
+    };
+    try {
+      const url = `/api/handoff/${encodeURIComponent(sourceSessionId)}`;
+      let response = await authenticatedFetch(url, { method: 'POST' });
+      let body = await response.json().catch(() => ({}));
+      if (!response.ok) return fail(body?.error || `ошибка ${response.status}`);
+      const deadline = Date.now() + 12 * 60 * 1000;
+      while (body?.status === 'running' && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+        response = await authenticatedFetch(url);
+        body = await response.json().catch(() => ({}));
+        if (!response.ok) return fail(body?.error || `ошибка ${response.status}`);
+      }
+      if (body?.status !== 'done' || typeof body.message !== 'string') {
+        return fail(body?.error || 'выжимка не собралась вовремя');
+      }
+      pendingHandoff = { projectId: sourceProject.projectId, message: body.message };
+      setHandoffStatus('idle');
+      onStartNewChat(sourceProject);
+      handoffTickRef.current += 1;
+      setHandoffTick(handoffTickRef.current);
+    } catch (error) {
+      fail(error instanceof Error ? error.message : 'нет связи с сервером');
+    }
+  }, [addMessage, handoffStatus, onStartNewChat, selectedProject]);
+
+  useEffect(() => {
+    const pending = pendingHandoff;
+    if (!pending || sessionKey || selectedProjectId !== pending.projectId) return;
+    if (draftOwnerRef.current !== draftScope) return;
+    pendingHandoff = null;
+    inputValueRef.current = pending.message;
+    setInput(pending.message);
+    const timer = window.setTimeout(() => {
+      // За этот миг человек мог открыть другой чат — тогда выжимка остаётся
+      // в поле нового, а не уходит куда попало.
+      if (sessionKeyRef.current || inputValueRef.current !== pending.message) return;
+      void handleSubmitRef.current?.(createFakeSubmitEvent());
+    }, 50);
+    return () => window.clearTimeout(timer);
+  }, [sessionKey, selectedProjectId, draftScope, handoffTick]);
+
 
   useEffect(() => {
     if (!textareaRef.current) {
@@ -1536,5 +1615,8 @@ export function useChatComposerState({
     commandModalPayload,
     closeCommandModal,
     showCostModal,
+    handoffStatus,
+    startHandoff,
+    canHandoff,
   };
 }

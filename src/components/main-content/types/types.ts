@@ -67,6 +67,8 @@ export type MainContentProps = {
   onShowSettings: (tab?: SettingsMainTab) => void;
   externalMessageUpdate: number;
   newSessionTrigger: number;
+  /** Открыть новый пустой чат в папке — нужен кнопке «Продолжить в новом чате». */
+  onStartNewChat?: (project: Project) => void;
   /** Switches the app to another project — used by the git panel's Worktrees view and the empty-state recent projects list. */
   onProjectSelect: (project: Project) => void;
   /** Jumps straight into a specific session — used by the empty-state "continue last chat" shortcut. */
