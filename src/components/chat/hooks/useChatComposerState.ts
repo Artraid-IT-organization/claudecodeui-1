@@ -1217,6 +1217,8 @@ export function useChatComposerState({
 
     if (carried.trim() || carriedFiles.length > 0 || carriedUploaded.length > 0) {
       const carriedId = newDraftId();
+      // Чат фиксируем до загрузки: за время загрузки человек может открыть другой.
+      const carriedSessionId = sessionKeyRef.current;
       queuedFilesRef.current.set(carriedId, carriedFiles);
       void (async () => {
         let uploaded: unknown[] = carriedUploaded;
@@ -1231,7 +1233,7 @@ export function useChatComposerState({
         sendMessage({
           type: 'chat.send',
           clientMessageId: carriedId,
-          sessionId: sessionKeyRef.current,
+          sessionId: carriedSessionId,
           content: carried,
           options: { ...buildSendOptions(carried), attachments: uploaded },
         });
@@ -1336,6 +1338,7 @@ export function useChatComposerState({
     const restored = takeAttachmentDraft(draftOwnerRef.current);
     if (restored.files.length > 0 || restored.uploaded.length > 0) {
       setAttachedFiles(restored.files);
+      attachedFilesRef.current = restored.files;
       carriedUploadedRef.current = restored.uploaded;
     }
     return () => {
