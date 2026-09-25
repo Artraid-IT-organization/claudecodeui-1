@@ -189,9 +189,12 @@
 
         // Программа не нарисовала экран — ждём, пока страница видна: в фоне iOS
         // замораживает всё, и секунды там ничего не значат.
+        // Докачка ещё идёт — или только что закончилась: программе нужно
+        // мгновение, чтобы нарисовать первый экран после загрузки файлов.
+        window.addEventListener('load', function () { guard.loadedAt = Date.now(); });
         function stillLoading() {
-          return document.readyState !== 'complete' && guard.errors.length === 0 &&
-            Date.now() - guard.started < LOADING_GRACE_MS;
+          if (guard.errors.length > 0 || Date.now() - guard.started >= LOADING_GRACE_MS) return false;
+          return document.readyState !== 'complete' || !guard.loadedAt || Date.now() - guard.loadedAt < 5000;
         }
         function armStartTimer(delay) {
           setTimeout(function () {
@@ -232,7 +235,9 @@
           }
         }
         document.addEventListener('visibilitychange', onReturn);
-        window.addEventListener('pageshow', onReturn);
+        // pageshow приходит и в конце обычной загрузки — возвратом считается
+        // только восстановление страницы из памяти браузера (persisted).
+        window.addEventListener('pageshow', function (event) { if (event.persisted) onReturn(); });
 
         // Выгрузил ли телефон прошлую страницу, не попрощавшись. Пульс пишется
         // раз в 5 с, прощание — в pagehide. Пульс без прощания = страницу убили.
