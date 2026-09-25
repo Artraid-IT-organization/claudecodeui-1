@@ -224,12 +224,15 @@
             report('page-was-killed', { silentForSec: Math.round((Date.now() - lastBeat) / 1000), lastState: beat.split(':')[1] || '' });
           }, 4000);
         }
-        function pulse() { store(BEAT_KEY, Date.now() + ':' + document.visibilityState); }
+        // После прощания пульс молчит: браузер шлёт «страница скрыта» уже после
+        // pagehide, и без этого обычная перезагрузка выглядела бы как убийство.
+        var leaving = false;
+        function pulse() { if (!leaving) store(BEAT_KEY, Date.now() + ':' + document.visibilityState); }
         pulse();
         setInterval(pulse, 5000);
         document.addEventListener('visibilitychange', pulse);
-        window.addEventListener('pagehide', function () { store(BEAT_KEY, Date.now() + ':bye'); });
-        window.addEventListener('pageshow', pulse);
+        window.addEventListener('pagehide', function () { leaving = true; store(BEAT_KEY, Date.now() + ':bye'); });
+        window.addEventListener('pageshow', function () { leaving = false; pulse(); });
       })();
     </script>
 
