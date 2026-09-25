@@ -125,9 +125,9 @@ export default function SidebarSessionItem({
     }
   };
 
-  // Ярлык-флажок. Меняем сразу на экране, не дожидаясь сервера; сервер
-  // рассылает обновление чата, и строка сходится с базой сама. Ошибка —
-  // возвращаем как было.
+  // Ярлык-флажок. Меняем сразу на экране, не дожидаясь сервера; при
+  // следующей загрузке списка значение придёт из базы. Ошибка — возвращаем
+  // как было.
   const [flaggedOverride, setFlaggedOverride] = useState<boolean | null>(null);
   const isFlagged = flaggedOverride ?? Boolean(session.flagged);
   useEffect(() => {

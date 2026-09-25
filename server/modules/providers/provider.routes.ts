@@ -8,7 +8,6 @@ import { providerTokenUsageService } from '@/modules/providers/services/provider
 import { providerSkillsService } from '@/modules/providers/services/skills.service.js';
 import { sessionConversationsSearchService } from '@/modules/providers/services/session-conversations-search.service.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
-import { broadcastSessionUpserted } from '@/modules/providers/services/sessions-watcher.service.js';
 import type {
   CustomProviderModelInput,
   LLMProvider,
@@ -780,12 +779,12 @@ router.post(
     if (typeof flagged !== 'boolean') {
       throw new AppError('flagged must be a boolean.', { code: 'INVALID_FLAGGED', statusCode: 400 });
     }
+    // Живое обновление чата (session_upserted) здесь не рассылаем: клиент
+    // принимает его как «в чате новое» — ставил жёлтую точку внимания, а
+    // открытая вкладка теряла строку из списка до перезагрузки (проверено
+    // 25.09.26). Нажавшая вкладка меняет ярлык сама, остальные увидят его
+    // при следующей загрузке списка.
     const result = sessionsService.setSessionFlagged(sessionId, flagged);
-    // Ярлык повесили на телефоне — он сразу виден и в открытой вкладке на
-    // компьютере, без перезагрузки.
-    void broadcastSessionUpserted(sessionId).catch((error) => {
-      console.error('[flag] не удалось разослать обновление чата:', error);
-    });
     res.json(createApiSuccessResponse(result));
   }),
 );
