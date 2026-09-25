@@ -980,8 +980,12 @@ export function handleChatConnection(
     }
   });
 
-  ws.on('close', () => {
-    console.log('[INFO] Chat client disconnected');
+  // Код закрытия отличает уход страницы (1001) от её внезапной смерти (1006 —
+  // телефон выгрузил страницу из памяти, не попрощавшись). 25.09.26 белый экран
+  // на iPhone не оставлял следа — этот код один из немногих признаков.
+  const openedAt = Date.now();
+  ws.on('close', (code: number) => {
+    console.log(`[INFO] Chat client disconnected code=${code} livedSec=${Math.round((Date.now() - openedAt) / 1000)}`);
     connectedClients.delete(ws);
   });
 }
