@@ -429,6 +429,13 @@ function extractClaudeSearchableMessage(entry: AnyRecord): ClaudeSearchableMessa
     return null;
   }
 
+  // Служебные вставки от имени человека (подпись к снимку «[Image: …]»,
+  // загрузка навыка, «продолжай с места»): чат их не показывает, значит и
+  // искать в них и показывать их в превью главного экрана нечего.
+  if (rawRole === 'user' && entry.isMeta === true && entry.isCompactSummary !== true) {
+    return null;
+  }
+
   if (typeof entry.message.content === 'string') {
     const content = String(entry.message.content);
 

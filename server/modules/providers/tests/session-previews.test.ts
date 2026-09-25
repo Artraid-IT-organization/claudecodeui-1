@@ -33,6 +33,8 @@ test('превью: последние слова человека без слу
       line(OWN_ID, { type: 'user', message: { role: 'user', content: 'Добавь новый чат на главный экран\n<files_input>\n1. /tmp/снимок.heic\n</files_input>' } }),
       line(OWN_ID, { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Готово,   кнопка\nстоит.' }] } }),
       line(OWN_ID, { type: 'user', message: { role: 'user', content: '<task-notification> фоновая задача закончила' } }),
+      line(OWN_ID, { type: 'user', isMeta: true, message: { role: 'user', content: [{ type: 'text', text: '[Image: original 2560x1600, displayed at 2000x1250.]' }] } }),
+      line(OWN_ID, { type: 'user', isMeta: true, message: { role: 'user', content: [{ type: 'text', text: 'Base directory for this skill: /x' }] } }),
     ].join('\n') + '\n');
 
     const foreignFile = path.join(foreignAccount, 'projects', '-p', `${FOREIGN_ID}.jsonl`);
