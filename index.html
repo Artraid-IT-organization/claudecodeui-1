@@ -92,7 +92,11 @@
         window.addEventListener('error', function (event) {
           var target = event.target;
           if (target && target !== window && (target.tagName === 'SCRIPT' || target.tagName === 'LINK')) {
-            guard.errors.push('не загрузился файл ' + (target.src || target.href || '').replace(location.origin, ''));
+            var file = (target.src || target.href || '').replace(location.origin, '');
+            guard.errors.push('не загрузился файл ' + file);
+            // Ждать дальше бессмысленно, только если не пришёл файл самой
+            // программы; упавшая картинка или чужой скрипт — не повод.
+            if (file.indexOf('/assets/') === 0) guard.fatalLoad = true;
           } else {
             guard.errors.push(String(event.message || event.error || 'ошибка').slice(0, 240));
           }
@@ -193,7 +197,7 @@
         // мгновение, чтобы нарисовать первый экран после загрузки файлов.
         window.addEventListener('load', function () { guard.loadedAt = Date.now(); });
         function stillLoading() {
-          if (guard.errors.length > 0 || Date.now() - guard.started >= LOADING_GRACE_MS) return false;
+          if (guard.fatalLoad || Date.now() - guard.started >= LOADING_GRACE_MS) return false;
           return document.readyState !== 'complete' || !guard.loadedAt || Date.now() - guard.loadedAt < 5000;
         }
         function armStartTimer(delay) {
