@@ -19,7 +19,7 @@
 
       Этот кусок стоит в самой странице, до программы, поэтому работает, даже
       когда программа не загрузилась вовсе:
-        · программа не нарисовала экран за 12 с, упала при запуске или её экран
+        · программа не нарисовала экран за 15 с (пока файлы качаются без ошибок — до минуты), упала при запуске или её экран
           опустел — страница сама перезапускается (не больше двух раз подряд),
           дальше показывает экран с кнопками вместо белого листа;
         · при возврате в приложение с пустым экраном — перезапуск сразу;
@@ -30,7 +30,12 @@
       (function () {
         var ATTEMPTS_KEY = 'boot-guard-attempts';
         var BEAT_KEY = 'boot-guard-beat';
-        var START_TIMEOUT_MS = 12000;
+        // 15 с — первая проверка; пока файлы программы ещё качаются без ошибок
+        // (медленная мобильная сеть, холодный запуск после выкатки ~10 с), ждём
+        // дальше, до минуты. Перезапуск — только при ошибке или когда всё
+        // скачалось, а экрана нет.
+        var START_TIMEOUT_MS = 15000;
+        var LOADING_GRACE_MS = 60000;
         var MAX_AUTO_RELOADS = 2;
         var guard = (window.__bootGuard = { started: Date.now(), errors: [], mountedOnce: false, done: false });
 
@@ -40,6 +45,12 @@
         function load(key) {
           try { return sessionStorage.getItem(key); } catch (e) { return null; }
         }
+        // Без хранилища (Safari с запретом данных сайтов) счётчик перезапусков
+        // не переживёт перезагрузку — автоперезапуск там был бы вечным циклом.
+        var storageWorks = (function () {
+          try { sessionStorage.setItem('boot-guard-probe', '1'); return sessionStorage.getItem('boot-guard-probe') === '1'; }
+          catch (e) { return false; }
+        })();
 
         // Фон до программы — под тему, чтобы запуск не вспыхивал белым.
         try {
@@ -51,7 +62,7 @@
         function report(kind, extra) {
           try {
             var token = localStorage.getItem('auth-token');
-            if (!token || !navigator.sendBeacon) return;
+            if (!token || !window.fetch) return;
             var nav = (performance.getEntriesByType && performance.getEntriesByType('navigation')[0]) || {};
             var body = {
               kind: kind,
@@ -66,10 +77,14 @@
               ua: navigator.userAgent.slice(0, 160),
             };
             for (var key in extra || {}) body[key] = extra[key];
-            navigator.sendBeacon(
-              '/api/user/boot-probe?token=' + encodeURIComponent(token),
-              new Blob([JSON.stringify(body)], { type: 'application/json' })
-            );
+            // keepalive доносит запрос и при уходе со страницы, а ключ идёт
+            // заголовком — в адресе он попал бы в журнал веб-сервера.
+            fetch('/api/user/boot-probe', {
+              method: 'POST',
+              keepalive: true,
+              headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+              body: JSON.stringify(body),
+            }).catch(function () {});
           } catch (e) {}
         }
         guard.report = report;
@@ -154,7 +169,7 @@
           if (guard.done) return;
           guard.done = true;
           var n = attempts();
-          if (n < MAX_AUTO_RELOADS) {
+          if (storageWorks && n < MAX_AUTO_RELOADS) {
             store(ATTEMPTS_KEY, (n + 1) + ':' + Date.now());
             report('auto-reload', { reason: reason, attempt: n + 1 });
             setTimeout(function () { location.reload(); }, 300);
@@ -174,14 +189,19 @@
 
         // Программа не нарисовала экран — ждём, пока страница видна: в фоне iOS
         // замораживает всё, и «12 секунд» там ничего не значат.
-        function armStartTimer() {
+        function stillLoading() {
+          return document.readyState !== 'complete' && guard.errors.length === 0 &&
+            Date.now() - guard.started < LOADING_GRACE_MS;
+        }
+        function armStartTimer(delay) {
           setTimeout(function () {
             if (guard.mountedOnce || guard.done) return;
             if (document.visibilityState === 'hidden') return;
-            check('экран не появился за 12 с');
-          }, START_TIMEOUT_MS);
+            if (stillLoading()) { armStartTimer(3000); return; }
+            check('экран не появился за ' + Math.round((Date.now() - guard.started) / 1000) + ' с');
+          }, delay);
         }
-        armStartTimer();
+        armStartTimer(START_TIMEOUT_MS);
 
         document.addEventListener('DOMContentLoaded', function () {
           var root = document.getElementById('root');
@@ -205,7 +225,7 @@
         // Возврат в приложение: белый лист — перезапуск сразу, без ожидания.
         function onReturn() {
           if (document.visibilityState !== 'visible') return;
-          if (!guard.mountedOnce && Date.now() - guard.started > START_TIMEOUT_MS) {
+          if (!guard.mountedOnce && Date.now() - guard.started > START_TIMEOUT_MS && !stillLoading()) {
             check('возврат в приложение, экрана нет');
           } else if (guard.mountedOnce && !rootFilled()) {
             check('возврат в приложение, экран пуст');
