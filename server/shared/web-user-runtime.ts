@@ -22,6 +22,7 @@
 import path from 'node:path';
 
 import { credentialsDb, userDb } from '@/modules/database/index.js';
+import { INHERITED_CLAUDE_AUTH_ENV_KEYS, readClaudeLoginFromConfigDir } from '@/shared/claude-login.js';
 import { getGlobalImageAssetsDir } from '@/shared/image-attachments.js';
 import type { AuthenticatedWebSocketRequest } from '@/shared/types.js';
 import { isPlatformOwnerWebUser, OPEN_REGISTRATION } from '@/shared/utils.js';
@@ -32,7 +33,21 @@ const ANTHROPIC_API_KEY_CREDENTIAL_TYPE = 'anthropic_api_key';
 export type WebUserRuntimeContext = {
   claudeConfigDir: string | null;
   anthropicApiKey: string | null;
+  /**
+   * Не отдавать процессу ключи Claude из окружения сервера. Они принадлежат
+   * владельцу площадки, а CLI предпочитает ключ из окружения входу из папки:
+   * гость, вошедший своей подпиской, молча работал бы на ключе владельца.
+   */
+  isolateInheritedClaudeAuth: boolean;
 };
+
+const EMPTY_CONTEXT: WebUserRuntimeContext = {
+  claudeConfigDir: null,
+  anthropicApiKey: null,
+  isolateInheritedClaudeAuth: false,
+};
+
+
 
 /**
  * Достаёт опознанного пользователя из соединения. Форматы разные, потому что
@@ -68,17 +83,18 @@ export function resolveWebUserRuntimeContext(
   userId: string | number | null,
 ): WebUserRuntimeContext {
   if (!OPEN_REGISTRATION || userId === null) {
-    return { claudeConfigDir: null, anthropicApiKey: null };
+    return EMPTY_CONTEXT;
   }
 
   const numericUserId = Number(userId);
   if (!Number.isFinite(numericUserId)) {
-    return { claudeConfigDir: null, anthropicApiKey: null };
+    return EMPTY_CONTEXT;
   }
 
   // Владелец площадки — единственный, у кого два настоящих аккаунта и
   // переключатель между ними. Остальные всегда в своём единственном каталоге.
-  const ownerSlot = isPlatformOwnerWebUser(numericUserId)
+  const isOwner = isPlatformOwnerWebUser(numericUserId);
+  const ownerSlot = isOwner
     ? userDb.getActiveOwnerAccountSlot(numericUserId)
     : undefined;
 
@@ -88,7 +104,40 @@ export function resolveWebUserRuntimeContext(
       numericUserId,
       ANTHROPIC_API_KEY_CREDENTIAL_TYPE,
     ),
+    isolateInheritedClaudeAuth: !isOwner,
   };
+}
+
+/**
+ * Есть ли у человека СВОЙ доступ к Claude: ключ API в настройках сайта или
+ * вход, сделанный в его командной строке (`claude /login` пишет его в папку
+ * человека). Чат спрашивает ровно это, а не «есть ли ключ API»: до 25.09.26
+ * вход подпиской в командной строке чат не видел, и человеку, только что
+ * вошедшему, отвечал «добавьте ключ API».
+ */
+export async function hasOwnClaudeAccess(context: WebUserRuntimeContext): Promise<boolean> {
+  if (context.anthropicApiKey) {
+    return true;
+  }
+  if (!context.claudeConfigDir) {
+    return false;
+  }
+  return (await readClaudeLoginFromConfigDir(context.claudeConfigDir)).authenticated;
+}
+
+/** Копия окружения без ключей Claude сервера — для процесса гостя (см. выше). */
+export function withoutInheritedClaudeAuth(
+  env: NodeJS.ProcessEnv,
+  context: WebUserRuntimeContext,
+): NodeJS.ProcessEnv {
+  if (!context.isolateInheritedClaudeAuth) {
+    return env;
+  }
+  const copy = { ...env };
+  for (const key of INHERITED_CLAUDE_AUTH_ENV_KEYS) {
+    delete copy[key];
+  }
+  return copy;
 }
 
 /**
