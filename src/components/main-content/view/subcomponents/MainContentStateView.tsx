@@ -261,12 +261,12 @@ export default function MainContentStateView({
         </div>
       ) : (
         <div className="flex flex-1 overflow-y-auto">
-          <div className="mx-auto w-full max-w-md px-7 pb-14 pt-10 sm:pt-24">
+          <div className="mx-auto w-full max-w-xl px-4 pb-10 pt-5 sm:px-6 sm:pt-12">
             {lastHit && (
               <button
                 type="button"
                 onClick={() => openChat(lastHit)}
-                className="-mx-3 block w-[calc(100%+1.5rem)] rounded-2xl px-3 py-2 text-left transition-colors hover:bg-accent/30 active:bg-accent/40"
+                className="block w-full rounded-2xl border border-primary/20 bg-primary/[0.06] px-4 py-3.5 text-left transition-colors hover:border-primary/35 hover:bg-primary/10 active:scale-[0.99]"
               >
                 <div className="flex items-center gap-3">
                   <span className="min-w-0 flex-1 truncate text-[13px] text-muted-foreground">
@@ -276,11 +276,11 @@ export default function MainContentStateView({
                   </span>
                   {renderStatus(lastHit)}
                 </div>
-                <p className="mt-2 line-clamp-2 text-[21px] font-semibold leading-snug tracking-tight text-foreground">
+                <p className="mt-1.5 line-clamp-2 text-[17px] font-semibold leading-snug text-foreground">
                   {getSessionName(lastHit.session, t)}
                 </p>
                 {previewOf(lastHit.session.id) && (
-                  <p className="mt-2 line-clamp-2 text-[15px] leading-relaxed text-muted-foreground">
+                  <p className="mt-1 line-clamp-2 text-[14px] leading-snug text-muted-foreground">
                     {previewOf(lastHit.session.id)}
                   </p>
                 )}
@@ -292,8 +292,8 @@ export default function MainContentStateView({
                 type="button"
                 onClick={handleNewChat}
                 className={cn(
-                  'flex h-12 w-full items-center justify-center gap-2 rounded-full bg-primary/10 px-5 text-[15px] font-medium text-primary transition-colors hover:bg-primary/15 active:bg-primary/20',
-                  lastHit ? 'mt-7' : '',
+                  'flex h-11 w-full items-center justify-center gap-2 rounded-2xl bg-primary/10 px-5 text-[15px] font-medium text-primary transition-colors hover:bg-primary/15 active:bg-primary/20',
+                  lastHit ? 'mt-3' : '',
                 )}
               >
                 <Plus className="h-[18px] w-[18px]" />
@@ -306,11 +306,11 @@ export default function MainContentStateView({
             )}
 
             {otherHits.length > 0 && (
-              <section className="mt-14">
-                <h3 className="mb-3 text-[13px] text-muted-foreground">
+              <section className="mt-6">
+                <h3 className="mb-2 px-1 text-[13px] text-muted-foreground">
                   {t('mainContent.recentChats')}
                 </h3>
-                <div className="-mx-3">
+                <div className="divide-y divide-border/50 overflow-hidden rounded-2xl border border-border/60 bg-card">
                   {otherHits.map((hit) => {
                     const secondLine = previewOf(hit.session.id) ?? hit.session.groupLabel ?? null;
                     return (
@@ -318,7 +318,7 @@ export default function MainContentStateView({
                         key={`${hit.project.projectId}:${hit.session.id}`}
                         type="button"
                         onClick={() => openChat(hit)}
-                        className="block w-full rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-accent/30 active:bg-accent/40"
+                        className="block w-full px-4 py-2.5 text-left transition-colors hover:bg-accent/40 active:bg-accent/60"
                       >
                         <div className="flex items-baseline gap-3">
                           <span className="min-w-0 flex-1 truncate text-[15px] text-foreground">
@@ -327,7 +327,7 @@ export default function MainContentStateView({
                           {renderStatus(hit)}
                         </div>
                         {secondLine && (
-                          <p className="mt-0.5 truncate text-[14px] text-muted-foreground/80">{secondLine}</p>
+                          <p className="mt-0.5 truncate text-[13px] text-muted-foreground/80">{secondLine}</p>
                         )}
                       </button>
                     );
@@ -336,7 +336,7 @@ export default function MainContentStateView({
                     <button
                       type="button"
                       onClick={onMenuClick}
-                      className="mt-1 flex w-full items-center gap-1 rounded-xl px-3 py-2.5 text-left text-[15px] text-muted-foreground transition-colors hover:bg-accent/30 active:bg-accent/40"
+                      className="flex w-full items-center justify-between px-4 py-2.5 text-left text-[15px] text-muted-foreground transition-colors hover:bg-accent/40 active:bg-accent/60"
                     >
                       {t('mainContent.allChats')}
                       <ChevronRight className="h-4 w-4" />
@@ -347,11 +347,11 @@ export default function MainContentStateView({
             )}
 
             {folders.length > 0 && (
-              <section className="mt-12">
-                <h3 className="mb-3 text-[13px] text-muted-foreground">
+              <section className="mt-6">
+                <h3 className="mb-2 px-1 text-[13px] text-muted-foreground">
                   {t('mainContent.folders')}
                 </h3>
-                <div className="-mx-3">
+                <div className="divide-y divide-border/50 overflow-hidden rounded-2xl border border-border/60 bg-card">
                   {folders.map((project) => {
                     const lastActivity = getProjectLastActivity(project);
                     const age = lastActivity.getTime() > 0 ? formatCompactAge(lastActivity.toISOString(), currentTime) : '';
@@ -361,7 +361,7 @@ export default function MainContentStateView({
                         key={project.projectId}
                         type="button"
                         onClick={() => onProjectSelect(project)}
-                        className="flex w-full items-baseline gap-3 rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-accent/30 active:bg-accent/40"
+                        className="flex w-full items-baseline gap-3 px-4 py-2.5 text-left transition-colors hover:bg-accent/40 active:bg-accent/60"
                         title={project.fullPath}
                       >
                         <span className="min-w-0 flex-1 truncate text-[15px] text-foreground">{project.displayName}</span>
