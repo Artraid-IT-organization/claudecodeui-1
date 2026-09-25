@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ChevronRight, Clock, Folder, History, Plus } from 'lucide-react';
+import { ChevronRight, Folder, Plus } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import type { MainContentStateViewProps } from '../../types/types';
@@ -179,6 +179,7 @@ export default function MainContentStateView({
     onSessionSelect({ ...hit.session, __projectId: hit.project.projectId });
   };
 
+  // Цвет — только у точки: сам текст статуса такой же тихий, как время.
   const renderStatus = (hit: SessionHit) => {
     const status = statusOf(hit.session.id);
     if (status.kind === 'running') {
@@ -187,35 +188,29 @@ export default function MainContentStateView({
         ? formatCompactAge(status.startedAt, currentTime)
         : '';
       return (
-        <span className="flex flex-shrink-0 items-center gap-1.5 text-xs font-medium text-emerald-500">
+        <span className="flex flex-shrink-0 items-center gap-1.5 text-[13px] text-muted-foreground">
           <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" aria-hidden />
           {t('mainContent.statusRunning')}
           {age ? ` · ${age}` : ''}
         </span>
       );
     }
-    const age = formatCompactAge(getSessionDate(hit.session).toISOString(), currentTime);
     if (status.kind === 'newReply') {
       return (
-        <span className="flex flex-shrink-0 items-center gap-1.5 text-xs font-medium text-amber-500">
+        <span className="flex flex-shrink-0 items-center gap-1.5 text-[13px] text-muted-foreground">
           <span className="h-1.5 w-1.5 rounded-full bg-amber-500" aria-hidden />
           {t('mainContent.statusNewReply')}
         </span>
       );
     }
-    return age ? <span className="flex-shrink-0 text-xs text-muted-foreground">{age}</span> : null;
+    const age = formatCompactAge(getSessionDate(hit.session).toISOString(), currentTime);
+    return age ? <span className="flex-shrink-0 text-[13px] text-muted-foreground/80">{age}</span> : null;
   };
 
-  const renderPreview = (sessionId: string) => {
+  // Последние слова человека; без подписи «Вы:» — на экране и так только его чаты.
+  const previewOf = (sessionId: string): string | null => {
     const preview = previews[sessionId];
-    if (preview?.lastUserText) {
-      return (
-        <>
-          <span className="text-foreground/60">{t('mainContent.youPrefix')}</span> {preview.lastUserText}
-        </>
-      );
-    }
-    return preview?.lastAssistantText ?? null;
+    return preview?.lastUserText ?? preview?.lastAssistantText ?? null;
   };
 
   const handleNewChat = () => {
@@ -266,41 +261,28 @@ export default function MainContentStateView({
         </div>
       ) : (
         <div className="flex flex-1 overflow-y-auto">
-          <div className="mx-auto w-full max-w-xl px-4 pb-10 pt-5 sm:px-6 sm:pt-12">
+          <div className="mx-auto w-full max-w-md px-7 pb-14 pt-10 sm:pt-24">
             {lastHit && (
               <button
                 type="button"
                 onClick={() => openChat(lastHit)}
-                className="block w-full rounded-2xl border border-primary/20 bg-primary/[0.06] p-4 text-left transition-colors hover:border-primary/35 hover:bg-primary/10 active:scale-[0.99]"
+                className="-mx-3 block w-[calc(100%+1.5rem)] rounded-2xl px-3 py-2 text-left transition-colors hover:bg-accent/30 active:bg-accent/40"
               >
-                <div className="flex items-center gap-2">
-                  <History className="h-3.5 w-3.5 flex-shrink-0 text-primary" />
-                  <span className="min-w-0 flex-1 truncate text-xs font-medium text-primary">
-                    {t('mainContent.continueLastChat')}
+                <div className="flex items-center gap-3">
+                  <span className="min-w-0 flex-1 truncate text-[13px] text-muted-foreground">
+                    {t('mainContent.lastChat')}
+                    {lastHit.session.groupLabel ? ` · ${lastHit.session.groupLabel}` : ''}
+                    {showFolders ? ` · ${lastHit.project.displayName}` : ''}
                   </span>
                   {renderStatus(lastHit)}
                 </div>
-                <p className="mt-2 line-clamp-2 text-[17px] font-semibold leading-snug text-foreground">
+                <p className="mt-2 line-clamp-2 text-[21px] font-semibold leading-snug tracking-tight text-foreground">
                   {getSessionName(lastHit.session, t)}
                 </p>
-                {renderPreview(lastHit.session.id) && (
-                  <p className="mt-1 line-clamp-2 text-sm leading-snug text-muted-foreground">
-                    {renderPreview(lastHit.session.id)}
+                {previewOf(lastHit.session.id) && (
+                  <p className="mt-2 line-clamp-2 text-[15px] leading-relaxed text-muted-foreground">
+                    {previewOf(lastHit.session.id)}
                   </p>
-                )}
-                {(lastHit.session.groupLabel || showFolders) && (
-                  <div className="mt-2.5 flex flex-wrap gap-1.5">
-                    {lastHit.session.groupLabel && (
-                      <span className="max-w-full truncate rounded-md bg-muted/80 px-2 py-0.5 text-xs text-muted-foreground">
-                        {lastHit.session.groupLabel}
-                      </span>
-                    )}
-                    {showFolders && (
-                      <span className="max-w-full truncate rounded-md bg-muted/80 px-2 py-0.5 text-xs text-muted-foreground">
-                        {lastHit.project.displayName}
-                      </span>
-                    )}
-                  </div>
                 )}
               </button>
             )}
@@ -310,8 +292,8 @@ export default function MainContentStateView({
                 type="button"
                 onClick={handleNewChat}
                 className={cn(
-                  'flex w-full items-center justify-center gap-2 rounded-2xl bg-primary px-4 py-3 text-[15px] font-medium text-white transition-colors hover:bg-primary/90 active:scale-[0.99]',
-                  lastHit ? 'mt-3' : '',
+                  'flex h-12 w-full items-center justify-center gap-2 rounded-full bg-primary/10 px-5 text-[15px] font-medium text-primary transition-colors hover:bg-primary/15 active:bg-primary/20',
+                  lastHit ? 'mt-7' : '',
                 )}
               >
                 <Plus className="h-[18px] w-[18px]" />
@@ -324,29 +306,28 @@ export default function MainContentStateView({
             )}
 
             {otherHits.length > 0 && (
-              <section className="mt-7">
-                <h3 className="mb-2 px-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              <section className="mt-14">
+                <h3 className="mb-3 text-[13px] text-muted-foreground">
                   {t('mainContent.recentChats')}
                 </h3>
-                <div className="divide-y divide-border/50 overflow-hidden rounded-2xl border border-border/60 bg-card">
+                <div className="-mx-3">
                   {otherHits.map((hit) => {
-                    const preview = renderPreview(hit.session.id);
-                    const secondLine = preview ?? hit.session.groupLabel ?? null;
+                    const secondLine = previewOf(hit.session.id) ?? hit.session.groupLabel ?? null;
                     return (
                       <button
                         key={`${hit.project.projectId}:${hit.session.id}`}
                         type="button"
                         onClick={() => openChat(hit)}
-                        className="block w-full px-4 py-2.5 text-left transition-colors hover:bg-accent/40 active:bg-accent/60"
+                        className="block w-full rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-accent/30 active:bg-accent/40"
                       >
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-baseline gap-3">
                           <span className="min-w-0 flex-1 truncate text-[15px] text-foreground">
                             {getSessionName(hit.session, t)}
                           </span>
                           {renderStatus(hit)}
                         </div>
                         {secondLine && (
-                          <p className="mt-0.5 truncate text-[13px] text-muted-foreground">{secondLine}</p>
+                          <p className="mt-0.5 truncate text-[14px] text-muted-foreground/80">{secondLine}</p>
                         )}
                       </button>
                     );
@@ -355,7 +336,7 @@ export default function MainContentStateView({
                     <button
                       type="button"
                       onClick={onMenuClick}
-                      className="flex w-full items-center justify-between px-4 py-3 text-left text-[15px] text-primary transition-colors hover:bg-accent/40 active:bg-accent/60"
+                      className="mt-1 flex w-full items-center gap-1 rounded-xl px-3 py-2.5 text-left text-[15px] text-muted-foreground transition-colors hover:bg-accent/30 active:bg-accent/40"
                     >
                       {t('mainContent.allChats')}
                       <ChevronRight className="h-4 w-4" />
@@ -366,13 +347,12 @@ export default function MainContentStateView({
             )}
 
             {folders.length > 0 && (
-              <section className="mt-7">
-                <h3 className="mb-2 px-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              <section className="mt-12">
+                <h3 className="mb-3 text-[13px] text-muted-foreground">
                   {t('mainContent.folders')}
                 </h3>
-                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <div className="-mx-3">
                   {folders.map((project) => {
-                    const sessionCount = Number(project.sessionMeta?.total ?? getAllSessions(project).length);
                     const lastActivity = getProjectLastActivity(project);
                     const age = lastActivity.getTime() > 0 ? formatCompactAge(lastActivity.toISOString(), currentTime) : '';
 
@@ -381,22 +361,11 @@ export default function MainContentStateView({
                         key={project.projectId}
                         type="button"
                         onClick={() => onProjectSelect(project)}
-                        className="flex items-center gap-3 rounded-xl border border-border/60 bg-card px-3.5 py-3 text-left transition-colors hover:border-primary/30 hover:bg-accent/40"
+                        className="flex w-full items-baseline gap-3 rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-accent/30 active:bg-accent/40"
+                        title={project.fullPath}
                       >
-                        <Folder className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
-                        <span className="min-w-0 flex-1 truncate text-sm text-foreground" title={project.fullPath}>
-                          {project.displayName}
-                        </span>
-                        <span className="flex flex-shrink-0 items-center gap-1 text-[11px] text-muted-foreground">
-                          {t('mainContent.sessionCount', { count: sessionCount })}
-                          {age && (
-                            <>
-                              <span aria-hidden>·</span>
-                              <Clock className="h-3 w-3" />
-                              {age}
-                            </>
-                          )}
-                        </span>
+                        <span className="min-w-0 flex-1 truncate text-[15px] text-foreground">{project.displayName}</span>
+                        {age && <span className="flex-shrink-0 text-[13px] text-muted-foreground/80">{age}</span>}
                       </button>
                     );
                   })}

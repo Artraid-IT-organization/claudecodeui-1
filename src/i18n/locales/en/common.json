@@ -106,10 +106,10 @@
     "newChatIn": "New chat in “{{name}}”",
     "recentChats": "Recent chats",
     "allChats": "All chats",
-    "youPrefix": "You:",
     "statusRunning": "working",
     "statusNewReply": "new reply",
-    "folders": "Folders"
+    "folders": "Folders",
+    "lastChat": "Last chat"
   },
   "fileTree": {
     "loading": "Loading files...",

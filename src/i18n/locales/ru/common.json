@@ -108,10 +108,10 @@
     "newChatIn": "Новый чат в папке «{{name}}»",
     "recentChats": "Недавние чаты",
     "allChats": "Все чаты",
-    "youPrefix": "Вы:",
     "statusRunning": "работает",
     "statusNewReply": "новый ответ",
-    "folders": "Папки"
+    "folders": "Папки",
+    "lastChat": "Последний чат"
   },
   "fileTree": {
     "loading": "Загрузка файлов...",
