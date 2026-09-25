@@ -12,7 +12,8 @@ const formatTokenCount = (value: number) => {
   }
 
   if (value >= 1_000_000) {
-    return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`;
+    // «1M», а не «1.0M»: окно 1 000 000 — частый знаменатель в «692K/1M».
+    return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1).replace(/\.0$/, '')}M`;
   }
 
   if (value >= 10_000) {
