@@ -154,7 +154,8 @@
       "clearConfirm": "Нажмите ещё раз"
     },
     "tokensShort": "токенов",
-    "tokensUsed": "Израсходовано токенов: {{count}}"
+    "tokensUsed": "Израсходовано токенов: {{count}}",
+    "contextUsed": "Контекст занят: {{used}} из {{total}} ({{percent}}%)"
   },
   "providerSelection": {
     "title": "Выберите вашего AI-ассистента",
