@@ -22,11 +22,13 @@
 import path from 'node:path';
 
 import { credentialsDb, userDb } from '@/modules/database/index.js';
-import { INHERITED_CLAUDE_AUTH_ENV_KEYS, readClaudeLoginFromConfigDir } from '@/shared/claude-login.js';
 import { getGlobalImageAssetsDir } from '@/shared/image-attachments.js';
 import type { AuthenticatedWebSocketRequest } from '@/shared/types.js';
 import { isPlatformOwnerWebUser, OPEN_REGISTRATION } from '@/shared/utils.js';
 import { getWebUserClaudeConfigDir } from '@/shared/web-user-paths.js';
+
+// Проверки доступа живут без базы данных, чтобы их можно было испытать отдельно.
+export { hasOwnClaudeAccess, withoutInheritedClaudeAuth } from '@/shared/claude-login.js';
 
 const ANTHROPIC_API_KEY_CREDENTIAL_TYPE = 'anthropic_api_key';
 
@@ -106,38 +108,6 @@ export function resolveWebUserRuntimeContext(
     ),
     isolateInheritedClaudeAuth: !isOwner,
   };
-}
-
-/**
- * Есть ли у человека СВОЙ доступ к Claude: ключ API в настройках сайта или
- * вход, сделанный в его командной строке (`claude /login` пишет его в папку
- * человека). Чат спрашивает ровно это, а не «есть ли ключ API»: до 25.09.26
- * вход подпиской в командной строке чат не видел, и человеку, только что
- * вошедшему, отвечал «добавьте ключ API».
- */
-export async function hasOwnClaudeAccess(context: WebUserRuntimeContext): Promise<boolean> {
-  if (context.anthropicApiKey) {
-    return true;
-  }
-  if (!context.claudeConfigDir) {
-    return false;
-  }
-  return (await readClaudeLoginFromConfigDir(context.claudeConfigDir)).authenticated;
-}
-
-/** Копия окружения без ключей Claude сервера — для процесса гостя (см. выше). */
-export function withoutInheritedClaudeAuth(
-  env: NodeJS.ProcessEnv,
-  context: WebUserRuntimeContext,
-): NodeJS.ProcessEnv {
-  if (!context.isolateInheritedClaudeAuth) {
-    return env;
-  }
-  const copy = { ...env };
-  for (const key of INHERITED_CLAUDE_AUTH_ENV_KEYS) {
-    delete copy[key];
-  }
-  return copy;
 }
 
 /**

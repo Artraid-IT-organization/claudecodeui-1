@@ -4,7 +4,11 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { readClaudeLoginFromConfigDir } from '@/shared/claude-login.js';
+import {
+  hasOwnClaudeAccess,
+  readClaudeLoginFromConfigDir,
+  withoutInheritedClaudeAuth,
+} from '@/shared/claude-login.js';
 
 const NOW = 1_800_000_000_000;
 const HOUR = 3_600_000;
@@ -81,4 +85,50 @@ test('ключ API в settings.json своей папки — вошёл', async
     assert.equal(status.authenticated, true);
     assert.equal(status.method, 'api_key');
   });
+});
+
+test('чат: гость, вошедший в командной строке без ключа API, — доступ есть', async () => {
+  await withConfigDir(oauth({ refreshToken: 'test-refresh', expiresAt: Date.now() + HOUR }), async (dir) => {
+    assert.equal(
+      await hasOwnClaudeAccess({ claudeConfigDir: dir, anthropicApiKey: null, isolateInheritedClaudeAuth: true }),
+      true,
+    );
+  });
+});
+
+test('чат: гость без входа и без ключа — доступа нет', async () => {
+  await withConfigDir({}, async (dir) => {
+    assert.equal(
+      await hasOwnClaudeAccess({ claudeConfigDir: dir, anthropicApiKey: null, isolateInheritedClaudeAuth: true }),
+      false,
+    );
+  });
+});
+
+test('чат: ключ API в настройках сайта — доступ есть и без входа', async () => {
+  assert.equal(
+    await hasOwnClaudeAccess({ claudeConfigDir: null, anthropicApiKey: 'test-key', isolateInheritedClaudeAuth: true }),
+    true,
+  );
+});
+
+test('гостю ключи Claude сервера не передаются, остальное окружение — да', () => {
+  const env = {
+    PATH: '/usr/bin',
+    ANTHROPIC_API_KEY: 'owner-key',
+    ANTHROPIC_AUTH_TOKEN: 'owner-token',
+    CLAUDE_CODE_OAUTH_TOKEN: 'owner-oauth',
+    ANTHROPIC_BASE_URL: 'https://example.test',
+  };
+  const guest = withoutInheritedClaudeAuth(env, { claudeConfigDir: '/x', anthropicApiKey: null, isolateInheritedClaudeAuth: true });
+  assert.deepEqual(guest, { PATH: '/usr/bin', ANTHROPIC_BASE_URL: 'https://example.test' });
+  assert.equal(env.ANTHROPIC_API_KEY, 'owner-key', 'окружение сервера не портится');
+});
+
+test('владельцу и одноаккаунтной установке окружение отдаётся как есть', () => {
+  const env = { ANTHROPIC_API_KEY: 'owner-key' };
+  assert.equal(
+    withoutInheritedClaudeAuth(env, { claudeConfigDir: null, anthropicApiKey: null, isolateInheritedClaudeAuth: false }),
+    env,
+  );
 });

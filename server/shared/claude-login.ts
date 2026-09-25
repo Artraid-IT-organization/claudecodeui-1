@@ -123,3 +123,42 @@ export async function readClaudeLoginFromConfigDir(
     error: 'Claude login has expired. Run claude /login again.',
   };
 }
+
+/** То, что нужно проверкам ниже из расчёта пользователя (web-user-runtime.ts). */
+export type ClaudeAccessContext = {
+  claudeConfigDir: string | null;
+  anthropicApiKey: string | null;
+  isolateInheritedClaudeAuth: boolean;
+};
+
+/**
+ * Есть ли у человека СВОЙ доступ к Claude: ключ API в настройках сайта или
+ * вход, сделанный в его командной строке (`claude /login` пишет его в папку
+ * человека). Чат спрашивает ровно это, а не «есть ли ключ API»: до 25.09.26
+ * вход подпиской в командной строке чат не видел, и человеку, только что
+ * вошедшему, отвечал «добавьте ключ API».
+ */
+export async function hasOwnClaudeAccess(context: ClaudeAccessContext): Promise<boolean> {
+  if (context.anthropicApiKey) {
+    return true;
+  }
+  if (!context.claudeConfigDir) {
+    return false;
+  }
+  return (await readClaudeLoginFromConfigDir(context.claudeConfigDir)).authenticated;
+}
+
+/** Копия окружения без ключей Claude сервера — для процесса гостя (почему — web-user-runtime.ts, isolateInheritedClaudeAuth). */
+export function withoutInheritedClaudeAuth(
+  env: NodeJS.ProcessEnv,
+  context: ClaudeAccessContext,
+): NodeJS.ProcessEnv {
+  if (!context.isolateInheritedClaudeAuth) {
+    return env;
+  }
+  const copy = { ...env };
+  for (const key of INHERITED_CLAUDE_AUTH_ENV_KEYS) {
+    delete copy[key];
+  }
+  return copy;
+}
