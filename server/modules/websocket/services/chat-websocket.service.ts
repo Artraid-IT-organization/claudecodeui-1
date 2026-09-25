@@ -474,6 +474,8 @@ async function runProviderTurn(input: {
         cwd: runtimeOptions.cwd,
         model: typeof clientOptions.model === 'string' ? clientOptions.model : undefined,
         permissionMode: typeof clientOptions.permissionMode === 'string' ? clientOptions.permissionMode : undefined,
+        effort: typeof clientOptions.effort === 'string' ? clientOptions.effort : undefined,
+        appendSystemPrompt: presetSystemPrompt || undefined,
         writer: run.writer,
       })
       : null;

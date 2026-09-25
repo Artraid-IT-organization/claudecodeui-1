@@ -58,6 +58,8 @@ export type ProviderSteerPayload = {
 export type ProviderAdoptPayload = ProviderSteerPayload & {
   model?: string;
   permissionMode?: string;
+  effort?: string;
+  appendSystemPrompt?: string;
   writer: ProviderRuntimeWriter;
 };
 

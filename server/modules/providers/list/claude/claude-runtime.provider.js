@@ -869,14 +869,18 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
    * @returns {Promise<{done: Promise<void>}|null>} null — усыновить нельзя
    *   (процесс не удержан, другая модель/режим), пусть идёт обычный запуск.
    */
-  const adoptTurn = async ({ content, images, files, cwd, model, permissionMode, writer }) => {
+  const adoptTurn = async ({ content, images, files, cwd, model, permissionMode, effort, appendSystemPrompt, writer }) => {
     if (!turnCompleteSent || !heldForBackgroundWork || !idleReleaseTimer || adoptedTurnDone || heldMaxReached) {
       return null;
     }
-    // Другая модель или режим разрешений — это настройки процесса, в живой
-    // процесс их не передать: пусть идёт новый процесс, как раньше.
-    if (model && options.model && model !== options.model) return null;
-    if (permissionMode && options.permissionMode && permissionMode !== options.permissionMode) return null;
+    // Модель, режим разрешений, глубина размышлений и приписка пресета — это
+    // настройки процесса, в живой процесс их не передать: изменилось хоть
+    // что-то (в том числе выбрано явно, а процесс шёл на умолчании) — пусть
+    // идёт новый процесс, как раньше, иначе выбор человека молча потеряется.
+    if (model && model !== options.model) return null;
+    if (permissionMode && permissionMode !== options.permissionMode) return null;
+    if (effort && effort !== options.effort) return null;
+    if ((appendSystemPrompt || '') !== (options.appendSystemPrompt || '')) return null;
     const [message] = await buildPromptMessages(content, images, files, cwd || options.cwd);
     const uuid = crypto.randomUUID();
     if (!pushPromptMessage({ ...message, uuid })) {
