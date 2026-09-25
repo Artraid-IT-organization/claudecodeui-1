@@ -28,6 +28,7 @@ import { useTranslation } from 'react-i18next';
 
 import MermaidDiagram from '../../../code-editor/view/subcomponents/markdown/MermaidDiagram';
 import { normalizeInlineCodeFences, separateMarkdownBlocks } from '../../utils/chatFormatting';
+import { MARKDOWN_ROOT_ATTR, installCopyParagraphBreaks } from '../../utils/copyParagraphBreaks';
 import { copyTextToClipboard } from '../../../../utils/clipboard';
 import { usePaletteOps } from '../../../../contexts/PaletteOpsContext';
 import { useTheme } from '../../../../contexts/ThemeContext';
@@ -316,6 +317,9 @@ const markdownComponents = {
   ),
 };
 
+// Копия выделением — с пустой строкой между абзацами, вид не меняется.
+installCopyParagraphBreaks();
+
 export function Markdown({ children, className }: MarkdownProps) {
   const content = separateMarkdownBlocks(normalizeInlineCodeFences(String(children ?? '')));
   // Перенос строки теперь значим везде, а не только в репликах человека.
@@ -364,7 +368,7 @@ export function Markdown({ children, className }: MarkdownProps) {
   );
 
   return (
-    <div className={className}>
+    <div className={className} {...{ [MARKDOWN_ROOT_ATTR]: '' }}>
       <ReactMarkdown remarkPlugins={remarkPlugins} components={components as any}>
         {content}
       </ReactMarkdown>
