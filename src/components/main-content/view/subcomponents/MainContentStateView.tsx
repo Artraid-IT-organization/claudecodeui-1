@@ -310,7 +310,7 @@ export default function MainContentStateView({
                 type="button"
                 onClick={handleNewChat}
                 className={cn(
-                  'flex w-full items-center justify-center gap-2 rounded-2xl bg-primary px-4 py-3.5 text-[15px] font-medium text-primary-foreground transition-colors hover:bg-primary/90 active:scale-[0.99]',
+                  'flex w-full items-center justify-center gap-2 rounded-2xl bg-primary px-4 py-3 text-[15px] font-medium text-white transition-colors hover:bg-primary/90 active:scale-[0.99]',
                   lastHit ? 'mt-3' : '',
                 )}
               >
