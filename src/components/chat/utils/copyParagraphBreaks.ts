@@ -24,6 +24,41 @@ export const MARKDOWN_ROOT_ATTR = 'data-md-copy-root';
 
 const SPACER_ATTR = 'data-md-copy-spacer';
 
+type Restore = () => void;
+
+// Номер пункта — как на экране: от `start` списка, с учётом `value` у пункта.
+const insertListNumbers = (range: Range, restores: Restore[]) => {
+  document.querySelectorAll<HTMLOListElement>(`[${MARKDOWN_ROOT_ATTR}] ol`).forEach((ol) => {
+    if (!range.intersectsNode(ol)) return;
+    const items = Array.from(ol.children).filter((el): el is HTMLLIElement => el.tagName === 'LI');
+    let counter = ol.start || 1;
+    let touched = false;
+    items.forEach((li) => {
+      if (li.hasAttribute('value')) counter = li.value;
+      const number = counter;
+      counter += 1;
+      if (!range.intersectsNode(li)) return;
+      // Абзац пункта — это div, номер ставится в него,
+      // иначе номер окажется отдельной строкой над текстом.
+      const first = li.firstElementChild;
+      const host = first && first.tagName === 'DIV' && li.firstChild === first ? first : li;
+      const label = document.createElement('span');
+      label.setAttribute(SPACER_ATTR, '');
+      label.textContent = `${number}. `;
+      host.insertBefore(label, host.firstChild);
+      restores.push(() => label.remove());
+      touched = true;
+    });
+    if (touched) {
+      const previous = ol.style.listStyleType;
+      ol.style.listStyleType = 'none';
+      restores.push(() => {
+        ol.style.listStyleType = previous;
+      });
+    }
+  });
+};
+
 const makeSpacer = (): HTMLElement => {
   const spacer = document.createElement('div');
   spacer.setAttribute(SPACER_ATTR, '');
@@ -43,12 +78,12 @@ const reselect = (selection: Selection, range: Range) => {
   selection.addRange(range);
 };
 
-const insertSpacers = (): { inserted: HTMLElement[]; selection: Selection; range: Range } | null => {
+const insertSpacers = (): { restores: Restore[]; selection: Selection; range: Range } | null => {
   const selection = window.getSelection();
   if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) return null;
 
   const range = selection.getRangeAt(0).cloneRange();
-  const inserted: HTMLElement[] = [];
+  const restores: Restore[] = [];
   document.querySelectorAll<HTMLElement>(`[${MARKDOWN_ROOT_ATTR}]`).forEach((root) => {
     if (!range.intersectsNode(root)) return;
     const blocks = Array.from(root.children).filter(
@@ -57,11 +92,12 @@ const insertSpacers = (): { inserted: HTMLElement[]; selection: Selection; range
     for (let i = 1; i < blocks.length; i += 1) {
       const spacer = makeSpacer();
       root.insertBefore(spacer, blocks[i]);
-      inserted.push(spacer);
+      restores.push(() => spacer.remove());
     }
   });
-  if (inserted.length > 0) reselect(selection, range);
-  return { inserted, selection, range };
+  insertListNumbers(range, restores);
+  if (restores.length > 0) reselect(selection, range);
+  return { restores, selection, range };
 };
 
 const handleCopy = () => {
@@ -71,13 +107,13 @@ const handleCopy = () => {
   } catch {
     return;
   }
-  if (!result || result.inserted.length === 0) return;
-  const { inserted, selection, range } = result;
+  if (!result || result.restores.length === 0) return;
+  const { restores, selection, range } = result;
   let cleaned = false;
   const cleanup = () => {
     if (cleaned) return;
     cleaned = true;
-    inserted.forEach((spacer) => spacer.remove());
+    restores.forEach((restore) => restore());
     // Выделение человека остаётся ровно тем, что он выделил.
     try {
       reselect(selection, range);
