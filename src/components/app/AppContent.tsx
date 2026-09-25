@@ -85,6 +85,7 @@ function AppContentInner() {
     registerOptimisticSession,
     sidebarSharedProps,
     handleNewSession,
+    attentionSessionIds,
     handleProjectSelect,
     handleSessionSelect,
     handleSessionDelete,
@@ -793,6 +794,7 @@ function AppContentInner() {
           onProjectsRefresh={() => void refreshProjectsSilently()}
           onSessionArchived={removeSessionFromList}
           onSessionRestored={() => void refreshProjectsSilently()}
+          attentionSessionIds={attentionSessionIds}
         />
       </div>
 

@@ -737,6 +737,20 @@ router.get(
   }),
 );
 
+// Превью строк главного экрана: ?ids=a,b,c — последние слова человека и ответ.
+router.get(
+  '/sessions/previews',
+  asyncHandler(async (req: Request, res: Response) => {
+    const raw = typeof req.query.ids === 'string' ? req.query.ids : '';
+    const sessionIds = raw
+      .split(',')
+      .map((value) => value.trim())
+      .filter((value) => SESSION_ID_PATTERN.test(value));
+    const previews = await sessionConversationsSearchService.readPreviews(sessionIds);
+    res.json(createApiSuccessResponse({ previews }));
+  }),
+);
+
 router.get(
   '/sessions/archived',
   asyncHandler(async (_req: Request, res: Response) => {

@@ -269,6 +269,9 @@ export const api = {
     authenticatedFetch(`/api/providers/sessions/${encodeURIComponent(sessionId)}`),
   runningSessions: () =>
     authenticatedFetch('/api/providers/sessions/running'),
+  // Последние слова человека и ответ по списку чатов — строки главного экрана.
+  sessionPreviews: (sessionIds) =>
+    authenticatedFetch(`/api/providers/sessions/previews?ids=${sessionIds.map(encodeURIComponent).join(',')}`),
   // `serverScope` — блок верхней панели («Проекты» / «2-й сервер»). Отбор
   // делает сервер: страница берётся по 40 чатов, и отбор после выдачи
   // оставлял бы второй блок почти пустым.
