@@ -31,6 +31,8 @@ type SessionRow = {
    * умолчанию), 'second' — чат живёт во втором блоке верхней панели.
    */
   server_scope: ServerScope | null;
+  /** Ярлык-флажок на чате: 1 — висит, 0 — нет. */
+  is_flagged: number;
   isArchived: number;
   created_at: string;
   updated_at: string;
@@ -42,7 +44,7 @@ type RecentSessionsPage = {
 };
 
 const SESSION_ROW_COLUMNS =
-  'session_id, provider, provider_session_id, project_path, jsonl_path, custom_name, title_source, model, effort, group_id, group_label, server_scope, isArchived, created_at, updated_at';
+  'session_id, provider, provider_session_id, project_path, jsonl_path, custom_name, title_source, model, effort, group_id, group_label, server_scope, is_flagged, isArchived, created_at, updated_at';
 
 /**
  * Decides whether a freshly-derived title candidate should replace the
@@ -445,6 +447,19 @@ export const sessionsDb = {
        SET server_scope = ?
        WHERE session_id = ?`
     ).run(serverScope, sessionId);
+  },
+
+  /**
+   * Вешает или снимает ярлык-флажок. `updated_at` не трогаем: ярлык — метка,
+   * а не активность, и чат не должен от него подниматься в списке.
+   */
+  setSessionFlagged(sessionId: string, flagged: boolean): void {
+    const db = getConnection();
+    db.prepare(
+      `UPDATE sessions
+       SET is_flagged = ?
+       WHERE session_id = ?`
+    ).run(flagged ? 1 : 0, sessionId);
   },
 
   setSessionGroup(sessionId: string, groupId: string | null, groupLabel: string | null): void {

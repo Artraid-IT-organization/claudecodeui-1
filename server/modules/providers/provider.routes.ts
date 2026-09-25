@@ -771,6 +771,24 @@ router.post(
   }),
 );
 
+router.post(
+  '/sessions/:sessionId/flag',
+  asyncHandler(async (req: Request, res: Response) => {
+    const sessionId = parseSessionId(req.params.sessionId);
+    const flagged = (req.body ?? {}).flagged;
+    if (typeof flagged !== 'boolean') {
+      throw new AppError('flagged must be a boolean.', { code: 'INVALID_FLAGGED', statusCode: 400 });
+    }
+    // Живое обновление чата (session_upserted) здесь не рассылаем: клиент
+    // принимает его как «в чате новое» — ставил жёлтую точку внимания, а
+    // открытая вкладка теряла строку из списка до перезагрузки (проверено
+    // 25.09.26). Нажавшая вкладка меняет ярлык сама, остальные увидят его
+    // при следующей загрузке списка.
+    const result = sessionsService.setSessionFlagged(sessionId, flagged);
+    res.json(createApiSuccessResponse(result));
+  }),
+);
+
 router.get(
   '/sessions/:sessionId/provider-id',
   asyncHandler(async (req: Request, res: Response) => {
