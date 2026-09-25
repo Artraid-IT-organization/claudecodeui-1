@@ -47,6 +47,15 @@ const insertListNumbers = (range: Range, restores: Restore[]) => {
       label.textContent = `${number}. `;
       host.insertBefore(label, host.firstChild);
       restores.push(() => label.remove());
+      // Выделение пальцем или мышью от первой буквы пункта начинается внутри
+      // текста, правее вставленного номера, и номер первого пункта в копию не
+      // попадал. Если до начала выделения в пункте ничего нет — захватить номер.
+      if (range.comparePoint(label, 0) < 0) {
+        const gap = document.createRange();
+        gap.setStartAfter(label);
+        gap.setEnd(range.startContainer, range.startOffset);
+        if (gap.toString().trim() === '') range.setStartBefore(label);
+      }
       touched = true;
     });
     if (touched) {
