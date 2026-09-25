@@ -188,7 +188,7 @@
         }
 
         // Программа не нарисовала экран — ждём, пока страница видна: в фоне iOS
-        // замораживает всё, и «12 секунд» там ничего не значат.
+        // замораживает всё, и секунды там ничего не значат.
         function stillLoading() {
           return document.readyState !== 'complete' && guard.errors.length === 0 &&
             Date.now() - guard.started < LOADING_GRACE_MS;
