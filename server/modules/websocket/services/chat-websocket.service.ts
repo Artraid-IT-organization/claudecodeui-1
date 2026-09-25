@@ -37,7 +37,7 @@ import type {
   ProviderRuntimeWriter,
   RealtimeClientConnection,
 } from '@/shared/types.js';
-import type { ProviderSteerPayload } from '@/shared/interfaces.js';
+import type { ProviderAdoptedTurn, ProviderAdoptPayload, ProviderSteerPayload } from '@/shared/interfaces.js';
 import { isPlatformOwnerWebUser, OPEN_REGISTRATION, parseIncomingJsonObject } from '@/shared/utils.js';
 import { getImageAssetsDirForUser, readRequestUserId, resolveWebUserRuntimeContext } from '@/shared/web-user-runtime.js';
 
@@ -108,6 +108,7 @@ type ProviderRuntimeGateway = {
   ): Promise<unknown>;
   abort(provider: LLMProvider, sessionId: string): Promise<boolean>;
   steer?(provider: LLMProvider, sessionId: string, payload: ProviderSteerPayload): Promise<boolean>;
+  adopt?(provider: LLMProvider, sessionId: string, payload: ProviderAdoptPayload): Promise<ProviderAdoptedTurn | null>;
   resolveToolApproval(requestId: string, payload: ProviderPermissionDecision): void;
   getPendingApprovalsForSession(sessionId: string): unknown[];
 };
@@ -462,7 +463,26 @@ async function runProviderTurn(input: {
   };
 
   try {
-    await dependencies.runtime.run(provider, content, runtimeOptions, run.writer);
+    // Прошлый ход этого чата закончился, но его процесс удержан ради фоновой
+    // работы (фоновый агент/команда): сообщение уходит в ТОТ ЖЕ процесс новым
+    // ходом. Новый `claude --resume` рядом с живым потерял бы результат фона.
+    const adopted = dependencies.runtime.adopt
+      ? await dependencies.runtime.adopt(provider, sessionId, {
+        content,
+        images: runtimeOptions.images,
+        files: runtimeOptions.files,
+        cwd: runtimeOptions.cwd,
+        model: typeof clientOptions.model === 'string' ? clientOptions.model : undefined,
+        permissionMode: typeof clientOptions.permissionMode === 'string' ? clientOptions.permissionMode : undefined,
+        writer: run.writer,
+      })
+      : null;
+    if (adopted) {
+      console.log(`[Chat] сообщение передано живому процессу чата ${sessionId} (идёт фоновая работа)`);
+      await adopted.done;
+    } else {
+      await dependencies.runtime.run(provider, content, runtimeOptions, run.writer);
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`[Chat] Provider runtime "${provider}" failed`, { sessionId, error: message });
