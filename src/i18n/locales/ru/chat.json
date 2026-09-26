@@ -118,6 +118,7 @@
     "attachImages": "Прикрепить изображения",
     "send": "Отправить",
     "stop": "Остановить",
+    "uploadingAttachments": "Загружаю вложения… {{percent}}%",
     "hintText": {
       "ctrlEnter": "Ctrl+Enter для отправки • Shift+Enter для новой строки • Tab для смены режима • / для команд",
       "enter": "Enter для отправки • Shift+Enter для новой строки • Tab для смены режима • / для команд",

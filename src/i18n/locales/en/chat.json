@@ -126,6 +126,7 @@
     "attachImages": "Attach images",
     "send": "Send",
     "stop": "Stop",
+    "uploadingAttachments": "Uploading attachments… {{percent}}%",
     "hintText": {
       "ctrlEnter": "Ctrl+Enter to send • Shift+Enter for new line • Tab to change modes • / for slash commands",
       "enter": "Enter to send • Shift+Enter for new line • Tab to change modes • / for slash commands",

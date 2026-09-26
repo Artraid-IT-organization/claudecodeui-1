@@ -295,7 +295,17 @@ export default function ChatComposer({
     return () => observer.disconnect();
   }, [submitHint]);
 
-  const submitAriaLabel = canQueueDraft
+  // Пока вложения уходят на сервер, кнопка крутится и не жмётся (ITO-468):
+  // иначе отправка скриншота секундами выглядела как «ничего не произошло».
+  // Во время ответа кнопка — «Стоп», её загрузка в очередь не отнимает:
+  // ход виден на самих карточках вложений.
+  const isUploadingAttachments = uploadingFiles.size > 0 && !isLoading;
+  const uploadPercent = isUploadingAttachments
+    ? Math.floor(Array.from(uploadingFiles.values()).reduce((sum, value) => sum + value, 0) / uploadingFiles.size)
+    : 0;
+  const submitAriaLabel = isUploadingAttachments
+    ? t('input.uploadingAttachments', { percent: uploadPercent, defaultValue: 'Uploading attachments… {{percent}}%' })
+    : canQueueDraft
     ? t('input.queue.sendNext', { defaultValue: 'Queue next message' })
     : isLoading
       ? t('input.stop')
@@ -582,7 +592,9 @@ export default function ChatComposer({
                       : undefined
               }
               disabled={
-                isLoading
+                isUploadingAttachments
+                  ? true
+                  : isLoading
                   ? false
                   : isRecording
                     ? false
@@ -594,7 +606,7 @@ export default function ChatComposer({
               title={submitAriaLabel}
               className="h-10 w-10 sm:h-10 sm:w-10"
             >
-              {isTranscribing ? (
+              {isTranscribing || isUploadingAttachments ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : canQueueDraft ? (
                 <ArrowUpIcon className="h-4 w-4" />

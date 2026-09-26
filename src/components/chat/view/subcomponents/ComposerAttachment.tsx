@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { FileIcon, XIcon } from 'lucide-react';
+import { FileIcon, Loader2, XIcon } from 'lucide-react';
 
 import { ImageLightbox } from './ChatMessageImages';
 
@@ -56,8 +56,21 @@ const ComposerAttachment = ({ file, onRemove, uploadProgress, error }: ComposerA
         </div>
       )}
       {uploadProgress !== undefined && uploadProgress < 100 && (
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-xl bg-black/50">
-          <div className="text-xs text-white">{uploadProgress}%</div>
+        // Ход загрузки (ITO-468): затемнение, крутилка и полоска поверх
+        // карточки, пока файл уходит на сервер.
+        <div
+          className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-1 overflow-hidden rounded-xl bg-black/55"
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={uploadProgress}
+          aria-label={`${file.name}: ${uploadProgress}%`}
+        >
+          <Loader2 className="h-5 w-5 animate-spin text-white" aria-hidden />
+          <div className="text-xs font-medium tabular-nums text-white">{uploadProgress}%</div>
+          <div className="absolute inset-x-0 bottom-0 h-1 bg-white/25">
+            <div className="h-full bg-white transition-[width] duration-200" style={{ width: `${uploadProgress}%` }} />
+          </div>
         </div>
       )}
       {error && (
@@ -67,6 +80,8 @@ const ComposerAttachment = ({ file, onRemove, uploadProgress, error }: ComposerA
           </svg>
         </div>
       )}
+      {/* Во время загрузки убрать файл уже нельзя: он всё равно уйдёт с сообщением. */}
+      {uploadProgress === undefined && (
       <button
         type="button"
         onClick={onRemove}
@@ -75,6 +90,7 @@ const ComposerAttachment = ({ file, onRemove, uploadProgress, error }: ComposerA
       >
         <XIcon className="h-3 w-3" aria-hidden />
       </button>
+      )}
       {expanded && preview && (
         <ImageLightbox src={preview} alt={file.name} onClose={() => setExpanded(false)} />
       )}

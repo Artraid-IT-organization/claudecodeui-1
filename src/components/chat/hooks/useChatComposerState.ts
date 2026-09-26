@@ -25,6 +25,7 @@ import {
   writeDraftInput,
 } from '../utils/chatStorage';
 import { clearAttachmentDraft, stashAttachmentDraft, takeAttachmentDraft } from '../utils/attachmentDrafts';
+import { uploadAttachmentFiles } from '../utils/attachmentUpload';
 import type {
   ChatAttachment,
   ChatMessage,
@@ -219,34 +220,6 @@ const MAX_ATTACHMENT_SIZE_MB = Math.round(MAX_ATTACHMENT_SIZE / (1024 * 1024));
 const isImageAttachment = (attachment: ChatAttachment) => {
   if (attachment.mimeType?.startsWith('image/')) return true;
   return /\.(gif|jpe?g|png|svg|webp)$/i.test(attachment.path || attachment.name || '');
-};
-
-const uploadAttachmentFiles = async (files: File[]): Promise<unknown[]> => {
-  if (files.length === 0) {
-    return [];
-  }
-
-  const formData = new FormData();
-  files.forEach((file) => {
-    formData.append('files', file);
-  });
-
-  const response = await authenticatedFetch('/api/assets/files', {
-    method: 'POST',
-    headers: {},
-    body: formData,
-  });
-
-  if (!response.ok) {
-    const body = await response.json().catch(() => null);
-    throw new Error(body?.error || 'Failed to upload files');
-  }
-
-  const result = await response.json();
-  if (!Array.isArray(result.attachments) || result.attachments.length !== files.length) {
-    throw new Error('File upload returned an incomplete result');
-  }
-  return result.attachments;
 };
 
 export type QueuedDraft = {
@@ -885,6 +858,26 @@ export function useChatComposerState({
 
   useEffect(() => releaseSubmitLock, [releaseSubmitLock]);
 
+  /*
+    Загрузка вложений с видимым ходом (ITO-468). Пока файлы уходят, карточки
+    вложений в поле затемнены с процентами, а кнопка отправки крутится — без
+    этого на телефоне отправка скриншота выглядела как «ничего не произошло».
+
+    Отдельный засов на загрузку: в ходе ответа сообщения кладутся в очередь
+    мимо засова отправки, и повторное нажатие во время долгой загрузки
+    отправляло бы те же файлы второй раз.
+  */
+  const attachmentUploadInFlightRef = useRef(false);
+  const uploadAttachmentsWithProgress = useCallback(async (files: File[]) => {
+    attachmentUploadInFlightRef.current = true;
+    try {
+      return await uploadAttachmentFiles(files, (progress) => setUploadingFiles(progress));
+    } finally {
+      attachmentUploadInFlightRef.current = false;
+      setUploadingFiles(new Map());
+    }
+  }, []);
+
   const handleSubmit = useCallback(
     async (
       event: FormEvent<HTMLFormElement> | MouseEvent | TouchEvent | KeyboardEvent<HTMLTextAreaElement>,
@@ -929,8 +922,11 @@ export function useChatComposerState({
         // описания файлов, а не браузерные объекты этой вкладки.
         let uploadedAttachments: unknown[] = previouslyUploadedAttachments;
         if (uploadedAttachments.length === 0 && currentAttachments.length > 0) {
+          if (attachmentUploadInFlightRef.current) {
+            return;
+          }
           try {
-            uploadedAttachments = await uploadAttachmentFiles(currentAttachments);
+            uploadedAttachments = await uploadAttachmentsWithProgress(currentAttachments);
           } catch (error) {
             const message = error instanceof Error ? error.message : 'Unknown error';
             console.error('Queued file upload failed:', error);
@@ -1026,14 +1022,13 @@ export function useChatComposerState({
       }
       submitInFlightRef.current = true;
       if (submitLockTimerRef.current) clearTimeout(submitLockTimerRef.current);
-      submitLockTimerRef.current = setTimeout(releaseSubmitLock, SUBMIT_LOCK_FAILSAFE_MS);
 
       const messageContent = currentInput;
 
       let uploadedAttachments = previouslyUploadedAttachments;
       if (uploadedAttachments.length === 0 && currentAttachments.length > 0) {
         try {
-          uploadedAttachments = await uploadAttachmentFiles(currentAttachments);
+          uploadedAttachments = await uploadAttachmentsWithProgress(currentAttachments);
         } catch (error) {
           const message = error instanceof Error ? error.message : 'Unknown error';
           console.error('File upload failed:', error);
@@ -1042,9 +1037,15 @@ export function useChatComposerState({
             content: `Failed to upload files: ${message}`,
             timestamp: new Date(),
           });
+          // Загрузка не удалась — отправки не будет, повторить можно сразу.
+          releaseSubmitLock();
           return;
         }
       }
+      // Страховочный таймер — от конца загрузки, а не от нажатия: скриншот по
+      // мобильной связи грузится дольше 20 с, и засов снимался посреди
+      // загрузки — второе нажатие отправляло сообщение дважды.
+      submitLockTimerRef.current = setTimeout(releaseSubmitLock, SUBMIT_LOCK_FAILSAFE_MS);
 
       const resolvedProjectPath = selectedProject.fullPath || selectedProject.path || '';
       const sessionSummary = getNotificationSessionSummary(selectedSession, currentInput);
@@ -1184,6 +1185,8 @@ export function useChatComposerState({
       addMessage,
       setIsUserScrolledUp,
       slashCommands,
+      releaseSubmitLock,
+      uploadAttachmentsWithProgress,
     ],
   );
 

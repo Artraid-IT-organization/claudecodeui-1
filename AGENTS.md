@@ -150,6 +150,16 @@ DATABASE_PATH=/tmp/… OPEN_REGISTRATION=true SERVER_PORT=…`), гость по
 Старые черновики по проекту один раз переезжают в открытый чат
 (`adoptLegacyProjectDraft`).
 
+Вложения уходят на `/api/assets/files` через XMLHttpRequest
+(`chat/utils/attachmentUpload.ts`), а не fetch: только у него есть ход отправки.
+Проценты по файлам — `attachmentProgress.ts` (тело одно, файлы в нём по порядку;
+до ответа сервера максимум 99%). Пока карта `uploadingFiles` не пуста, карточки
+затемнены с процентами и без крестика, кнопка отправки крутится и не жмётся
+(кроме «Стоп» во время ответа). Отдельный засов `attachmentUploadInFlightRef`
+не даёт повторному Enter в очередь загрузить файлы второй раз; страховочный
+таймер засова отправки (20 с) заводится от КОНЦА загрузки — скриншот по
+мобильной связи грузится дольше, и засов снимался посреди загрузки (ITO-468).
+
 ## Агенты — в своих комнатах, не в группе сайта (22.09.26)
 
 - Агент запускается через `agent-rooms.js`: `systemd-run --user --scope --slice=ccui-agents.slice -p MemoryHigh=2G -- claude …` (обёртка в `spawnSurvivableClaude`). `--scope` делает exec — PID, каналы, «Стоп», live-runs те же. Образец — jupyterhub/systemdspawner.
