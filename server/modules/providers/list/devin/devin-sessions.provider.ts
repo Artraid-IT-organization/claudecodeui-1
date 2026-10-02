@@ -126,7 +126,10 @@ export class DevinSessionsProvider implements IProviderSessions {
     const eventSessionId = readOptionalString(raw.sessionId) ?? sessionId;
 
     if (updateType === 'agent_message_chunk') {
-      const text = readOptionalString((update.content as AnyRecord | undefined)?.text) ?? '';
+      // Chunk boundaries carry real spaces — readOptionalString trims and
+      // glued words together on screen; stream text must stay verbatim.
+      const chunkBlock = readObjectRecord(update.content as AnyRecord | undefined);
+      const text = typeof chunkBlock?.text === 'string' ? chunkBlock.text : '';
       if (!text) {
         return [];
       }
@@ -139,7 +142,8 @@ export class DevinSessionsProvider implements IProviderSessions {
     }
 
     if (updateType === 'agent_thought_chunk') {
-      const text = readOptionalString((update.content as AnyRecord | undefined)?.text) ?? '';
+      const thoughtBlock = readObjectRecord(update.content as AnyRecord | undefined);
+      const text = typeof thoughtBlock?.text === 'string' ? thoughtBlock.text : '';
       // Empty chunks still count: they mark "the model is thinking" so the
       // activity indicator stops guessing phases.
       return [createNormalizedMessage({
