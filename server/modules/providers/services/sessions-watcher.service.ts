@@ -8,10 +8,10 @@ import { projectsDb, sessionsDb } from '@/modules/database/index.js';
 import { chatGroupsDb } from '@/modules/database/repositories/chat-groups.js';
 import { isSurvivorRunning } from '@/modules/providers/list/claude/survivor-runs.js';
 import { sessionSynchronizerService } from '@/modules/providers/services/session-synchronizer.service.js';
-import { WS_OPEN_STATE, connectedClients } from '@/modules/websocket/index.js';
+import { broadcastRealtimeEvent, canReceiveProviderEvents, connectedClients, WS_OPEN_STATE } from '@/modules/websocket/index.js';
 import type { LLMProvider } from '@/shared/types.js';
 import { generateDisplayName } from '@/modules/projects/index.js';
-import { getClaudeConfigDir } from '@/shared/utils.js';
+import { getClaudeConfigDir, getDevinDataDir } from '@/shared/utils.js';
 
 type WatcherEventType = 'add' | 'change';
 
@@ -40,7 +40,7 @@ const PROVIDER_WATCH_PATHS: Array<{ provider: LLMProvider; rootPath: string }> =
     provider: 'devin',
     // Devin keeps one shared sqlite database — watch the data dir and let
     // isWatcherTargetFile keep only sessions.db (and its WAL journal).
-    rootPath: path.join(os.homedir(), '.local', 'share', 'devin', 'cli'),
+    rootPath: path.join(getDevinDataDir(), 'cli'),
   },
 ];
 
@@ -222,11 +222,7 @@ export async function broadcastSessionUpserted(sessionId: string): Promise<void>
     return;
   }
 
-  connectedClients.forEach(client => {
-    if (client.readyState === WS_OPEN_STATE) {
-      client.send(event);
-    }
-  });
+  broadcastRealtimeEvent(event, sessionsDb.getSessionById(sessionId)?.provider);
 }
 
 async function flushPendingWatcherUpdate(): Promise<void> {
@@ -250,19 +246,21 @@ async function flushPendingWatcherUpdate(): Promise<void> {
     // Per-session deltas instead of full project snapshots: an upsert of one
     // session can never clobber unrelated client state, so the frontend needs
     // no "suppress updates while a run is active" protection logic.
-    const events: string[] = [];
+    const events: Array<{ provider: string | null; event: string }> = [];
     for (const updatedSessionId of queuedUpdate.updatedSessionIds) {
       const event = await buildSessionUpsertedEvent(updatedSessionId);
       if (event) {
-        events.push(event);
+        events.push({ provider: sessionsDb.getSessionById(updatedSessionId)?.provider ?? null, event });
       }
     }
 
     if (events.length > 0) {
       connectedClients.forEach(client => {
         if (client.readyState === WS_OPEN_STATE) {
-          for (const event of events) {
-            client.send(event);
+          for (const { provider, event } of events) {
+            if (canReceiveProviderEvents(client, provider)) {
+              client.send(event);
+            }
           }
         }
       });

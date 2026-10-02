@@ -1,11 +1,11 @@
 import fsSync from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import Database from 'better-sqlite3';
 
 import { sessionsDb } from '@/modules/database/index.js';
 import type { IProviderSessionSynchronizer } from '@/shared/interfaces.js';
-import { getActiveAccountDir } from '@/shared/session-scope.js';
 import {
   getDevinDatabasePath,
   normalizeProviderTimestamp,
@@ -25,6 +25,20 @@ type SynchronizeRowsResult = {
   processed: number;
   firstSessionId: string | null;
 };
+
+/**
+ * Devin's session store is machine-global: stamp rows with the owner's account
+ * dir — the server's own config dir, NOT the request context (a guest listing
+ * projects triggers this sync and must not claim the owner's sessions).
+ */
+function getMachineAccountDir(): string {
+  const dir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+  try {
+    return fsSync.realpathSync.native(dir);
+  } catch {
+    return path.resolve(dir);
+  }
+}
 
 /**
  * Session indexer for Devin's shared `sessions.db` (`~/.local/share/devin/cli`).
@@ -64,7 +78,16 @@ export class DevinSessionSynchronizer implements IProviderSessionSynchronizer {
       return { processed: 0, firstSessionId: null };
     }
 
-    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    let db: InstanceType<typeof Database>;
+    try {
+      // Locked/corrupt DB must degrade to "nothing synced", not poison the
+      // caller's whole sync pass.
+      db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn('[DevinProvider] Failed to open sessions database:', message);
+      return { processed: 0, firstSessionId: null };
+    }
     try {
       // Devin stores unix seconds; `since` is a Date on our side.
       const sinceSeconds = since ? Math.floor(since.getTime() / 1000) : null;
@@ -137,7 +160,7 @@ export class DevinSessionSynchronizer implements IProviderSessionSynchronizer {
       normalizeProviderTimestamp(row.last_activity_at ?? row.created_at),
       null,
       undefined,
-      { accountDir: getActiveAccountDir(), origin: 'terminal' },
+      { accountDir: getMachineAccountDir(), origin: 'terminal' },
     );
   }
 }

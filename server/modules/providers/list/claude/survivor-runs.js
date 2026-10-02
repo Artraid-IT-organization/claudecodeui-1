@@ -380,9 +380,9 @@ function refreshPhase(survivor) {
  * `onPhase(appSessionId, phase)` — сменился этап работы (см. readTranscriptPhase),
  * `onGone(appSessionId)` — агент закончил.
  *
- * @param {{ onTranscriptChange?: (appSessionId: string) => void, onPhase?: (appSessionId: string, phase: { phase: string, detail: string | null } | null) => void, onGone?: (appSessionId: string, provider: string) => void, pollMs?: number }} [options]
+ * @param {{ onTranscriptChange?: (appSessionId: string) => void, onPhase?: (appSessionId: string, provider: string, phase: { phase: string, detail: string | null } | null) => void, onGone?: (appSessionId: string, provider: string) => void, pollMs?: number }} [options]
  */
-export function adoptSurvivors({ onTranscriptChange = (_id) => {}, onPhase = (_id, _phase) => {}, onGone = (_id) => {}, pollMs = 3000 } = {}) {
+export function adoptSurvivors({ onTranscriptChange = (_id) => {}, onPhase = (_id, _provider, _phase) => {}, onGone = (_id) => {}, pollMs = 3000 } = {}) {
   shuttingDown = false;
   let files = [];
   try {
@@ -428,9 +428,9 @@ export function adoptSurvivors({ onTranscriptChange = (_id) => {}, onPhase = (_i
 }
 
 /**
- * @param {{ onTranscriptChange?: (appSessionId: string) => void, onPhase?: (appSessionId: string, phase: { phase: string, detail: string | null } | null) => void, onGone?: (appSessionId: string, provider: string) => void }} [options]
+ * @param {{ onTranscriptChange?: (appSessionId: string) => void, onPhase?: (appSessionId: string, provider: string, phase: { phase: string, detail: string | null } | null) => void, onGone?: (appSessionId: string, provider: string) => void }} [options]
  */
-export function pollSurvivors({ onTranscriptChange = (_id) => {}, onPhase = (_id, _phase) => {}, onGone = (_id, _provider) => {} } = {}) {
+export function pollSurvivors({ onTranscriptChange = (_id) => {}, onPhase = (_id, _provider, _phase) => {}, onGone = (_id, _provider) => {} } = {}) {
   for (const [appSessionId, survivor] of survivors) {
     if (!isAgentAlive(survivor.pid, survivor)) {
       survivors.delete(appSessionId);
@@ -446,7 +446,7 @@ export function pollSurvivors({ onTranscriptChange = (_id) => {}, onPhase = (_id
       survivor.progressStamp = stamp;
       onTranscriptChange(appSessionId);
       if (survivor.provider !== 'devin' && refreshPhase(survivor)) {
-        onPhase(appSessionId, survivor.phase);
+        onPhase(appSessionId, survivor.provider, survivor.phase);
       }
     }
   }

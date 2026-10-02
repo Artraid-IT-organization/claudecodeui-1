@@ -4,6 +4,7 @@ import path from 'node:path';
 
 import spawn from 'cross-spawn';
 
+import { sessionsDb } from '@/modules/database/index.js';
 import type { IProviderModels } from '@/shared/interfaces.js';
 import type {
   AnyRecord,
@@ -159,7 +160,12 @@ export class DevinModelsProvider implements IProviderModels {
    * the Devin CLI where the app never recorded a choice.
    */
   async getCurrentActiveModel(sessionId?: string): Promise<ProviderCurrentActiveModel> {
-    const fromSession = sessionId ? readSessionModel(sessionId) : null;
+    // Callers pass the app-facing session id — translate to Devin's own id
+    // (for web-started sessions they differ; getSessionById covers both).
+    const providerSessionId = sessionId
+      ? (sessionsDb.getSessionById(sessionId)?.provider_session_id ?? sessionId)
+      : null;
+    const fromSession = providerSessionId ? readSessionModel(providerSessionId) : null;
     if (fromSession) {
       return { model: fromSession };
     }

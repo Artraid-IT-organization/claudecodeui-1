@@ -71,25 +71,36 @@ const rebuildProviderModelsTableForDevin = (db: Database): void => {
   }
 
   console.log('Running migration: Rebuilding provider_models to allow the devin provider');
-  db.exec(`
-    CREATE TABLE provider_models_new (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        provider TEXT NOT NULL CHECK (provider IN ('claude', 'cursor', 'codex', 'opencode', 'devin')),
-        model_id TEXT NOT NULL,
-        model_name TEXT NOT NULL,
-        sort_order INTEGER NOT NULL DEFAULT 0,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(provider, model_id)
-    );
+  // Whole rebuild in one transaction: a crash between steps must not strand
+  // `provider_models_new` (would break the next boot) or drop the old table
+  // without the renamed replacement (would silently lose custom models).
+  db.exec('DROP TABLE IF EXISTS provider_models_new');
+  db.exec('BEGIN TRANSACTION');
+  try {
+    db.exec(`
+      CREATE TABLE provider_models_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          provider TEXT NOT NULL CHECK (provider IN ('claude', 'cursor', 'codex', 'opencode', 'devin')),
+          model_id TEXT NOT NULL,
+          model_name TEXT NOT NULL,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(provider, model_id)
+      );
 
-    INSERT INTO provider_models_new (id, provider, model_id, model_name, sort_order, created_at, updated_at)
-    SELECT id, provider, model_id, model_name, sort_order, created_at, updated_at
-    FROM provider_models;
+      INSERT INTO provider_models_new (id, provider, model_id, model_name, sort_order, created_at, updated_at)
+      SELECT id, provider, model_id, model_name, sort_order, created_at, updated_at
+      FROM provider_models;
 
-    DROP TABLE provider_models;
-    ALTER TABLE provider_models_new RENAME TO provider_models;
-  `);
+      DROP TABLE provider_models;
+      ALTER TABLE provider_models_new RENAME TO provider_models;
+    `);
+    db.exec('COMMIT');
+  } catch (migrationError) {
+    db.exec('ROLLBACK');
+    throw migrationError;
+  }
 };
 
 const migrateLegacySessionNames = (db: Database): void => {

@@ -169,11 +169,11 @@ function syncDevinSessionActivity(
     return 0;
   }
 
+  let changed = 0;
   try {
     const readStamp = devinDb.prepare(
       'SELECT COALESCE(last_activity_at, created_at, 0) AS stamp FROM sessions WHERE id = ?',
     );
-    let changed = 0;
     for (const row of devinRows) {
       const providerId = row.provider_session_id ?? row.session_id;
       const stampRow = readStamp.get(providerId) as { stamp: number } | undefined;
@@ -190,7 +190,8 @@ function syncDevinSessionActivity(
     }
     return changed;
   } catch {
-    return 0;
+    // Mid-loop failure still reports the rows already updated.
+    return changed;
   } finally {
     devinDb.close();
   }

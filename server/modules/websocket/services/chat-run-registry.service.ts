@@ -5,7 +5,7 @@ import { chatGroupsDb } from '@/modules/database/repositories/chat-groups.js';
 import { isSurvivorRunning, listSurvivors } from '@/modules/providers/list/claude/survivor-runs.js';
 import { generateDisplayName } from '@/modules/projects/index.js';
 import { ChatSessionWriter } from '@/modules/websocket/services/chat-session-writer.service.js';
-import { connectedClients, WS_OPEN_STATE } from '@/modules/websocket/services/websocket-state.service.js';
+import { broadcastRealtimeEvent } from '@/modules/websocket/services/websocket-state.service.js';
 import type {
   LLMProvider,
   NormalizedMessage,
@@ -117,11 +117,7 @@ async function broadcastCanonicalSessionUpsert(appSessionId: string): Promise<vo
     timestamp: new Date().toISOString(),
   });
 
-  connectedClients.forEach((client) => {
-    if (client.readyState === WS_OPEN_STATE) {
-      client.send(payload);
-    }
-  });
+  broadcastRealtimeEvent(payload, row.provider);
 }
 
 function evictRunLater(appSessionId: string): void {

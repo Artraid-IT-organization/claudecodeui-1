@@ -14,7 +14,7 @@ import cors from 'cors';
 import { installProcessGuards } from '@/shared/process-guards.js';
 import { adoptSurvivors, markShuttingDown } from '@/modules/providers/list/claude/survivor-runs.js';
 import { warmSearchIndexes } from '@/modules/providers/services/session-conversations-search.service.js';
-import { connectedClients, WS_OPEN_STATE } from '@/modules/websocket/services/websocket-state.service.js';
+import { broadcastRealtimeEvent } from '@/modules/websocket/services/websocket-state.service.js';
 import { AppError, findApplicationRoot, getClaudeJsonPath, getModuleDirectory, IS_PLATFORM, OPEN_REGISTRATION, terminalTextStyles } from '@/shared/utils.js';
 import {
     closeSessionsWatcher,
@@ -552,19 +552,17 @@ async function startServer() {
                 },
                 // Этап по хвосту переписки — иначе плашка до конца работы
                 // писала «Ожидает модель», и чат выглядел зависшим.
-                onPhase: (appSessionId, phase) => {
+                onPhase: (appSessionId, provider, phase) => {
                     if (!phase) return;
                     const event = JSON.stringify({
                         kind: 'run_phase',
                         sessionId: appSessionId,
-                        provider: 'claude',
+                        provider: provider || 'claude',
                         text: phase.phase,
                         detail: phase.detail,
                         timestamp: new Date().toISOString(),
                     });
-                    connectedClients.forEach((client) => {
-                        if (client.readyState === WS_OPEN_STATE) client.send(event);
-                    });
+                    broadcastRealtimeEvent(event, provider || 'claude');
                 },
                 onGone: (appSessionId, provider) => {
                     // Порядок важен: страница не перечитывает переписку, пока
@@ -587,9 +585,7 @@ async function startServer() {
                         success: true,
                         timestamp: new Date().toISOString(),
                     });
-                    connectedClients.forEach((client) => {
-                        if (client.readyState === WS_OPEN_STATE) client.send(idle);
-                    });
+                    broadcastRealtimeEvent(idle, provider || 'claude');
                     // Агент, переживший перезапуск сайта, закончил — значит и
                     // очередь этого чата может идти дальше.
                     dispatchChatQueues();

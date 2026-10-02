@@ -158,7 +158,9 @@ test('devin runtime: model + permission mode are passed to the agent', async () 
     }, writer, runtimeContext);
 
     const capture = JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8'));
-    assert.deepEqual(capture.args, ['acp', '--model', 'swe-2-max']);
+    // bypassPermissions → CLI flag `devin --permission-mode dangerous acp`
+    // covers the spawn→set_mode window (the acp subcommand has no such flag).
+    assert.deepEqual(capture.args, ['--permission-mode', 'dangerous', 'acp', '--model', 'swe-2-max']);
     const setMode = capture.calls.find((c) => c.method === 'session/set_mode');
     assert.equal(setMode?.params?.modeId, 'bypass');
     const setModel = capture.calls.find((c) => c.method === 'session/set_config_option');

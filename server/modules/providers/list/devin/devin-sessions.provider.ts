@@ -45,6 +45,7 @@ type DevinMessageNodeRow = {
   node_id: number;
   parent_node_id: number | null;
   chat_message: string;
+  created_at: number | null;
 };
 
 /** The update payload of one ACP `session/update` notification. */
@@ -167,15 +168,21 @@ export class DevinSessionsProvider implements IProviderSessions {
         return [];
       }
       const toolId = readOptionalString(update.toolCallId);
+      // Frontend attaches results via `tr.content` on the whole message
+      // (useChatMessages.ts) — top-level content/isError required, same as
+      // claude's tool_result shape; nested toolResult kept for consumers.
+      const resultText = readToolCallContent(update)
+        || (typeof update.rawOutput === 'string' ? update.rawOutput : '')
+        || (status === 'failed' ? 'Tool call failed' : '');
       return [createNormalizedMessage({
         sessionId: eventSessionId,
         provider: PROVIDER,
         kind: 'tool_result',
         toolId: toolId ?? undefined,
+        content: resultText,
+        isError: status === 'failed',
         toolResult: {
-          content: readToolCallContent(update)
-            || (typeof update.rawOutput === 'string' ? update.rawOutput : '')
-            || (status === 'failed' ? 'Tool call failed' : ''),
+          content: resultText,
           isError: status === 'failed',
         },
       })];
@@ -233,7 +240,7 @@ export class DevinSessionsProvider implements IProviderSessions {
       }
 
       const rows = db
-        .prepare('SELECT node_id, parent_node_id, chat_message FROM message_nodes WHERE session_id = ?')
+        .prepare('SELECT node_id, parent_node_id, chat_message, created_at FROM message_nodes WHERE session_id = ?')
         .all(providerSessionId) as DevinMessageNodeRow[];
 
       const byId = new Map<number, DevinMessageNodeRow>();
@@ -293,7 +300,9 @@ export class DevinSessionsProvider implements IProviderSessions {
       }
       const role = readOptionalString(message.role);
       const metadata = readObjectRecord(message.metadata);
-      const timestamp = normalizeProviderTimestamp(metadata?.created_at ?? null);
+      // message.metadata.created_at is the ACP event time; the row's own
+      // created_at column is the storage-time fallback (both unix seconds).
+      const timestamp = normalizeProviderTimestamp(metadata?.created_at ?? row.created_at ?? null);
 
       if (role === 'user' && metadata?.is_user_input) {
         const content = readOptionalString(message.content);

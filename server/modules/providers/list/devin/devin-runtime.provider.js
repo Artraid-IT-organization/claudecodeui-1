@@ -240,30 +240,12 @@ async function queryDevin(command, options = {}, ws, context) {
   } = options;
 
   const providerSessionId = context.resolveProviderSessionId(sessionId);
-  const resolvedModel = await context.resolveResumeModel(sessionId, model);
-  const workingDirectory = cwd || projectPath || process.cwd();
-  const devinMode = mapPermissionModeToDevinMode(permissionMode);
 
-  const childEnv = buildDevinChildEnv();
-  if (permissionMode === 'bypassPermissions') {
-    // CLI-level flag too: covers the window between spawn and set_mode, when
-    // the session starts streaming before `session/set_mode` lands.
-    childEnv.DEVIN_PERMISSION_MODE = 'dangerous';
-  }
-
-  const args = ['acp'];
-  if (resolvedModel) {
-    args.push('--model', resolvedModel);
-  }
-
-  const child = spawn(resolveDevinCliCommand(), args, {
-    cwd: workingDirectory,
-    env: childEnv,
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
-
+  // Register the run BEFORE the async resolves: `chat.abort` can land while
+  // resolveResumeModel is still awaiting — the run must already exist so
+  // abort() marks it instead of racing past.
   const run = {
-    child,
+    child: null,
     connection: null,
     devinSessionId: providerSessionId || null,
     aborted: false,
@@ -274,10 +256,48 @@ async function queryDevin(command, options = {}, ws, context) {
     unregisterSurvivor: null,
     finishRun: null,
   };
-
   const sessionKey = sessionId || providerSessionId;
   if (sessionKey) {
     activeDevinRuns.set(sessionKey, run);
+  }
+
+  const resolvedModel = await context.resolveResumeModel(sessionId, model);
+  const workingDirectory = cwd || projectPath || process.cwd();
+  const devinMode = mapPermissionModeToDevinMode(permissionMode);
+
+  const childEnv = buildDevinChildEnv();
+
+  // `devin --permission-mode dangerous acp`: the flag is a top-level option
+  // (dangerous = alias of bypass), accepted before the subcommand. It covers
+  // the window between spawn and `session/set_mode`, when the agent could
+  // already raise a permission request. The acp subcommand reads neither
+  // --permission-mode nor DEVIN_PERMISSION_MODE.
+  const args = [
+    ...(permissionMode === 'bypassPermissions' ? ['--permission-mode', 'dangerous'] : []),
+    'acp',
+  ];
+  if (resolvedModel) {
+    args.push('--model', resolvedModel);
+  }
+
+  const child = spawn(resolveDevinCliCommand(), args, {
+    cwd: workingDirectory,
+    env: childEnv,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  run.child = child;
+
+  // Without an 'error' listener a spawn ENOENT (no devin CLI on PATH) is an
+  // uncaughtException — it previously took the whole server down per send.
+  const spawnError = { error: null };
+  child.once('error', (error) => {
+    spawnError.error = error;
+  });
+
+  // Aborted while the model was still resolving: kill the just-spawned child
+  // and let the connect path fall out via the aborted branch.
+  if (run.aborted) {
+    try { child.kill('SIGKILL'); } catch { /* already gone */ }
   }
 
   // The agent survives a site restart: the record lets the next server adopt
@@ -305,6 +325,10 @@ async function queryDevin(command, options = {}, ws, context) {
 
     try {
       child.kill('SIGTERM');
+      const finishKill = setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch { /* already gone */ }
+      }, ABORT_GRACE_MS);
+      finishKill.unref?.();
     } catch {
       // Already gone.
     }
@@ -387,6 +411,10 @@ async function queryDevin(command, options = {}, ws, context) {
         clientInfo: { name: 'cc2-claude-ui', version: '1.0.0' },
       }, HANDSHAKE_TIMEOUT_MS);
 
+      if (spawnError.error) {
+        throw spawnError.error;
+      }
+
       if (providerSessionId) {
         run.muted = true;
         try {
@@ -429,7 +457,7 @@ async function queryDevin(command, options = {}, ws, context) {
           await connection.call('session/set_mode', {
             sessionId: run.devinSessionId,
             modeId: devinMode,
-          });
+          }, HANDSHAKE_TIMEOUT_MS);
         } catch (error) {
           console.warn(`[Devin] session/set_mode "${devinMode}" failed:`, error.message);
         }
@@ -443,7 +471,7 @@ async function queryDevin(command, options = {}, ws, context) {
             sessionId: run.devinSessionId,
             configId: 'model',
             value: resolvedModel,
-          });
+          }, HANDSHAKE_TIMEOUT_MS);
         } catch (error) {
           console.warn('[Devin] session/set_config_option model failed:', error.message);
         }
@@ -475,6 +503,7 @@ async function queryDevin(command, options = {}, ws, context) {
           text: 'token_budget',
           tokenBudget: {
             used: usage.totalTokens ?? 0,
+            total: usage.totalTokens ?? 0,
             inputTokens: usage.inputTokens ?? 0,
             outputTokens: usage.outputTokens ?? 0,
             breakdown: {
@@ -507,6 +536,12 @@ async function queryDevin(command, options = {}, ws, context) {
       const message = error instanceof Error ? error.message : String(error);
       if (run.aborted) {
         finish(0, true);
+        resolve();
+        return;
+      }
+      if (run.finishRun) {
+        // Process died mid-call: onClose already emitted the terminal state —
+        // a second error frame after `complete` would just confuse the UI.
         resolve();
         return;
       }
@@ -546,14 +581,16 @@ export const devinRuntime = {
     }
 
     const child = run.child;
-    const timer = setTimeout(() => {
-      try {
-        child.kill('SIGKILL');
-      } catch {
-        // Already gone.
-      }
-    }, ABORT_GRACE_MS);
-    timer.unref?.();
+    if (child) {
+      const timer = setTimeout(() => {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          // Already gone.
+        }
+      }, ABORT_GRACE_MS);
+      timer.unref?.();
+    }
 
     return true;
   },
