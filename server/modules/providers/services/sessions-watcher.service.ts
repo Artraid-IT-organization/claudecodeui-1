@@ -36,6 +36,12 @@ const PROVIDER_WATCH_PATHS: Array<{ provider: LLMProvider; rootPath: string }> =
     provider: 'opencode',
     rootPath: path.join(os.homedir(), '.local', 'share', 'opencode'),
   },
+  {
+    provider: 'devin',
+    // Devin keeps one shared sqlite database — watch the data dir and let
+    // isWatcherTargetFile keep only sessions.db (and its WAL journal).
+    rootPath: path.join(os.homedir(), '.local', 'share', 'devin', 'cli'),
+  },
 ];
 
 const WATCHER_IGNORED_PATTERNS = [
@@ -78,6 +84,10 @@ let watcherRescheduleAfterRefresh = false;
 function isWatcherTargetFile(provider: LLMProvider, filePath: string): boolean {
   if (provider === 'opencode') {
     return path.basename(filePath) === 'opencode.db';
+  }
+  if (provider === 'devin') {
+    const base = path.basename(filePath);
+    return base === 'sessions.db' || base === 'sessions.db-wal';
   }
 
   return filePath.endsWith('.jsonl');

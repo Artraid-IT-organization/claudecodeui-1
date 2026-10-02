@@ -566,7 +566,7 @@ async function startServer() {
                         if (client.readyState === WS_OPEN_STATE) client.send(event);
                     });
                 },
-                onGone: (appSessionId) => {
+                onGone: (appSessionId, provider) => {
                     // Порядок важен: страница не перечитывает переписку, пока
                     // считает чат работающим. Сначала «чат свободен», потом
                     // «перечитай» — иначе последний ответ агента не появлялся
@@ -582,7 +582,7 @@ async function startServer() {
                         kind: 'complete',
                         sessionId: appSessionId,
                         actualSessionId: appSessionId,
-                        provider: 'claude',
+                        provider: provider || 'claude',
                         exitCode: 0,
                         success: true,
                         timestamp: new Date().toISOString(),

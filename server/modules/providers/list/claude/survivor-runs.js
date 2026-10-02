@@ -29,6 +29,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import Database from 'better-sqlite3';
+
 import { verifyAgentRoom, wrapInAgentRoom } from './agent-rooms.js';
 
 let shuttingDown = false;
@@ -61,8 +63,8 @@ function removeRecord(pid) {
   }
 }
 
-/** Жив ли процесс и это ли всё ещё агент Claude (PID мог достаться другой программе). */
-function isAgentAlive(pid) {
+/** Жив ли процесс и это ли всё ещё наш агент (PID мог достаться другой программе). */
+function isAgentAlive(pid, record = null) {
   try {
     process.kill(pid, 0);
   } catch {
@@ -70,6 +72,9 @@ function isAgentAlive(pid) {
   }
   try {
     const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
+    if (record?.provider === 'devin') {
+      return cmdline.includes('devin') && cmdline.includes('acp');
+    }
     return cmdline.includes('claude') && cmdline.includes('stream-json');
   } catch {
     return false;
@@ -140,6 +145,42 @@ export function spawnSurvivableClaude(spawnOptions, context = {}) {
   };
 }
 
+/**
+ * Регистрация агента другого провайдера (Devin ACP) как «переживёшь перезапуск».
+ *
+ * От `spawnSurvivableClaude` отличается тем, что процесс уже рождён вызывающим
+ * (своя разводка stdio для JSON-RPC) и «убить» при остановке никто и не думает
+ * делать — достаточно оставить запись, чтобы следующий сервер усыновил процесс.
+ * Возвращает функцию снятия записи для нормального завершения хода.
+ */
+export function registerProviderRun(child, { provider, appSessionId, providerSessionId }) {
+  if (!child?.pid || !appSessionId) {
+    return () => {};
+  }
+
+  writeRecord(child.pid, {
+    pid: child.pid,
+    provider: provider || null,
+    appSessionId,
+    providerSessionId: providerSessionId || null,
+    startedAt: Date.now(),
+  });
+
+  const onExit = () => {
+    // Выход во время остановки сервера — не наш случай: сервер умирает, а
+    // агент нет. Запись нужна новому серверу.
+    if (!shuttingDown) {
+      removeRecord(child.pid);
+    }
+  };
+  child.once('exit', onExit);
+
+  return () => {
+    child.off('exit', onExit);
+    removeRecord(child.pid);
+  };
+}
+
 /** Агент сообщил свой номер разговора — дописать в запись, чтобы найти файл переписки. */
 export function noteSurvivorProviderSession(appSessionId, providerSessionId) {
   if (!appSessionId || !providerSessionId) return;
@@ -184,6 +225,37 @@ function mtimeOf(file) {
     return fs.statSync(file).mtimeMs;
   } catch {
     return 0;
+  }
+}
+
+/**
+ * Метка прогресса пережившего агента.
+ *
+ * У Claude это mtime файла переписки. У Devin переписка — строки в общей
+ * `sessions.db`: читаем `last_activity_at` его сессии. mtime самой базы как
+ * запасной вариант — WAL откладывает чекпоинт, но файл хоть иногда шевелится.
+ */
+function survivorProgressStamp(survivor) {
+  if (survivor.provider !== 'devin') {
+    return survivor.transcriptPath ? mtimeOf(survivor.transcriptPath) : 0;
+  }
+
+  try {
+    // Лист-модуль без импортов приложения: sqlite поднимаем напрямую, путь —
+    // тот же, что читает Devin CLI ($XDG_DATA_HOME/devin/cli/sessions.db).
+    const dataHome = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
+    const db = new Database(path.join(dataHome, 'devin', 'cli', 'sessions.db'), { readonly: true, fileMustExist: true });
+    try {
+      const row = db
+        .prepare('SELECT last_activity_at FROM sessions WHERE id = ?')
+        .get(survivor.providerSessionId || '');
+      return typeof row?.last_activity_at === 'number' ? row.last_activity_at : 0;
+    } finally {
+      db.close();
+    }
+  } catch {
+    const dataHome = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
+    return mtimeOf(path.join(dataHome, 'devin', 'cli', 'sessions.db'));
   }
 }
 
@@ -308,7 +380,7 @@ function refreshPhase(survivor) {
  * `onPhase(appSessionId, phase)` — сменился этап работы (см. readTranscriptPhase),
  * `onGone(appSessionId)` — агент закончил.
  *
- * @param {{ onTranscriptChange?: (appSessionId: string) => void, onPhase?: (appSessionId: string, phase: { phase: string, detail: string | null } | null) => void, onGone?: (appSessionId: string) => void, pollMs?: number }} [options]
+ * @param {{ onTranscriptChange?: (appSessionId: string) => void, onPhase?: (appSessionId: string, phase: { phase: string, detail: string | null } | null) => void, onGone?: (appSessionId: string, provider: string) => void, pollMs?: number }} [options]
  */
 export function adoptSurvivors({ onTranscriptChange = (_id) => {}, onPhase = (_id, _phase) => {}, onGone = (_id) => {}, pollMs = 3000 } = {}) {
   shuttingDown = false;
@@ -327,18 +399,22 @@ export function adoptSurvivors({ onTranscriptChange = (_id) => {}, onPhase = (_i
     } catch {
       continue;
     }
-    if (!record?.pid || !record.appSessionId || !isAgentAlive(record.pid)) {
+    if (!record?.pid || !record.appSessionId || !isAgentAlive(record.pid, record)) {
       removeRecord(record?.pid ?? name.replace(/\.json$/, ''));
       continue;
     }
-    const transcriptPath = findTranscript(record);
+    const transcriptPath = record.provider === 'devin' ? null : findTranscript(record);
     const survivor = {
       ...record,
+      provider: record.provider || 'claude',
       transcriptPath,
       transcriptMtime: transcriptPath ? mtimeOf(transcriptPath) : 0,
+      progressStamp: survivorProgressStamp({ ...record, transcriptPath }),
       phase: null,
     };
-    refreshPhase(survivor);
+    if (survivor.provider !== 'devin') {
+      refreshPhase(survivor);
+    }
     survivors.set(record.appSessionId, survivor);
     console.log(`[survivor-runs] чат ${record.appSessionId} пережил перезапуск (PID ${record.pid}), продолжаю показывать его работу`);
   }
@@ -352,24 +428,24 @@ export function adoptSurvivors({ onTranscriptChange = (_id) => {}, onPhase = (_i
 }
 
 /**
- * @param {{ onTranscriptChange?: (appSessionId: string) => void, onPhase?: (appSessionId: string, phase: { phase: string, detail: string | null } | null) => void, onGone?: (appSessionId: string) => void }} [options]
+ * @param {{ onTranscriptChange?: (appSessionId: string) => void, onPhase?: (appSessionId: string, phase: { phase: string, detail: string | null } | null) => void, onGone?: (appSessionId: string, provider: string) => void }} [options]
  */
-export function pollSurvivors({ onTranscriptChange = (_id) => {}, onPhase = (_id, _phase) => {}, onGone = (_id) => {} } = {}) {
+export function pollSurvivors({ onTranscriptChange = (_id) => {}, onPhase = (_id, _phase) => {}, onGone = (_id, _provider) => {} } = {}) {
   for (const [appSessionId, survivor] of survivors) {
-    if (!isAgentAlive(survivor.pid)) {
+    if (!isAgentAlive(survivor.pid, survivor)) {
       survivors.delete(appSessionId);
       removeRecord(survivor.pid);
-      onGone(appSessionId);
+      onGone(appSessionId, survivor.provider);
       continue;
     }
-    if (!survivor.transcriptPath) {
+    if (survivor.provider !== 'devin' && !survivor.transcriptPath) {
       survivor.transcriptPath = findTranscript(survivor);
     }
-    const mtime = survivor.transcriptPath ? mtimeOf(survivor.transcriptPath) : 0;
-    if (mtime && mtime !== survivor.transcriptMtime) {
-      survivor.transcriptMtime = mtime;
+    const stamp = survivorProgressStamp(survivor);
+    if (stamp && stamp !== survivor.progressStamp) {
+      survivor.progressStamp = stamp;
       onTranscriptChange(appSessionId);
-      if (refreshPhase(survivor)) {
+      if (survivor.provider !== 'devin' && refreshPhase(survivor)) {
         onPhase(appSessionId, survivor.phase);
       }
     }
@@ -388,10 +464,15 @@ export function getSurvivorPhase(appSessionId) {
 export function listSurvivors() {
   return Array.from(survivors.values()).map((survivor) => ({
     sessionId: survivor.appSessionId,
-    provider: 'claude',
+    provider: survivor.provider || 'claude',
     startedAt: survivor.startedAt,
     lastSeq: 0,
   }));
+}
+
+/** Провайдер пережившего запуска — abort/уведомления кладут его в ответ. */
+export function getSurvivorProvider(appSessionId) {
+  return survivors.get(appSessionId)?.provider || 'claude';
 }
 
 /** «Стоп» для пережившего перезапуск агента: сервер уже не держит его канал, остаётся сигнал. */

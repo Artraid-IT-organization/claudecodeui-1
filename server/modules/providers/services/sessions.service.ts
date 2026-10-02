@@ -12,7 +12,28 @@ import type {
   NormalizedMessage,
   ServerScope,
 } from '@/shared/types.js';
-import { AppError, normalizeServerScope } from '@/shared/utils.js';
+import { getRequestRuntimeContext } from '@/shared/request-context.js';
+import { AppError, isPlatformOwnerWebUser, normalizeServerScope, OPEN_REGISTRATION } from '@/shared/utils.js';
+
+/**
+ * Devin sessions may only ever be read by the platform owner: the provider's
+ * credentials and session store are machine-global. A guest who guesses a
+ * session id must not be able to read history or provider ids through the
+ * provider-agnostic session endpoints.
+ */
+const assertSessionProviderAllowed = (provider: string): void => {
+  if (provider !== 'devin' || !OPEN_REGISTRATION) {
+    return;
+  }
+  const userId = getRequestRuntimeContext()?.userId;
+  const numericUserId = userId === undefined || userId === null ? NaN : Number(userId);
+  if (!Number.isFinite(numericUserId) || !isPlatformOwnerWebUser(numericUserId)) {
+    throw new AppError('The Devin provider is only available to the platform owner.', {
+      code: 'PROVIDER_NOT_ALLOWED',
+      statusCode: 403,
+    });
+  }
+};
 
 type CreateAppSessionResult = {
   sessionId: string;
@@ -308,6 +329,7 @@ export const sessionsService = {
         statusCode: 404,
       });
     }
+    assertSessionProviderAllowed(session.provider);
 
     if (!session.provider_session_id) {
       throw new AppError('This session ID is not available yet.', {
@@ -339,6 +361,7 @@ export const sessionsService = {
         statusCode: 404,
       });
     }
+    assertSessionProviderAllowed(session.provider);
 
     // App-created sessions that never produced a provider transcript yet
     // (e.g. first message still streaming) simply have no history.
@@ -387,6 +410,7 @@ export const sessionsService = {
         statusCode: 404,
       });
     }
+    assertSessionProviderAllowed(session.provider);
 
     const projectPath = session.project_path?.trim() ? session.project_path : null;
     const project = projectPath ? projectsDb.getProjectPath(projectPath) : null;

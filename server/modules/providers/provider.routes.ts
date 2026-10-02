@@ -9,6 +9,7 @@ import { providerSkillsService } from '@/modules/providers/services/skills.servi
 import { sessionConversationsSearchService } from '@/modules/providers/services/session-conversations-search.service.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
 import { sessionRewindService } from '@/modules/providers/services/session-rewind.service.js';
+import { getRequestRuntimeContext } from '@/shared/request-context.js';
 import type {
   CustomProviderModelInput,
   LLMProvider,
@@ -18,7 +19,14 @@ import type {
   ProviderSkillCreateInput,
   UpsertProviderMcpServerInput,
 } from '@/shared/types.js';
-import { AppError, asyncHandler, createApiSuccessResponse, normalizeServerScope } from '@/shared/utils.js';
+import {
+  AppError,
+  asyncHandler,
+  createApiSuccessResponse,
+  isPlatformOwnerWebUser,
+  normalizeServerScope,
+  OPEN_REGISTRATION,
+} from '@/shared/utils.js';
 
 const router = express.Router();
 
@@ -287,6 +295,7 @@ const parseProvider = (value: unknown): LLMProvider => {
     normalized === 'claude'
     || normalized === 'codex'
     || normalized === 'cursor'
+    || normalized === 'devin'
     || normalized === 'opencode'
   ) {
     return normalized;
@@ -297,6 +306,34 @@ const parseProvider = (value: unknown): LLMProvider => {
     statusCode: 400,
   });
 };
+
+/**
+ * Devin's credentials live once per host (`~/.local/share/devin/credentials.toml`);
+ * on a multi-tenant instance every /devin/* endpoint is owner-only. Centralised
+ * here so a future devin route cannot accidentally skip the check.
+ */
+const assertDevinProviderAccess = (): void => {
+  if (!OPEN_REGISTRATION) {
+    return;
+  }
+  const userId = getRequestRuntimeContext()?.userId;
+  const numericUserId = userId === undefined || userId === null ? NaN : Number(userId);
+  if (!Number.isFinite(numericUserId) || !isPlatformOwnerWebUser(numericUserId)) {
+    throw new AppError('The Devin provider is only available to the platform owner.', {
+      code: 'PROVIDER_NOT_ALLOWED',
+      statusCode: 403,
+    });
+  }
+};
+
+router.use('/devin', (_req: Request, _res: Response, next: express.NextFunction) => {
+  try {
+    assertDevinProviderAccess();
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
 
 const parseSessionRenameSummary = (payload: unknown): string => {
   if (!payload || typeof payload !== 'object') {
@@ -708,6 +745,10 @@ router.post(
   asyncHandler(async (req: Request, res: Response) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const provider = parseProvider(body.provider);
+    if (provider === 'devin') {
+      // Body-carried provider does not pass through the /devin router prefix.
+      assertDevinProviderAccess();
+    }
     const projectPath = typeof body.projectPath === 'string' ? body.projectPath : '';
     const initialMessage = typeof body.initialMessage === 'string' ? body.initialMessage : '';
     const result = sessionsService.createAppSession(provider, projectPath, initialMessage);

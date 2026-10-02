@@ -34,6 +34,7 @@ const PROVIDER_META: { id: LLMProvider; name: string }[] = [
   { id: "codex", name: "OpenAI" },
   { id: "cursor", name: "Cursor" },
   { id: "opencode", name: "OpenCode" },
+  { id: "devin", name: "Devin" },
 ];
 
 const MOD_KEY =
@@ -64,6 +65,8 @@ type ProviderSelectionEmptyStateProps = {
   setCodexModel: (model: string) => void;
   opencodeModel: string;
   setOpenCodeModel: (model: string) => void;
+  devinModel: string;
+  setDevinModel: (model: string) => void;
   providerModelCatalog: Partial<Record<LLMProvider, ProviderModelsDefinition>>;
   providerModelActions: ProviderModelActions;
   providerModelsLoading: boolean;
@@ -93,10 +96,12 @@ function getCurrentModel(
   cu: string,
   co: string,
   o: string,
+  d: string,
 ) {
   if (p === "claude") return c;
   if (p === "codex") return co;
   if (p === "opencode") return o;
+  if (p === "devin") return d;
   return cu;
 }
 
@@ -105,6 +110,7 @@ function getProviderDisplayName(p: LLMProvider) {
   if (p === "cursor") return "Cursor";
   if (p === "codex") return "Codex";
   if (p === "opencode") return "OpenCode";
+  if (p === "devin") return "Devin";
   return "Claude";
 }
 
@@ -122,6 +128,8 @@ export default function ProviderSelectionEmptyState({
   setCodexModel,
   opencodeModel,
   setOpenCodeModel,
+  devinModel,
+  setDevinModel,
   providerModelCatalog,
   providerModelActions,
   providerModelsLoading,
@@ -135,12 +143,17 @@ export default function ProviderSelectionEmptyState({
   const [modelLibraryOpen, setModelLibraryOpen] = useState(false);
 
   const visibleProviderGroups = useMemo<ProviderGroup[]>(() => {
-    return PROVIDER_META.map((p) => ({
-      id: p.id,
-      name: p.name,
-      models: providerModelCatalog[p.id]?.OPTIONS ?? [],
-    }));
-  }, [providerModelCatalog]);
+    return PROVIDER_META
+      // A provider whose catalog never loaded stays hidden once loading is
+      // over — this is what keeps the owner-only Devin group invisible to
+      // guests (the backend rejects their /devin/models request with 403).
+      .filter((p) => providerModelsLoading || providerModelCatalog[p.id] !== undefined)
+      .map((p) => ({
+        id: p.id,
+        name: p.name,
+        models: providerModelCatalog[p.id]?.OPTIONS ?? [],
+      }));
+  }, [providerModelCatalog, providerModelsLoading]);
 
   const nextTaskPrompt = t("tasks.nextTaskPrompt", {
     defaultValue: "Start the next task",
@@ -152,6 +165,7 @@ export default function ProviderSelectionEmptyState({
     cursorModel,
     codexModel,
     opencodeModel,
+    devinModel,
   );
 
   const currentModelLabel = useMemo(() => {
@@ -173,12 +187,15 @@ export default function ProviderSelectionEmptyState({
       } else if (providerId === "opencode") {
         setOpenCodeModel(modelValue);
         localStorage.setItem("opencode-model", modelValue);
+      } else if (providerId === "devin") {
+        setDevinModel(modelValue);
+        localStorage.setItem("devin-model", modelValue);
       } else {
         setCursorModel(modelValue);
         localStorage.setItem("cursor-model", modelValue);
       }
     },
-    [setClaudeModel, setCursorModel, setCodexModel, setOpenCodeModel],
+    [setClaudeModel, setCursorModel, setCodexModel, setOpenCodeModel, setDevinModel],
   );
 
   const handleModelSelect = useCallback(
@@ -381,6 +398,10 @@ export default function ProviderSelectionEmptyState({
                 opencode: t("providerSelection.readyPrompt.opencode", {
                   model: opencodeModel,
                   defaultValue: "Ready with OpenCode {{model}}",
+                }),
+                devin: t("providerSelection.readyPrompt.devin", {
+                  model: devinModel,
+                  defaultValue: "Ready with Devin {{model}}",
                 }),
               }[provider]
             }

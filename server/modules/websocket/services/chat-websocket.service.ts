@@ -21,7 +21,7 @@ import {
   readClientMessageId,
   rememberAcceptedSend,
 } from '@/modules/websocket/services/chat-send-ledger.service.js';
-import { getSurvivorPhase, isSurvivorRunning, stopSurvivor } from '@/modules/providers/list/claude/survivor-runs.js';
+import { getSurvivorPhase, getSurvivorProvider, isSurvivorRunning, stopSurvivor } from '@/modules/providers/list/claude/survivor-runs.js';
 import { connectedClients, WS_OPEN_STATE } from '@/modules/websocket/services/websocket-state.service.js';
 import {
   isImageAttachmentDescriptor,
@@ -235,6 +235,17 @@ async function handleChatSend(
 
   const openRegistrationContext = resolveWebUserRuntimeContext(userId);
   const numericUserId = userId !== null ? Number(userId) : NaN;
+  // Devin credentials are machine-global — guests on OPEN_REGISTRATION never run it.
+  if (OPEN_REGISTRATION && provider === 'devin' && !isPlatformOwnerWebUser(numericUserId)) {
+    sendProtocolError(
+      ws,
+      'PROVIDER_NOT_ALLOWED',
+      'The Devin provider is only available to the platform owner.',
+      sessionId,
+      clientMessageId,
+    );
+    return;
+  }
   // Owner bypass: when the owner's ~/.claude-webuser-<id> is symlinked to
   // their real ~/.claude, the SDK authenticates via the existing OAuth session
   // in that directory — no explicit API key is needed or stored.
@@ -570,6 +581,11 @@ async function runQueuedChatMessage(
   const userId = message.userId;
   const runtimeContext = resolveWebUserRuntimeContext(userId);
   const numericUserId = userId !== null ? Number(userId) : NaN;
+  // Devin — только владелец площадки; очередь не должна быть обходом гейта.
+  if (OPEN_REGISTRATION && provider === 'devin' && !isPlatformOwnerWebUser(numericUserId)) {
+    console.warn(`[Очередь чата] devin для не-владельца ${String(userId)} — сообщение ${message.id} отброшено`);
+    return true;
+  }
   if (
     OPEN_REGISTRATION
     && provider === 'claude'
@@ -698,6 +714,7 @@ async function handleChatAbort(
   // Агент пережил перезапуск сайта: канала к нему у сервера нет, остановить
   // можно только сигналом процессу.
   if ((!run || run.status !== 'running') && isSurvivorRunning(sessionId)) {
+    const survivorProvider = getSurvivorProvider(sessionId);
     stopSurvivor(sessionId);
     // «Работа завершена» с отметкой отмены: «чат свободен» вкладка может
     // отбросить как устаревший (см. onGone в server/index.ts).
@@ -705,7 +722,7 @@ async function handleChatAbort(
       kind: 'complete',
       sessionId,
       actualSessionId: sessionId,
-      provider: 'claude',
+      provider: survivorProvider,
       exitCode: 0,
       aborted: true,
       timestamp: new Date().toISOString(),
