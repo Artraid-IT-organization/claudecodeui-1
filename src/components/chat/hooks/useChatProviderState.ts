@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { SELECT_PROVIDER_EVENT } from '../../../hooks/useCodexAccount';
 import { authenticatedFetch } from '../../../utils/api';
+import { DEFAULT_PROVIDER } from '../../../utils/defaultProvider';
 import type { PendingPermissionRequest, PermissionMode } from '../types/types';
 import type {
   ProjectSession,
@@ -32,7 +33,7 @@ const readStoredProvider = (): LLMProvider => {
   const storedProvider = localStorage.getItem('selected-provider');
   return PROVIDERS.includes(storedProvider as LLMProvider)
     ? storedProvider as LLMProvider
-    : 'claude';
+    : DEFAULT_PROVIDER;
 };
 
 /**
