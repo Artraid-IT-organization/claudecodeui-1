@@ -321,6 +321,24 @@ export type ProviderRuntimePermissionGateway = {
 };
 
 /**
+ * Запись live-runs об агенте, пережившем перезапуск сервера
+ * (survivor-runs.js). Поля socketPath/runId/supervisorPid есть у запусков
+ * под супервизором (Devin) — по ним новый сервер переподключается к живому
+ * ходу; у прочих провайдеров их нет.
+ */
+export type ProviderSurvivorRecord = {
+  pid: number;
+  provider?: string | null;
+  appSessionId: string;
+  providerSessionId?: string | null;
+  configDir?: string | null;
+  socketPath?: string | null;
+  runId?: string | null;
+  supervisorPid?: number | null;
+  startedAt?: number;
+};
+
+/**
  * Provider-scoped application capabilities supplied to a runtime for one run.
  *
  * Keeping these lookups outside concrete SDK/CLI adapters prevents the

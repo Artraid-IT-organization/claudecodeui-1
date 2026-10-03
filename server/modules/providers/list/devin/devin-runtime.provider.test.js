@@ -33,10 +33,26 @@ const seen = [];
 const record = (m) => { seen.push(m); if (cap) fs.writeFileSync(cap, JSON.stringify({ args: process.argv.slice(2), calls: seen }, null, 2)); };
 const respond = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\\n');
 const notify = (method, params) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\\n');
+const request = (id, method, params) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\\n');
+
+let pendingPrompt = null; // msg.id of session/prompt waiting on permission
+const finishPrompt = () => {
+  if (!pendingPrompt) return;
+  const { id, sid } = pendingPrompt;
+  pendingPrompt = null;
+  notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'AFTER-PERMISSION' } } });
+  respond(id, { stopReason: 'end_turn' });
+  setTimeout(() => process.exit(0), 50);
+};
 
 rl.on('line', (line) => {
   let msg; try { msg = JSON.parse(line); } catch { return; }
-  if (msg.id !== undefined && msg.method === undefined) { return; } // client answers our requests — none sent
+  if (msg.id !== undefined && msg.method === undefined) {
+    // Answer to OUR request (session/request_permission).
+    record({ answer: msg });
+    if (pendingPrompt) finishPrompt();
+    return;
+  }
   if (msg.method === undefined || msg.id === undefined) {
     record(msg); return; // notifications (session/cancel)
   }
@@ -60,6 +76,21 @@ rl.on('line', (line) => {
     case 'session/prompt': {
       if (process.env.DEVIN_HANG === '1') return; // never answer → abort test
       const sid = msg.params.sessionId;
+      if (process.env.DEVIN_PERMISSION_TEST === '1') {
+        // Ask permission and hold the prompt until the client answers.
+        pendingPrompt = { id: msg.id, sid };
+        request(900, 'session/request_permission', {
+          sessionId: sid,
+          // Живой урезанный формат Devin (замерено 03.10.26): без title/rawInput.
+          toolCall: { toolCallId: 'tc-perm', _meta: { 'cognition.ai/editableCommand': 'rm -rf /tmp/x' } },
+          options: [
+            { optionId: 'o-once', name: 'Allow once', kind: 'allow_once' },
+            { optionId: 'o-always', name: 'Allow always', kind: 'allow_always' },
+            { optionId: 'o-reject', name: 'Reject', kind: 'reject_once' },
+          ],
+        });
+        return;
+      }
       notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'thinking hard' } } });
       notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'LIVE-REPLY' } } });
       notify('session/update', { sessionId: sid, update: { sessionUpdate: 'usage_update', used: 100, size: 200000 } });
@@ -95,17 +126,39 @@ async function withFakeDevin(fn) {
   const previousCliPath = process.env.DEVIN_CLI_PATH;
   const previousCapture = process.env.DEVIN_RPC_CAPTURE;
   const previousHang = process.env.DEVIN_HANG;
+  const previousPermTest = process.env.DEVIN_PERMISSION_TEST;
+  const previousRunsDir = process.env.CLOUDCLI_DEVIN_RUNS_DIR;
+  const previousLiveRuns = process.env.CLOUDCLI_LIVE_RUNS_DIR;
   const shim = await createFakeDevinExecutable(tempRoot);
   process.env.DEVIN_CLI_PATH = shim;
   process.env.DEVIN_RPC_CAPTURE = path.join(tempRoot, 'rpc.json');
+  // Супервизор и live-runs пишут в свои каталоги — в тестах они во временных.
+  process.env.CLOUDCLI_DEVIN_RUNS_DIR = path.join(tempRoot, 'devin-runs');
+  process.env.CLOUDCLI_LIVE_RUNS_DIR = path.join(tempRoot, 'live-runs');
   try {
     await fn(tempRoot);
   } finally {
     if (previousCliPath === undefined) delete process.env.DEVIN_CLI_PATH; else process.env.DEVIN_CLI_PATH = previousCliPath;
     if (previousCapture === undefined) delete process.env.DEVIN_RPC_CAPTURE; else process.env.DEVIN_RPC_CAPTURE = previousCapture;
     if (previousHang === undefined) delete process.env.DEVIN_HANG; else process.env.DEVIN_HANG = previousHang;
+    if (previousPermTest === undefined) delete process.env.DEVIN_PERMISSION_TEST; else process.env.DEVIN_PERMISSION_TEST = previousPermTest;
+    if (previousRunsDir === undefined) delete process.env.CLOUDCLI_DEVIN_RUNS_DIR; else process.env.CLOUDCLI_DEVIN_RUNS_DIR = previousRunsDir;
+    if (previousLiveRuns === undefined) delete process.env.CLOUDCLI_LIVE_RUNS_DIR; else process.env.CLOUDCLI_LIVE_RUNS_DIR = previousLiveRuns;
     await rm(tempRoot, { recursive: true, force: true });
   }
+}
+
+/** Дождаться условия (опрос каждые 25 мс) или бросить по таймауту. */
+async function waitFor(check, timeoutMs = 5000, label = 'condition') {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = await check();
+    if (value) {
+      return value;
+    }
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error(`waitFor timed out: ${label}`);
 }
 
 test('devin runtime: new session — handshake, session_created, streamed deltas, complete', async () => {
@@ -246,4 +299,165 @@ test('devin sessions normalizeMessage: ACP updates → NormalizedMessage', () =>
     's1',
   );
   assert.equal(noise.length, 0);
+});
+
+test('devin runtime: permission request reaches the gateway, allow → allow_once', async () => {
+  await withFakeDevin(async () => {
+    process.env.DEVIN_PERMISSION_TEST = '1';
+    const writer = makeWriter();
+    const runPromise = devinRuntime.run('Hi', { cwd: '/tmp', sessionId: 'app-perm-1' }, writer, runtimeContext);
+
+    const request = await waitFor(
+      () => writer.messages.find((m) => m.kind === 'permission_request'),
+      5000,
+      'permission_request event',
+    );
+    assert.equal(request.provider, 'devin');
+    assert.equal(request.sessionId, 'app-perm-1');
+    assert.ok(request.requestId.startsWith('devin-perm-'));
+
+    const pending = devinRuntime.permissions.listPending('app-perm-1');
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].requestId, request.requestId);
+    assert.equal(pending[0].toolName, 'rm');
+    assert.equal(pending[0].input.command, 'rm -rf /tmp/x');
+    assert.equal(pending[0].sessionId, 'app-perm-1');
+    assert.ok(Array.isArray(pending[0].context.options));
+
+    // «Allow once» → allow_once (не always).
+    devinRuntime.permissions.resolve(request.requestId, { allow: true });
+    await runPromise;
+
+    const capture = JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8'));
+    const answer = capture.calls.find((c) => c.answer?.id === 900);
+    assert.ok(answer, 'agent got the permission response');
+    assert.equal(answer.answer.result.outcome.outcome, 'selected');
+    assert.equal(answer.answer.result.outcome.optionId, 'o-once');
+
+    // Ход после ответа дошёл до конца.
+    assert.equal(devinRuntime.permissions.listPending('app-perm-1').length, 0);
+    assert.ok(writer.messages.some((m) => m.content === 'AFTER-PERMISSION'));
+    assert.equal(writer.messages.filter((m) => m.kind === 'complete').length, 1);
+  });
+});
+
+test('devin runtime: deny → reject_once; remember → allow_always', async () => {
+  await withFakeDevin(async () => {
+    process.env.DEVIN_PERMISSION_TEST = '1';
+    const writer = makeWriter();
+    const runPromise = devinRuntime.run('Hi', { cwd: '/tmp', sessionId: 'app-perm-2' }, writer, runtimeContext);
+    const request = await waitFor(
+      () => writer.messages.find((m) => m.kind === 'permission_request'),
+      5000,
+      'permission_request event',
+    );
+
+    devinRuntime.permissions.resolve(request.requestId, { allow: false, message: 'no' });
+    await runPromise;
+    const capture = JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8'));
+    assert.equal(capture.calls.find((c) => c.answer?.id === 900)?.answer.result.outcome.optionId, 'o-reject');
+  });
+
+  await withFakeDevin(async () => {
+    process.env.DEVIN_PERMISSION_TEST = '1';
+    const writer = makeWriter();
+    const runPromise = devinRuntime.run('Hi', { cwd: '/tmp', sessionId: 'app-perm-3' }, writer, runtimeContext);
+    const request = await waitFor(
+      () => writer.messages.find((m) => m.kind === 'permission_request'),
+      5000,
+      'permission_request event',
+    );
+
+    devinRuntime.permissions.resolve(request.requestId, { allow: true, rememberEntry: 'Shell' });
+    await runPromise;
+    const capture = JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8'));
+    assert.equal(capture.calls.find((c) => c.answer?.id === 900)?.answer.result.outcome.optionId, 'o-always');
+  });
+});
+
+test('devin runtime: bypass auto-allows without touching the gateway', async () => {
+  await withFakeDevin(async () => {
+    process.env.DEVIN_PERMISSION_TEST = '1';
+    const writer = makeWriter();
+    await devinRuntime.run('Hi', {
+      cwd: '/tmp',
+      sessionId: 'app-perm-4',
+      permissionMode: 'bypassPermissions',
+    }, writer, runtimeContext);
+
+    assert.ok(!writer.messages.some((m) => m.kind === 'permission_request'), 'no UI request under bypass');
+    const capture = JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8'));
+    const answer = capture.calls.find((c) => c.answer?.id === 900);
+    assert.equal(answer?.answer.result.outcome.optionId, 'o-once', 'first allow_* picked');
+  });
+});
+
+test('devin supervisor: ход переживает разрыв клиента, запрос разрешения доезжает до нового', async () => {
+  await withFakeDevin(async () => {
+    // session/prompt висит, пока не ответят на session/request_permission.
+    process.env.DEVIN_PERMISSION_TEST = '1';
+
+    const { spawnSupervisedDevin, connectSupervisedDevin } = await import('./devin-acp-client.js');
+    const child = await spawnSupervisedDevin({
+      command: process.env.DEVIN_CLI_PATH,
+      args: ['acp'],
+      cwd: '/tmp',
+      env: process.env,
+    });
+    assert.ok(child.pid > 0, 'devin pid via supervisor');
+    assert.ok(child.socketPath.endsWith('.sock'));
+
+    const agentLines = [];
+    child.stdout.on('data', (chunk) => agentLines.push(String(chunk)));
+
+    const captureCalls = async () => {
+      try {
+        return JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8')).calls;
+      } catch {
+        return [];
+      }
+    };
+
+    // «Сервер»: рукопожатие + prompt → агент спрашивает разрешение и ждёт.
+    child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }) + '\n');
+    child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: '/tmp' } }) + '\n');
+    child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId: 'devin-sess-1', prompt: [] } }) + '\n');
+    await waitFor(async () => (await captureCalls()).some((c) => c.method === 'session/prompt'), 5000, 'prompt reached agent');
+    await waitFor(() => agentLines.join('').includes('session/request_permission'), 5000, 'permission request forwarded');
+
+    // «Смерть сервера»: сокет порвался — агент при этом должен жить,
+    // потому что prompt ещё не отвечён.
+    child.disconnect();
+    await new Promise((r) => setTimeout(r, 300));
+    try { process.kill(child.pid, 0); } catch { assert.fail('devin died on client disconnect'); }
+
+    // «Новый сервер»: переподключение — hello + повтор неотвеченного запроса.
+    const lines = [];
+    let turnEnded = false;
+    const link = await connectSupervisedDevin({
+      socketPath: child.socketPath,
+      onLine: (line) => lines.push(line),
+      onTurnEnd: () => { turnEnded = true; },
+    });
+    assert.equal(link.devinPid, child.pid);
+    assert.equal(link.promptInFlight, true, 'prompt still in flight');
+    await waitFor(() => lines.some((l) => l.includes('session/request_permission')), 5000, 'pending request replayed');
+
+    // Отвечаем разрешением — агент завершает prompt.
+    link.writeLine(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 900,
+      result: { outcome: { outcome: 'selected', optionId: 'o-once' } },
+    }));
+    await waitFor(() => turnEnded, 5000, 'turn_end after answer');
+    const calls = await captureCalls();
+    const answer = calls.find((c) => c.answer?.id === 900);
+    assert.equal(answer?.answer.result.outcome.optionId, 'o-once');
+
+    link.close();
+    // Ответный prompt закрыт, клиент отключён — супервизор добирает агента.
+    await waitFor(() => {
+      try { process.kill(child.pid, 0); return false; } catch { return true; }
+    }, 5000, 'agent reaped after disconnect without prompt');
+  });
 });

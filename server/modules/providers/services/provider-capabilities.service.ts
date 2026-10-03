@@ -79,9 +79,9 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     supportsImages: true,
     supportsFiles: true,
     supportsAbort: true,
-    // Permission prompts are auto-answered inside the ACP client (bypass →
-    // allow, anything else → decline); they never reach the UI.
-    supportsPermissionRequests: false,
+    // ACP session/request_permission goes to the UI via the permission
+    // gateway (bypass mode still auto-allows inside the runtime).
+    supportsPermissionRequests: true,
     // usage_update flows live into tokenBudget, but Devin's sessions.db does
     // not persist per-turn usage — no REST endpoint data.
     supportsTokenUsage: false,

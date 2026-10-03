@@ -153,7 +153,7 @@ export function spawnSurvivableClaude(spawnOptions, context = {}) {
  * делать — достаточно оставить запись, чтобы следующий сервер усыновил процесс.
  * Возвращает функцию снятия записи для нормального завершения хода.
  */
-export function registerProviderRun(child, { provider, appSessionId, providerSessionId }) {
+export function registerProviderRun(child, { provider, appSessionId, providerSessionId, extra }) {
   if (!child?.pid || !appSessionId) {
     return () => {};
   }
@@ -164,6 +164,9 @@ export function registerProviderRun(child, { provider, appSessionId, providerSes
     appSessionId,
     providerSessionId: providerSessionId || null,
     startedAt: Date.now(),
+    // Для Devin — путь к сокету супервизора и его pid: по ним новый сервер
+    // переподключается к живому ходу (devin-runtime reattachSurvivor).
+    ...(extra && typeof extra === 'object' ? extra : {}),
   });
 
   const onExit = () => {
@@ -380,9 +383,12 @@ function refreshPhase(survivor) {
  * `onPhase(appSessionId, phase)` — сменился этап работы (см. readTranscriptPhase),
  * `onGone(appSessionId)` — агент закончил.
  *
- * @param {{ onTranscriptChange?: (appSessionId: string) => void, onPhase?: (appSessionId: string, provider: string, phase: { phase: string, detail: string | null } | null) => void, onGone?: (appSessionId: string, provider: string) => void, pollMs?: number }} [options]
+ * `onAdopted(record)` — подробная запись пережившего запуска (pid, socketPath
+ * и т.п.): Devin по ней переподключается к супервизору живого хода.
+ *
+ * @param {{ onTranscriptChange?: (appSessionId: string) => void, onPhase?: (appSessionId: string, provider: string, phase: { phase: string, detail: string | null } | null) => void, onGone?: (appSessionId: string, provider: string) => void, onAdopted?: (record: object) => void, pollMs?: number }} [options]
  */
-export function adoptSurvivors({ onTranscriptChange = (_id) => {}, onPhase = (_id, _provider, _phase) => {}, onGone = (_id) => {}, pollMs = 3000 } = {}) {
+export function adoptSurvivors({ onTranscriptChange = (_id) => {}, onPhase = (_id, _provider, _phase) => {}, onGone = (_id) => {}, onAdopted = (_record) => {}, pollMs = 3000 } = {}) {
   shuttingDown = false;
   let files = [];
   try {
@@ -417,6 +423,11 @@ export function adoptSurvivors({ onTranscriptChange = (_id) => {}, onPhase = (_i
     }
     survivors.set(record.appSessionId, survivor);
     console.log(`[survivor-runs] чат ${record.appSessionId} пережил перезапуск (PID ${record.pid}), продолжаю показывать его работу`);
+    try {
+      onAdopted(record);
+    } catch (error) {
+      console.warn('[survivor-runs] onAdopted failed:', error?.message || error);
+    }
   }
 
   if (pollTimer) clearInterval(pollTimer);
@@ -466,6 +477,11 @@ export function listSurvivors() {
     sessionId: survivor.appSessionId,
     provider: survivor.provider || 'claude',
     startedAt: survivor.startedAt,
+    // Для Devin-переживших — реквизиты переподключения к супервизору.
+    pid: survivor.pid || null,
+    socketPath: survivor.socketPath || null,
+    runId: survivor.runId || null,
+    supervisorPid: survivor.supervisorPid || null,
     lastSeq: 0,
   }));
 }

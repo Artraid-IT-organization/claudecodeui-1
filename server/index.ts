@@ -20,6 +20,7 @@ import {
     closeSessionsWatcher,
     initializeSessionsWatcher,
     broadcastSessionUpserted,
+    providerRegistry,
     providerRuntimeService,
     startSessionActivitySync,
     stopSessionActivitySync,
@@ -589,6 +590,22 @@ async function startServer() {
                     // Агент, переживший перезапуск сайта, закончил — значит и
                     // очередь этого чата может идти дальше.
                     dispatchChatQueues();
+                },
+                // У пережившего рестарт Devin-хода есть живой супервизор:
+                // переподключаемся к его сокету, чтобы незакрытые запросы
+                // разрешений снова дошли до человека.
+                onAdopted: (record) => {
+                    const survivor = record as import('@/shared/types.js').ProviderSurvivorRecord | undefined;
+                    if (survivor?.provider !== 'devin') {
+                        return;
+                    }
+                    try {
+                        providerRegistry.resolveProvider('devin').runtime.reattachSurvivor?.(survivor, (message) => {
+                            broadcastRealtimeEvent(JSON.stringify(message), 'devin');
+                        });
+                    } catch (error) {
+                        console.warn('[survivor-runs] devin reattach failed:', error instanceof Error ? error.message : String(error));
+                    }
                 },
             });
 

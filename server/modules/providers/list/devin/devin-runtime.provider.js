@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 
 import {
   appendFilesInputTag,
@@ -9,6 +10,10 @@ import {
   noteSurvivorProviderSession,
   registerProviderRun,
 } from '@/modules/providers/list/claude/survivor-runs.js';
+import {
+  connectSupervisedDevin,
+  spawnSupervisedDevin,
+} from '@/modules/providers/list/devin/devin-acp-client.js';
 import {
   buildDevinChildEnv,
   createCompleteMessage,
@@ -25,6 +30,20 @@ import { mapPermissionModeToDevinMode } from '@/modules/providers/list/devin/dev
  * handler has already emitted one).
  */
 const activeDevinRuns = new Map();
+
+/**
+ * Незакрытые запросы разрешений Devin (permission gateway → UI).
+ * requestId → { requestId, sessionKey, toolName, input, options, receivedAt,
+ * respond, reattached }.
+ *
+ * `sessionKey` — app-session-id (как у claude: по нему chat.subscribe ищет
+ * ожидающие запросы). `respond` пишет JSON-RPC-ответ агенту — напрямую в
+ * соединение хода или через сокет супервизора у переподключённого чата.
+ */
+const pendingPermissions = new Map();
+
+/** Переподключённые после рестарта супервизор-линки по appSessionId. */
+const reattachedDevinSurvivors = new Map();
 
 /** How long `abort` lets Devin wind down before SIGKILLing it. */
 const ABORT_GRACE_MS = 3_000;
@@ -176,40 +195,165 @@ function createAcpConnection(child, { onNotification, onRequest, onClose }) {
 }
 
 /**
- * Answers an ACP `session/request_permission` request without a human.
- *
- * There is no permission UI for Devin chats yet: `bypass` picks the first
- * allow_* option; every other mode declines so nothing dangerous runs
- * unattended. A declined request surfaces in the chat as a tool error.
+ * ACP toolCall → имя для баннера разрешения: настоящее имя инструмента из
+ * `_meta`, иначе человекочитаемый заголовок (тот же приоритет, что и у
+ * tool_call в ленте — devin-sessions.provider.ts readToolName).
  */
-function answerPermissionRequest(request, devinMode, ws, sessionId) {
+function readPermissionToolName(toolCall) {
+  const meta = toolCall?._meta && typeof toolCall._meta === 'object' ? toolCall._meta : null;
+  const inferenceName = meta?.['cognition.ai/inferenceToolName'];
+  if (typeof inferenceName === 'string' && inferenceName.trim()) {
+    return inferenceName.trim();
+  }
+  // Живой запрос разрешения Devin несёт урезанный toolCall: без title/rawInput,
+  // только toolCallId + _meta.editableCommand с самой командой (замер 03.10.26).
+  const editable = meta?.['cognition.ai/editableCommand'];
+  if (typeof editable === 'string' && editable.trim()) {
+    return editable.trim().split(/\s+/)[0];
+  }
+  const title = toolCall?.title;
+  return (typeof title === 'string' && title.trim()) || 'Tool';
+}
+
+function readPermissionToolInput(toolCall) {
+  const input = toolCall?.rawInput;
+  if (input && typeof input === 'object' && Object.keys(input).length > 0) {
+    return input;
+  }
+  const editable = toolCall?._meta?.['cognition.ai/editableCommand'];
+  if (typeof editable === 'string' && editable.trim()) {
+    return { command: editable.trim() };
+  }
+  return {};
+}
+
+/**
+ * Выбор ACP-опции по решению человека (ProviderPermissionDecision):
+ * «Allow & remember» → allow_always, «Allow once» → allow_once,
+ * «Deny» → reject_once. Подходящей опции нет — «отмена» (агент получает
+ * cancelled и сам решает, как объяснить отказ).
+ */
+function pickAcpPermissionOutcome(options, decision) {
+  const allows = options.filter((option) => String(option?.kind || '').startsWith('allow_'));
+  const rejects = options.filter((option) => String(option?.kind || '').startsWith('reject_'));
+
+  if (decision?.allow) {
+    const preferred = decision.rememberEntry ? 'allow_always' : 'allow_once';
+    const pick = allows.find((option) => option?.kind === preferred) || allows[0];
+    return pick
+      ? { outcome: { outcome: 'selected', optionId: pick.optionId } }
+      : { outcome: { outcome: 'cancelled' } };
+  }
+
+  const pick = rejects.find((option) => option?.kind === 'reject_once') || rejects[0];
+  return pick
+    ? { outcome: { outcome: 'selected', optionId: pick.optionId } }
+    : { outcome: { outcome: 'cancelled' } };
+}
+
+/**
+ * Запрос `session/request_permission` от агента → человеку.
+ *
+ * Регистрирует ожидание в pendingPermissions (его забирает permission
+ * gateway), шлёт `permission_request` в ленту и возвращает requestId.
+ * Ответа у ACP нет по таймауту — агент ждёт, пока человек не решит
+ * (задокументированное поведение: «висеть до ответа — ок»).
+ */
+function registerPermissionRequest({ request, sessionKey, respond, ws, appSessionId, reattached }) {
   const params = request.params || {};
   const toolCall = params.toolCall || {};
   const options = Array.isArray(params.options) ? params.options : [];
-  const allow = options.find((option) => String(option?.kind || '').startsWith('allow_'));
-  const reject = options.find((option) => String(option?.kind || '').startsWith('reject_'));
+  const requestId = `devin-perm-${randomUUID()}`;
 
-  if (devinMode === 'bypass' && allow) {
-    return { outcome: { outcome: 'selected', optionId: allow.optionId } };
-  }
+  const entry = {
+    requestId,
+    sessionKey,
+    toolName: readPermissionToolName(toolCall),
+    input: readPermissionToolInput(toolCall),
+    options,
+    receivedAt: new Date(),
+    respond,
+    reattached: Boolean(reattached),
+  };
+  pendingPermissions.set(requestId, entry);
 
-  if (reject) {
+  if (ws) {
     sendMessage(ws, createNormalizedMessage({
       provider: 'devin',
-      sessionId,
-      kind: 'tool_use',
-      toolName: toolCall.title || 'Tool',
-      toolId: toolCall.toolCallId || undefined,
-      toolInput: toolCall.rawInput ?? {},
-      toolResult: {
-        content: `Permission declined automatically (Devin session mode "${devinMode || 'default'}"). Switch permission mode to bypass to allow.`,
-        isError: true,
-      },
+      sessionId: appSessionId,
+      kind: 'permission_request',
+      requestId,
+      toolName: entry.toolName,
+      input: entry.input,
+      context: { options, toolCallId: toolCall?.toolCallId || null },
     }));
-    return { outcome: { outcome: 'selected', optionId: reject.optionId } };
+  }
+  return entry;
+}
+
+/** Отменить незакрытые запросы конкретного хода/линка и снять баннер во вкладках. */
+function cancelPendingPermissions(sessionKey, ws, appSessionId, { reattachedOnly = false, respondCancelled = true } = {}) {
+  for (const [requestId, entry] of [...pendingPermissions]) {
+    if (entry.sessionKey !== sessionKey) {
+      continue;
+    }
+    if (reattachedOnly && !entry.reattached) {
+      continue;
+    }
+    pendingPermissions.delete(requestId);
+    if (respondCancelled) {
+      try {
+        entry.respond({ outcome: { outcome: 'cancelled' } });
+      } catch {
+        // процесс/сокет мёртв — отвечать некому
+      }
+    }
+    if (ws) {
+      sendMessage(ws, createNormalizedMessage({
+        provider: 'devin',
+        sessionId: appSessionId,
+        kind: 'permission_cancelled',
+        requestId,
+        reason: 'run_finished',
+      }));
+    }
+  }
+}
+
+/**
+ * Ответ на ACP `session/request_permission` внутри живого хода.
+ *
+ * `bypass` — первый allow_* без человека (режим и так «не спрашивать»).
+ * Остальные режимы — запрос уходит в UI (permission_request + gateway);
+ * агент стоит, пока человек не ответит. Опций нет вовсе — отмена сразу.
+ */
+function answerPermissionRequest(request, devinMode, ws, sessionId, run, connection) {
+  const params = request.params || {};
+  const options = Array.isArray(params.options) ? params.options : [];
+
+  if (devinMode === 'bypass') {
+    const allow = options.find((option) => String(option?.kind || '').startsWith('allow_'));
+    if (allow) {
+      return { outcome: { outcome: 'selected', optionId: allow.optionId } };
+    }
+    return { outcome: { outcome: 'cancelled' } };
   }
 
-  return { outcome: { outcome: 'cancelled' } };
+  if (options.length === 0) {
+    return { outcome: { outcome: 'cancelled' } };
+  }
+
+  const sessionKey = run?.sessionKey || sessionId;
+  registerPermissionRequest({
+    request,
+    sessionKey,
+    respond: (result) => connection.respond(request.id, result),
+    ws,
+    appSessionId: sessionId,
+    reattached: false,
+  });
+  // Ответ уйдёт позже через gateway — сейчас агент просто ждёт.
+  return null;
 }
 
 /**
@@ -247,6 +391,7 @@ async function queryDevin(command, options = {}, ws, context) {
   const run = {
     child: null,
     connection: null,
+    writer: ws,
     devinSessionId: providerSessionId || null,
     aborted: false,
     muted: false,
@@ -257,6 +402,7 @@ async function queryDevin(command, options = {}, ws, context) {
     finishRun: null,
   };
   const sessionKey = sessionId || providerSessionId;
+  run.sessionKey = sessionKey;
   if (sessionKey) {
     activeDevinRuns.set(sessionKey, run);
   }
@@ -280,11 +426,28 @@ async function queryDevin(command, options = {}, ws, context) {
     args.push('--model', resolvedModel);
   }
 
-  const child = spawn(resolveDevinCliCommand(), args, {
-    cwd: workingDirectory,
-    env: childEnv,
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
+  // Агент поднимается под супервизором (devin-acp-supervisor): stdin держит
+  // он, поэтому ход переживает перезапуск сервера — новый сервер находит
+  // сокет по записи live-runs и продолжает отвечать на запросы агента.
+  // Супервизор не поднялся — обычный spawn: ход работает, просто не
+  // переживёт рестарт (поведение первой фазы).
+  const devinCommand = resolveDevinCliCommand();
+  let child;
+  try {
+    child = await spawnSupervisedDevin({
+      command: devinCommand,
+      args,
+      cwd: workingDirectory,
+      env: childEnv,
+    });
+  } catch (supervisorError) {
+    console.warn('[Devin] supervisor unavailable, direct spawn:', supervisorError?.message || supervisorError);
+    child = spawn(devinCommand, args, {
+      cwd: workingDirectory,
+      env: childEnv,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  }
   run.child = child;
 
   // Without an 'error' listener a spawn ENOENT (no devin CLI on PATH) is an
@@ -301,11 +464,17 @@ async function queryDevin(command, options = {}, ws, context) {
   }
 
   // The agent survives a site restart: the record lets the next server adopt
-  // this process and keep the chat marked busy (survivor-runs.js).
+  // this process and keep the chat marked busy (survivor-runs.js). Сокет
+  // супервизора в записи — чтобы новый сервер переподключился к живому ходу.
   run.unregisterSurvivor = registerProviderRun(child, {
     provider: 'devin',
     appSessionId: sessionKey || null,
     providerSessionId: providerSessionId || null,
+    extra: {
+      socketPath: child.socketPath || null,
+      runId: child.runId || null,
+      supervisorPid: child.supervisorPid || null,
+    },
   });
 
   const finish = (exitCode, aborted) => {
@@ -313,6 +482,10 @@ async function queryDevin(command, options = {}, ws, context) {
       return; // exactly one `complete` per turn
     }
     run.finishRun = true;
+
+    // Ход кончился — висящие запросы разрешений гасим, чтобы баннеры во
+    // вкладках не остались навсегда, а агент (если жив) получил cancelled.
+    cancelPendingPermissions(sessionKey, ws, sessionId || run.devinSessionId);
 
     if (run.unregisterSurvivor) {
       run.unregisterSurvivor();
@@ -371,7 +544,10 @@ async function queryDevin(command, options = {}, ws, context) {
 
       onRequest: (msg) => {
         if (msg.method === 'session/request_permission') {
-          connection.respond(msg.id, answerPermissionRequest(msg, devinMode, ws, sessionId || run.devinSessionId));
+          const result = answerPermissionRequest(msg, devinMode, ws, sessionId || run.devinSessionId, run, connection);
+          if (result) {
+            connection.respond(msg.id, result);
+          }
           return;
         }
         // fs/*, terminal/*, unknown agent requests: politely decline so the
@@ -576,6 +752,9 @@ export const devinRuntime = {
     }
 
     run.aborted = true;
+    // Человек нажал «стоп» — ждущие разрешения отменяем сразу, не дожидаясь
+    // конца grace-периода: баннер исчезает, агент получает cancelled.
+    cancelPendingPermissions(sessionId, run.writer, sessionId || run.devinSessionId);
     if (run.devinSessionId && run.connection) {
       run.connection.notify('session/cancel', { sessionId: run.devinSessionId });
     }
@@ -594,4 +773,194 @@ export const devinRuntime = {
 
     return true;
   },
+
+  /**
+   * Permission gateway: `chat.permission-response` из UI приходит сюда через
+   * providerRuntimeService, `chat.subscribe` забирает ожидающие listPending'ом.
+   */
+  permissions: {
+    resolve(requestId, decision) {
+      const entry = pendingPermissions.get(requestId);
+      if (!entry) {
+        return;
+      }
+      pendingPermissions.delete(requestId);
+      try {
+        entry.respond(pickAcpPermissionOutcome(entry.options, decision));
+      } catch {
+        // агент/сокет уже мёртв — отвечать некому
+      }
+      // Ответ ушёл — у переподключённого линка больше может не быть
+      // незакрытых запросов: если prompt уже кончился, линк ни к чему.
+      maybeReleaseReattach(entry.sessionKey);
+    },
+    listPending(sessionId) {
+      const pending = [];
+      for (const entry of pendingPermissions.values()) {
+        if (entry.sessionKey === sessionId) {
+          pending.push({
+            requestId: entry.requestId,
+            toolName: entry.toolName,
+            input: entry.input,
+            context: { options: entry.options },
+            sessionId,
+            receivedAt: entry.receivedAt,
+          });
+        }
+      }
+      return pending;
+    },
+  },
+
+  /**
+   * Переподключение к ходу, пережившему рестарт сервера (survivor-запись с
+   * socketPath супервизора). Поднимает незакрытые запросы агента — в первую
+   * очередь session/request_permission — обратно в pendingPermissions, чтобы
+   * человек мог ответить уже из нового сервера. `emit` — рассылка живого
+   * permission_request подписанным вкладкам (запросы, пришедшие после
+   * переподключения).
+   */
+  reattachSurvivor(record, emit) {
+    void reattachDevinSurvivor(record, emit).catch((error) => {
+      console.warn('[Devin] reattach survivor failed:', error?.message || error);
+    });
+  },
 };
+
+/**
+ * Если у переподключённого чата не осталось незакрытых запросов и prompt уже
+ * завершён — линк закрываем: супервизор по отключению без prompt'а уберёт
+ * простаивающего агента (то же, что делает конец хода).
+ */
+function maybeReleaseReattach(sessionKey) {
+  const state = sessionKey ? reattachedDevinSurvivors.get(sessionKey) : null;
+  if (!state || !state.link || state.closed) {
+    return;
+  }
+  const stillPending = [...pendingPermissions.values()].some((entry) => entry.sessionKey === sessionKey);
+  if (!stillPending && !state.link.promptInFlight) {
+    closeReattach(state);
+  }
+}
+
+function closeReattach(state) {
+  if (state.closed) {
+    return;
+  }
+  state.closed = true;
+  reattachedDevinSurvivors.delete(state.sessionKey);
+  try {
+    state.link?.close();
+  } catch {
+    // уже закрыт
+  }
+}
+
+/**
+ * Само переподключение: супервизор повторяет неотвеченные запросы агента
+ * ({c:'req'}) и дальше шлёт новые строки stdout ({c:'out'}). На каждый
+ * session/request_permission — запись в pendingPermissions + живое событие
+ * через emit; прочим запросам агента — вежливый отказ, как в ходе.
+ * Линк живёт до конца prompt'а (turn_end/exit) — новые запросы могут
+ * прийти в любой момент идущего хода.
+ */
+async function reattachDevinSurvivor(record, emit) {
+  const sessionKey = record?.appSessionId;
+  const socketPath = record?.socketPath;
+  if (!sessionKey || !socketPath || reattachedDevinSurvivors.has(sessionKey)) {
+    return;
+  }
+
+  const state = {
+    sessionKey,
+    link: null,
+    closed: false,
+    seenAcpRequestIds: new Set(),
+  };
+  reattachedDevinSurvivors.set(sessionKey, state);
+
+  let link;
+  try {
+    link = await connectSupervisedDevin({
+    socketPath,
+    onLine(line) {
+      let msg;
+      try {
+        msg = JSON.parse(line);
+      } catch {
+        return;
+      }
+      if (!msg || msg.method === undefined || msg.id === undefined) {
+        return; // ответы и уведомления — не наше дело, история в sessions.db
+      }
+      if (state.seenAcpRequestIds.has(msg.id)) {
+        return;
+      }
+      state.seenAcpRequestIds.add(msg.id);
+
+      if (msg.method === 'session/request_permission') {
+        const options = Array.isArray(msg.params?.options) ? msg.params.options : [];
+        const entry = registerPermissionRequest({
+          request: msg,
+          sessionKey,
+          respond: (result) => link.writeLine(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result })),
+          ws: null,
+          appSessionId: sessionKey,
+          reattached: true,
+        });
+        // Живой баннер для уже открытой вкладки (subscribe отдаст pending
+        // только при следующей подписке).
+        if (typeof emit === 'function' && options.length > 0) {
+          try {
+            emit(createNormalizedMessage({
+              provider: 'devin',
+              sessionId: sessionKey,
+              kind: 'permission_request',
+              requestId: entry.requestId,
+              toolName: entry.toolName,
+              input: entry.input,
+              context: { options },
+            }));
+          } catch {
+            // рассылка не удалась — запрос всё равно виден по listPending
+          }
+        }
+        return;
+      }
+      // fs/*, terminal/*, неизвестные запросы агента — вежливый отказ.
+      link.writeLine(JSON.stringify({
+        jsonrpc: '2.0',
+        id: msg.id,
+        error: { code: -32601, message: `cc2 does not implement ${msg.method}` },
+      }));
+    },
+    onTurnEnd() {
+      // Ход кончился: незакрытые запросы гасим и отпускаем агента — по
+      // отключении без prompt'а супервизор его уберёт.
+      cancelPendingPermissions(sessionKey, null, sessionKey, { reattachedOnly: true });
+      closeReattach(state);
+    },
+    onExit() {
+      cancelPendingPermissions(sessionKey, null, sessionKey, { reattachedOnly: true, respondCancelled: false });
+      closeReattach(state);
+    },
+    onClose() {
+      cancelPendingPermissions(sessionKey, null, sessionKey, { reattachedOnly: true, respondCancelled: false });
+      closeReattach(state);
+    },
+    });
+  } catch (error) {
+    // Сокет не открылся — супервизор мёртв, запись протухла. Убрать отметку,
+    // иначе повторная попытка никогда не случится.
+    reattachedDevinSurvivors.delete(sessionKey);
+    throw error;
+  }
+  state.link = link;
+
+  // Если в момент подключения ни prompt'а, ни незакрытых запросов — линк не
+  // нужен: простаивающего агента супервизор уберёт по нашему отключению.
+  const hasPending = [...pendingPermissions.values()].some((entry) => entry.sessionKey === sessionKey);
+  if (!hasPending && !link.promptInFlight) {
+    closeReattach(state);
+  }
+}
