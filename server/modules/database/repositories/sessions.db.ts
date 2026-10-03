@@ -1,6 +1,7 @@
 import { getConnection } from '@/modules/database/connection.js';
 import { appConfigDb } from '@/modules/database/repositories/app-config.js';
 import { getActiveAccountDir, type SessionOrigin } from '@/shared/session-scope.js';
+import { getRequestRuntimeContext } from '@/shared/request-context.js';
 import { projectsDb } from '@/modules/database/repositories/projects.db.js';
 import type { ServerScope, SessionTitleSource } from '@/shared/types.js';
 import { normalizeProjectPath } from '@/shared/utils.js';
@@ -33,6 +34,12 @@ type SessionRow = {
   server_scope: ServerScope | null;
   /** Ярлык-флажок на чате: 1 — висит, 0 — нет. */
   is_flagged: number;
+  /** Каталог аккаунта, которому принадлежит чат (изоляция пользователей). */
+  account_dir: string | null;
+  /** Кто из веб-пользователей инициировал чат (NULL у наследия и у строк с диска). */
+  initiated_by_user_id: number | null;
+  /** devin_connections.id — канал, через который идёт devin-чат. */
+  devin_connection_id: number | null;
   isArchived: number;
   created_at: string;
   updated_at: string;
@@ -44,7 +51,7 @@ type RecentSessionsPage = {
 };
 
 const SESSION_ROW_COLUMNS =
-  'session_id, provider, provider_session_id, project_path, jsonl_path, custom_name, title_source, model, effort, group_id, group_label, server_scope, is_flagged, isArchived, created_at, updated_at';
+  'session_id, provider, provider_session_id, project_path, jsonl_path, custom_name, title_source, model, effort, group_id, group_label, server_scope, is_flagged, account_dir, initiated_by_user_id, devin_connection_id, isArchived, created_at, updated_at';
 
 /**
  * Decides whether a freshly-derived title candidate should replace the
@@ -302,12 +309,37 @@ export const sessionsDb = {
 
     projectsDb.createProjectPath(normalizedProjectPath);
 
+    // Атрибуция: чат создаётся HTTP-роутом внутри request-контекста, поэтому
+    // id веб-пользователя доступен здесь без изменения сигнатур выше по стеку.
+    const rawUserId = getRequestRuntimeContext()?.userId;
+    const initiatedByUserId = rawUserId === null || rawUserId === undefined
+      ? null
+      : Number(rawUserId);
+
     db.prepare(
-      `INSERT INTO sessions (session_id, provider, provider_session_id, custom_name, title_source, project_path, jsonl_path, account_dir, origin, isArchived, created_at, updated_at)
-       VALUES (?, ?, NULL, ?, 'naive', ?, NULL, ?, 'web', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-    ).run(sessionId, provider, customName ?? null, normalizedProjectPath, getActiveAccountDir());
+      `INSERT INTO sessions (session_id, provider, provider_session_id, custom_name, title_source, project_path, jsonl_path, account_dir, origin, initiated_by_user_id, isArchived, created_at, updated_at)
+       VALUES (?, ?, NULL, ?, 'naive', ?, NULL, ?, 'web', ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+    ).run(
+      sessionId,
+      provider,
+      customName ?? null,
+      normalizedProjectPath,
+      getActiveAccountDir(),
+      Number.isFinite(initiatedByUserId) ? initiatedByUserId : null,
+    );
 
     return sessionId;
+  },
+
+  /**
+   * Прибивает devin-чат к корпоративному каналу (devin_connections.id).
+   * Ставится рантаймом в момент session/new и при resume: канал чата не
+   * меняется — sessions.db живёт внутри каталога канала.
+   */
+  setSessionDevinConnection(sessionId: string, connectionId: number | null): void {
+    getConnection()
+      .prepare('UPDATE sessions SET devin_connection_id = ?, updated_at = CURRENT_TIMESTAMP WHERE session_id = ?')
+      .run(connectionId, sessionId);
   },
 
   /**

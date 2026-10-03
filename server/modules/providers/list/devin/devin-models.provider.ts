@@ -4,7 +4,7 @@ import path from 'node:path';
 
 import spawn from 'cross-spawn';
 
-import { sessionsDb } from '@/modules/database/index.js';
+import { devinConnectionsDb, sessionsDb } from '@/modules/database/index.js';
 import type { IProviderModels } from '@/shared/interfaces.js';
 import type {
   AnyRecord,
@@ -13,6 +13,7 @@ import type {
   ProviderModelsDefinition,
 } from '@/shared/types.js';
 import {
+  getDevinDatabasePath,
   readObjectRecord,
   readOptionalString,
   resolveDevinCliCommand,
@@ -83,11 +84,20 @@ function parseDevinModelsCatalog(raw: unknown): ProviderModelOption[] {
 }
 
 function readDevinModelsFromCli(): ProviderModelOption[] {
+  // Каталог моделей одинаков для всех каналов одной подписки — спрашиваем его
+  // у первого годного (Connection Layer), legacy-дефолт — запасной ответ.
+  const usable = devinConnectionsDb.list().find(
+    (conn) => conn.enabled && conn.health_status !== 'auth_failed',
+  );
   const result = spawn.sync(resolveDevinCliCommand(), ['models', 'list', '--format', 'json'], {
     encoding: 'utf8',
     timeout: CATALOG_TIMEOUT_MS,
     maxBuffer: 4 * 1024 * 1024,
-    env: { ...process.env, PATH: `${path.join(os.homedir(), '.local', 'bin')}:${process.env.PATH || ''}` },
+    env: {
+      ...process.env,
+      PATH: `${path.join(os.homedir(), '.local', 'bin')}:${process.env.PATH || ''}`,
+      ...(usable ? { XDG_DATA_HOME: usable.xdg_data_home } : {}),
+    },
   });
   if (result.error || result.status !== 0 || !result.stdout) {
     return [];
@@ -99,9 +109,14 @@ function readDevinModelsFromCli(): ProviderModelOption[] {
   }
 }
 
-/** Reads the model stored on a Devin session row (`sessions.model`). */
+/** Reads the model stored on a Devin session row (`sessions.model`) — из базы канала чата. */
 function readSessionModel(sessionId: string): string | null {
-  const db = openDevinDatabase();
+  const row = sessionsDb.getSessionById(sessionId)
+    ?? sessionsDb.getSessionByProviderSessionId(sessionId);
+  const connXdg = row?.devin_connection_id != null
+    ? devinConnectionsDb.getById(row.devin_connection_id)?.xdg_data_home
+    : null;
+  const db = openDevinDatabase(getDevinDatabasePath(connXdg ?? null));
   if (!db) {
     return null;
   }

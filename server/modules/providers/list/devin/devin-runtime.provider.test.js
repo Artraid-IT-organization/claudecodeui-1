@@ -4,6 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import { closeConnection } from '@/modules/database/connection.js';
+import { initializeDatabase } from '@/modules/database/init-db.js';
+import { devinConnectionsDb } from '@/modules/database/index.js';
 import { devinRuntime } from './devin-runtime.provider.js';
 import { DevinSessionsProvider, mapPermissionModeToDevinMode } from './devin-sessions.provider.js';
 
@@ -129,22 +132,41 @@ async function withFakeDevin(fn) {
   const previousPermTest = process.env.DEVIN_PERMISSION_TEST;
   const previousRunsDir = process.env.CLOUDCLI_DEVIN_RUNS_DIR;
   const previousLiveRuns = process.env.CLOUDCLI_LIVE_RUNS_DIR;
+  const previousDbPath = process.env.DATABASE_PATH;
   const shim = await createFakeDevinExecutable(tempRoot);
   process.env.DEVIN_CLI_PATH = shim;
   process.env.DEVIN_RPC_CAPTURE = path.join(tempRoot, 'rpc.json');
   // Супервизор и live-runs пишут в свои каталоги — в тестах они во временных.
   process.env.CLOUDCLI_DEVIN_RUNS_DIR = path.join(tempRoot, 'devin-runs');
   process.env.CLOUDCLI_LIVE_RUNS_DIR = path.join(tempRoot, 'live-runs');
+
+  // Connection Layer читает sessions/devin_connections — изолированная база.
+  closeConnection();
+  process.env.DATABASE_PATH = path.join(tempRoot, 'auth.db');
+  await initializeDatabase();
+  // Тестовый канал с собственным XDG_DATA_HOME: креда там есть (содержимое
+  // неважно — CLI подменён), рантайм выберет его первым годным.
+  const connXdg = path.join(tempRoot, 'conn-xdg');
+  await writeFile(path.join(tempRoot, 'creds.toml'), 'windsurf_api_key = "test"\n', 'utf8');
+  const fsSync = await import('node:fs');
+  fsSync.mkdirSync(path.join(connXdg, 'devin'), { recursive: true });
+  fsSync.writeFileSync(path.join(connXdg, 'devin', 'credentials.toml'), 'windsurf_api_key = "test"\n');
+  devinConnectionsDb.create({ name: 'test-conn', xdgDataHome: connXdg });
+
   try {
     await fn(tempRoot);
   } finally {
+    closeConnection();
     if (previousCliPath === undefined) delete process.env.DEVIN_CLI_PATH; else process.env.DEVIN_CLI_PATH = previousCliPath;
     if (previousCapture === undefined) delete process.env.DEVIN_RPC_CAPTURE; else process.env.DEVIN_RPC_CAPTURE = previousCapture;
     if (previousHang === undefined) delete process.env.DEVIN_HANG; else process.env.DEVIN_HANG = previousHang;
     if (previousPermTest === undefined) delete process.env.DEVIN_PERMISSION_TEST; else process.env.DEVIN_PERMISSION_TEST = previousPermTest;
     if (previousRunsDir === undefined) delete process.env.CLOUDCLI_DEVIN_RUNS_DIR; else process.env.CLOUDCLI_DEVIN_RUNS_DIR = previousRunsDir;
     if (previousLiveRuns === undefined) delete process.env.CLOUDCLI_LIVE_RUNS_DIR; else process.env.CLOUDCLI_LIVE_RUNS_DIR = previousLiveRuns;
-    await rm(tempRoot, { recursive: true, force: true });
+    if (previousDbPath === undefined) delete process.env.DATABASE_PATH; else process.env.DATABASE_PATH = previousDbPath;
+    // Супервизор может дописывать свои файлы в devin-runs чуть позже нас —
+    // rm без ретраев падает с ENOTEMPTY.
+    await rm(tempRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 

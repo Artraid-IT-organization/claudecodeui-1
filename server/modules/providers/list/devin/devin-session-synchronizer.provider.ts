@@ -4,10 +4,11 @@ import path from 'node:path';
 
 import Database from 'better-sqlite3';
 
-import { sessionsDb } from '@/modules/database/index.js';
+import { devinConnectionsDb, sessionsDb } from '@/modules/database/index.js';
 import type { IProviderSessionSynchronizer } from '@/shared/interfaces.js';
 import {
   getDevinDatabasePath,
+  getDevinDataDir,
   normalizeProviderTimestamp,
   normalizeSessionName,
   readOptionalString,
@@ -41,12 +42,14 @@ function getMachineAccountDir(): string {
 }
 
 /**
- * Session indexer for Devin's shared `sessions.db` (`~/.local/share/devin/cli`).
+ * Session indexer for Devin's `sessions.db` files. С Connection Layer база —
+ * одна на канал (`<xdg_data_home канала>/devin/cli/sessions.db`), поэтому
+ * synchronize() обходит все включённые каналы, а watcher-событие резолвится в
+ * канал по пути файла.
  *
- * Devin sessions are machine-global (the CLI has one credential per host), so
- * indexed rows are stamped with the owner's account dir — under
- * OPEN_REGISTRATION guests never see another user's Devin history, same as
- * they cannot run the provider (see the /devin route gate).
+ * Машинные (CLI-созданные) сессии штампуются каталогом владельца; у уже
+ * известных чатов account_dir НЕ перетираем — у веб-чата свой автор, и
+ * перештамповка отняла бы его у инициатора.
  */
 export class DevinSessionSynchronizer implements IProviderSessionSynchronizer {
   private readonly provider = 'devin' as const;
@@ -55,12 +58,23 @@ export class DevinSessionSynchronizer implements IProviderSessionSynchronizer {
    * Scans the Devin session table and upserts non-hidden sessions into DB.
    */
   async synchronize(since?: Date): Promise<number> {
-    const result = this.synchronizeRows(since);
-    return result.processed;
+    // Обход всех включённых каналов + машинный дефолт (наследие до Layer'а).
+    const dataDirs = new Set<string>([getDevinDataDir()]);
+    for (const conn of devinConnectionsDb.list()) {
+      if (conn.enabled) {
+        dataDirs.add(getDevinDataDir(conn.xdg_data_home));
+      }
+    }
+    let processed = 0;
+    for (const dir of dataDirs) {
+      processed += this.synchronizeRows(since, undefined, dir).processed;
+    }
+    return processed;
   }
 
   /**
    * Handles watcher changes for `sessions.db` (and its -wal sibling).
+   * Канал резолвится по пути файла: чужие базы под тем же именем не трогаем.
    */
   async synchronizeFile(filePath: string): Promise<string | null> {
     const base = path.basename(filePath);
@@ -68,12 +82,14 @@ export class DevinSessionSynchronizer implements IProviderSessionSynchronizer {
       return null;
     }
 
-    const result = this.synchronizeRows(undefined, 1);
+    const result = this.synchronizeRows(undefined, 1, path.dirname(path.dirname(filePath)));
     return result.firstSessionId;
   }
 
-  private synchronizeRows(since?: Date, limit?: number): SynchronizeRowsResult {
-    const dbPath = getDevinDatabasePath();
+  private synchronizeRows(since?: Date, limit?: number, dataDir?: string): SynchronizeRowsResult {
+    const dbPath = dataDir
+      ? path.join(dataDir, 'cli', 'sessions.db')
+      : getDevinDatabasePath();
     if (!fsSync.existsSync(dbPath)) {
       return { processed: 0, firstSessionId: null };
     }
@@ -150,7 +166,9 @@ export class DevinSessionSynchronizer implements IProviderSessionSynchronizer {
       : readOptionalString(row.title);
 
     // sessions.db is shared storage — jsonl_path must stay null so deleting an
-    // app session never removes other sessions' history.
+    // app session never removes other sessions' history. account_dir: у уже
+    // известной строки оставляем как есть (COALESCE(?, account_dir) — NULL
+    // не трогает), у новой CLI-строки авторства нет — это каталог владельца.
     return sessionsDb.createSession(
       sessionId,
       this.provider,
@@ -160,7 +178,7 @@ export class DevinSessionSynchronizer implements IProviderSessionSynchronizer {
       normalizeProviderTimestamp(row.last_activity_at ?? row.created_at),
       null,
       undefined,
-      { accountDir: getMachineAccountDir(), origin: 'terminal' },
+      { accountDir: existingSession?.account_dir ? null : getMachineAccountDir(), origin: 'terminal' },
     );
   }
 }

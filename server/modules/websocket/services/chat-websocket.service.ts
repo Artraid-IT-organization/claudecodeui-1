@@ -240,17 +240,6 @@ async function handleChatSend(
 
   const openRegistrationContext = resolveWebUserRuntimeContext(userId);
   const numericUserId = userId !== null ? Number(userId) : NaN;
-  // Devin credentials are machine-global — guests on OPEN_REGISTRATION never run it.
-  if (OPEN_REGISTRATION && provider === 'devin' && !isPlatformOwnerWebUser(numericUserId)) {
-    sendProtocolError(
-      ws,
-      'PROVIDER_NOT_ALLOWED',
-      'The Devin provider is only available to the platform owner.',
-      sessionId,
-      clientMessageId,
-    );
-    return;
-  }
   // Owner bypass: when the owner's ~/.claude-webuser-<id> is symlinked to
   // their real ~/.claude, the SDK authenticates via the existing OAuth session
   // in that directory — no explicit API key is needed or stored.
@@ -555,9 +544,10 @@ function broadcastJson(payload: unknown): void {
 }
 
 /**
- * Devin sessions may only exist for the platform owner — a guest's socket must
- * not observe, subscribe to, abort, or queue-edit one. The check keys off the
- * stored session row: no row → nothing to gate (handlers fail their own way).
+ * Devin-чат — собственность инициировавшего пользователя (как и любой чат):
+ * чужой сокет не должен наблюдать его поток, отвечать на его permission-
+ * запросы, останавливать его или править очередь. Наследие без автора —
+ * только владельцу площадки. Нет строки — гейтить нечего.
  */
 function isDevinSessionForbiddenForUser(
   sessionId: string | null | undefined,
@@ -571,7 +561,12 @@ function isDevinSessionForbiddenForUser(
     return false;
   }
   const numericUserId = userId === null || userId === undefined ? NaN : Number(userId);
-  return !Number.isFinite(numericUserId) || !isPlatformOwnerWebUser(numericUserId);
+  if (Number.isFinite(numericUserId) && isPlatformOwnerWebUser(numericUserId)) {
+    return false;
+  }
+  return !Number.isFinite(numericUserId)
+    || session.initiated_by_user_id == null
+    || Number(session.initiated_by_user_id) !== numericUserId;
 }
 
 /**
@@ -603,11 +598,6 @@ async function runQueuedChatMessage(
   const userId = message.userId;
   const runtimeContext = resolveWebUserRuntimeContext(userId);
   const numericUserId = userId !== null ? Number(userId) : NaN;
-  // Devin — только владелец площадки; очередь не должна быть обходом гейта.
-  if (OPEN_REGISTRATION && provider === 'devin' && !isPlatformOwnerWebUser(numericUserId)) {
-    console.warn(`[Очередь чата] devin для не-владельца ${String(userId)} — сообщение ${message.id} отброшено`);
-    return true;
-  }
   if (
     OPEN_REGISTRATION
     && provider === 'claude'

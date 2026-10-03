@@ -1025,9 +1025,13 @@ export function unwrapJsonStringLiteral(value: string): string {
  * `~/.local/share/devin`). Devin keeps a single shared `sessions.db` plus
  * `transcripts/` under `cli/` inside it — provider readers use this root and
  * must never hand it out as a deletable per-session transcript path.
+ *
+ * `xdgDataHomeOverride` — Devin Connection Layer: у корпоративного канала
+ * (devin_connections.xdg_data_home) свой XDG_DATA_HOME, значит свои креды и
+ * своя sessions.db. Без параметра — машинный дефолт (legacy-канал).
  */
-export function getDevinDataDir(): string {
-  const xdgDataHome = process.env.XDG_DATA_HOME?.trim();
+export function getDevinDataDir(xdgDataHomeOverride?: string | null): string {
+  const xdgDataHome = xdgDataHomeOverride?.trim() || process.env.XDG_DATA_HOME?.trim();
   return path.join(xdgDataHome || path.join(os.homedir(), '.local', 'share'), 'devin');
 }
 
@@ -1036,8 +1040,20 @@ export function getDevinDataDir(): string {
  * Like OpenCode's `opencode.db`, it is shared across every Devin session on
  * this account — read-only access only.
  */
-export function getDevinDatabasePath(): string {
-  return path.join(getDevinDataDir(), 'cli', 'sessions.db');
+export function getDevinDatabasePath(xdgDataHomeOverride?: string | null): string {
+  return path.join(getDevinDataDir(xdgDataHomeOverride), 'cli', 'sessions.db');
+}
+
+/**
+ * Корень каталогов корпоративных Devin-каналов. Каждый канал живёт в
+ * `<root>/<id>` как самостоятельный XDG_DATA_HOME: `<root>/<id>/devin/
+ * credentials.toml` (0600, каталоги 0700), `<root>/<id>/devin/cli/sessions.db`.
+ * Legacy-канал (машинный `~/.local/share`) здесь не создаётся — он указывает
+ * на общий домашний каталог.
+ */
+export function getDevinConnectionsRoot(): string {
+  const configured = process.env.DEVIN_CONNECTIONS_ROOT?.trim();
+  return configured || path.join(os.homedir(), '.cloudcli-shared', 'devin-connections');
 }
 
 /**
@@ -1071,13 +1087,21 @@ export function resolveDevinCliCommand(): string {
  * Spawns a helper that makes child `devin` processes resolvable even under a
  * minimal PATH: the child's PATH gains the well-known user bin dirs so tools
  * Devin itself shells out to (and Devin's own subprocess lookups) still work.
+ *
+ * `xdgDataHome` — Devin Connection Layer: выбранный корпоративный канал
+ * получает свой XDG_DATA_HOME (свои креды и sessions.db). NULL/undefined
+ * оставляет машинный дефолт — поведение до Connection Layer.
  */
-export function buildDevinChildEnv(): Record<string, string | undefined> {
+export function buildDevinChildEnv(xdgDataHome?: string | null): Record<string, string | undefined> {
   const home = os.homedir();
   const extraPath = [path.join(home, '.local', 'bin'), path.join(home, 'bin')];
   const currentPath = process.env.PATH || '';
   const augmentedPath = [...extraPath, currentPath].join(path.delimiter);
-  return { ...process.env, PATH: augmentedPath };
+  const env: Record<string, string | undefined> = { ...process.env, PATH: augmentedPath };
+  if (xdgDataHome) {
+    env.XDG_DATA_HOME = xdgDataHome;
+  }
+  return env;
 }
 
 // ---------------------------

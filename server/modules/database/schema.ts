@@ -149,6 +149,12 @@ CREATE TABLE IF NOT EXISTS sessions (
     -- Ярлык-флажок на чате (меню «…» → «Повесить ярлык»). Только метка:
     -- порядок чатов от него не меняется.
     is_flagged INTEGER NOT NULL DEFAULT 0,
+    -- Атрибуция: какой веб-пользователь инициировал чат (nullable —
+    -- наследие и строки, найденные наблюдателем на диске, автора не знают).
+    initiated_by_user_id INTEGER,
+    -- Через какой корпоративный канал Devin идёт чат (devin_connections.id).
+    -- NULL — всё, что не devin, и devin-чаты до появления Connection Layer.
+    devin_connection_id INTEGER,
     isArchived BOOLEAN DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -237,6 +243,36 @@ CREATE TABLE IF NOT EXISTS invite_tokens (
 );
 `;
 
+/**
+ * Корпоративные подключения Devin (Connection Layer).
+ *
+ * Одна строка = один серверный канал к Devin: каталог `xdg_data_home` — это
+ * XDG_DATA_HOME процесса `devin acp`, то есть у каждого подключения своё
+ * `credentials.toml`, своя `cli/sessions.db` и свои транскрипты. Сама креда в
+ * таблице НЕ хранится — только путь к каталогу и метаданные; файл кредов
+ * лежит на диске с правами 0600 в каталоге 0700.
+ *
+ * Выбор на запуск: `enabled=1`, вне cooldown, минимальный `priority`.
+ * `health_status`: 'ok' | 'auth_failed' | 'rate_limited' | 'error' | 'unknown';
+ * 'auth_failed' снимается только заменой креды, остальные — временем/успехом.
+ */
+export const DEVIN_CONNECTIONS_TABLE_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS devin_connections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    priority INTEGER NOT NULL DEFAULT 0,
+    xdg_data_home TEXT NOT NULL UNIQUE,
+    health_status TEXT NOT NULL DEFAULT 'unknown',
+    cooldown_until DATETIME,
+    last_error TEXT,
+    last_health_check_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+`;
+
 export const INIT_SCHEMA_SQL = `
 -- Initialize authentication database
 PRAGMA foreign_keys = ON;
@@ -287,4 +323,6 @@ ${APP_CONFIG_TABLE_SCHEMA_SQL}
 ${PROVIDER_MODELS_TABLE_SCHEMA_SQL}
 CREATE INDEX IF NOT EXISTS idx_provider_models_provider_order
 ON provider_models(provider, sort_order, id);
+
+${DEVIN_CONNECTIONS_TABLE_SCHEMA_SQL}
 `;

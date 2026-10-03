@@ -244,9 +244,10 @@ function survivorProgressStamp(survivor) {
   }
 
   try {
-    // Лист-модуль без импортов приложения: sqlite поднимаем напрямую, путь —
-    // тот же, что читает Devin CLI ($XDG_DATA_HOME/devin/cli/sessions.db).
-    const dataHome = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
+    // Лист-модуль без импортов приложения: sqlite поднимаем напрямую. Каталог —
+    // канала, на котором ход был поднят (Connection Layer кладёт его в запись),
+    // для старых записей — машинный дефолт CLI ($XDG_DATA_HOME/devin/…).
+    const dataHome = survivor.devinDataHome || process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
     const db = new Database(path.join(dataHome, 'devin', 'cli', 'sessions.db'), { readonly: true, fileMustExist: true });
     try {
       const row = db
@@ -257,7 +258,7 @@ function survivorProgressStamp(survivor) {
       db.close();
     }
   } catch {
-    const dataHome = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
+    const dataHome = survivor.devinDataHome || process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
     return mtimeOf(path.join(dataHome, 'devin', 'cli', 'sessions.db'));
   }
 }

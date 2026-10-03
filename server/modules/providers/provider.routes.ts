@@ -1,6 +1,7 @@
 import express, { type Request, type Response } from 'express';
 
 import { sessionsDb } from '@/modules/database/index.js';
+import { devinConnectionsService } from '@/modules/providers/services/devin-connections.service.js';
 import { providerAuthService } from '@/modules/providers/services/provider-auth.service.js';
 import { providerCapabilitiesService } from '@/modules/providers/services/provider-capabilities.service.js';
 import { providerMcpService } from '@/modules/providers/services/mcp.service.js';
@@ -11,6 +12,7 @@ import { sessionConversationsSearchService } from '@/modules/providers/services/
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
 import { sessionRewindService } from '@/modules/providers/services/session-rewind.service.js';
 import { getRequestRuntimeContext } from '@/shared/request-context.js';
+import { getActiveAccountDir } from '@/shared/session-scope.js';
 import type {
   CustomProviderModelInput,
   LLMProvider,
@@ -309,18 +311,18 @@ const parseProvider = (value: unknown): LLMProvider => {
 };
 
 /**
- * Devin's credentials live once per host (`~/.local/share/devin/credentials.toml`);
- * on a multi-tenant instance every /devin/* endpoint is owner-only. Centralised
- * here so a future devin route cannot accidentally skip the check.
+ * Devin работает через корпоративный Connection Layer: использовать провайдер
+ * может любой авторизованный пользователь, а управление каналами
+ * (/devin/connections) — только владелец площадки.
  */
-const assertDevinProviderAccess = (): void => {
+const assertDevinAdminAccess = (): void => {
   if (!OPEN_REGISTRATION) {
     return;
   }
   const userId = getRequestRuntimeContext()?.userId;
   const numericUserId = userId === undefined || userId === null ? NaN : Number(userId);
   if (!Number.isFinite(numericUserId) || !isPlatformOwnerWebUser(numericUserId)) {
-    throw new AppError('The Devin provider is only available to the platform owner.', {
+    throw new AppError('Devin connections are managed by the platform owner.', {
       code: 'PROVIDER_NOT_ALLOWED',
       statusCode: 403,
     });
@@ -328,37 +330,158 @@ const assertDevinProviderAccess = (): void => {
 };
 
 /**
- * Same boundary applied to the generic /sessions/:sessionId routes: a guest
- * who learns a Devin session id must not rename/delete/move it via the
- * unauthenticated-by-provider paths.
+ * Devin-чат теперь имеет account_dir инициатора — гость может трогать только
+ * свои строки. Строки без владельца (наследие до атрибуции) — только владельцу,
+ * как и раньше.
  */
 const assertDevinSessionRowAllowed = (sessionId: string): void => {
   if (!OPEN_REGISTRATION) {
     return;
   }
   const row = sessionsDb.getSessionById(sessionId);
-  if (row?.provider === 'devin') {
-    assertDevinProviderAccess();
+  if (row?.provider !== 'devin') {
+    return;
+  }
+  const userId = getRequestRuntimeContext()?.userId;
+  const numericUserId = userId === undefined || userId === null ? NaN : Number(userId);
+  const isOwner = Number.isFinite(numericUserId) && isPlatformOwnerWebUser(numericUserId);
+  if (isOwner) {
+    return;
+  }
+  if (row.initiated_by_user_id != null && Number(row.initiated_by_user_id) === numericUserId) {
+    return;
+  }
+  const activeDir = getActiveAccountDir();
+  if (row.account_dir == null || row.account_dir !== activeDir) {
+    throw new AppError('This Devin session belongs to another user.', {
+      code: 'PROVIDER_NOT_ALLOWED',
+      statusCode: 403,
+    });
   }
 };
 
-const isDevinAccessAllowed = (): boolean => {
+/**
+ * Своя ли devin-строка для ленты активности: по account_dir или по автору.
+ * Чужие devin-чаты в общем списке «выполняется сейчас» не светятся.
+ */
+const isDevinSessionRowVisible = (row: { account_dir?: string | null; initiated_by_user_id?: number | null } | null | undefined): boolean => {
   if (!OPEN_REGISTRATION) {
     return true;
   }
   const userId = getRequestRuntimeContext()?.userId;
   const numericUserId = userId === undefined || userId === null ? NaN : Number(userId);
-  return Number.isFinite(numericUserId) && isPlatformOwnerWebUser(numericUserId);
+  if (Number.isFinite(numericUserId) && isPlatformOwnerWebUser(numericUserId)) {
+    return true;
+  }
+  if (!row) {
+    return false;
+  }
+  if (row.initiated_by_user_id != null && Number(row.initiated_by_user_id) === numericUserId) {
+    return true;
+  }
+  return row.account_dir != null && row.account_dir === getActiveAccountDir();
 };
 
-router.use('/devin', (_req: Request, _res: Response, next: express.NextFunction) => {
+// Админка каналов — строго владельцу; идёт первой, чтобы /devin/connections
+// не перехватывался общим правилом ниже.
+router.use('/devin/connections', (_req: Request, _res: Response, next: express.NextFunction) => {
   try {
-    assertDevinProviderAccess();
+    assertDevinAdminAccess();
     next();
   } catch (error) {
     next(error);
   }
 });
+
+// ----------------- Devin connections (admin, owner-only) -----------------
+
+const parseConnectionId = (value: unknown): number => {
+  const id = Number(readPathParam(value, 'connectionId'));
+  if (!Number.isInteger(id) || id <= 0) {
+    throw new AppError('Invalid connectionId.', { code: 'INVALID_PATH_PARAMETER', statusCode: 400 });
+  }
+  return id;
+};
+
+/** Список каналов: метаданные и здоровье, без секретов. */
+router.get(
+  '/devin/connections',
+  asyncHandler(async (_req: Request, res: Response) => {
+    res.json(createApiSuccessResponse({ connections: devinConnectionsService.listConnections() }));
+  }),
+);
+
+/** Новый канал: каталог под креды создаётся сразу, сама креда — /credential. */
+router.post(
+  '/devin/connections',
+  asyncHandler(async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const connection = devinConnectionsService.createConnection({
+      name: typeof body.name === 'string' ? body.name : '',
+      description: typeof body.description === 'string' ? body.description : undefined,
+      priority: typeof body.priority === 'number' ? body.priority : undefined,
+    });
+    res.status(201).json(createApiSuccessResponse({ connection }));
+  }),
+);
+
+router.patch(
+  '/devin/connections/:connectionId',
+  asyncHandler(async (req: Request, res: Response) => {
+    const id = parseConnectionId(req.params.connectionId);
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const connection = devinConnectionsService.updateConnection(id, {
+      name: typeof body.name === 'string' ? body.name : undefined,
+      description: typeof body.description === 'string' ? body.description : undefined,
+      enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
+      priority: typeof body.priority === 'number' ? body.priority : undefined,
+    });
+    res.json(createApiSuccessResponse({ connection }));
+  }),
+);
+
+router.delete(
+  '/devin/connections/:connectionId',
+  asyncHandler(async (req: Request, res: Response) => {
+    const id = parseConnectionId(req.params.connectionId);
+    devinConnectionsService.deleteConnection(id);
+    res.json(createApiSuccessResponse({ deleted: true }));
+  }),
+);
+
+/**
+ * Замена креды канала: тело — содержимое credentials.toml целиком
+ * (`credentialsToml`). Хранится файлом 0600, после записи — живая проба.
+ */
+router.post(
+  '/devin/connections/:connectionId/credential',
+  asyncHandler(async (req: Request, res: Response) => {
+    const id = parseConnectionId(req.params.connectionId);
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const credentialsToml = typeof body.credentialsToml === 'string' ? body.credentialsToml : '';
+    const connection = await devinConnectionsService.installCredential(id, credentialsToml);
+    res.json(createApiSuccessResponse({ connection }));
+  }),
+);
+
+/** Живая проба `devin auth status` с XDG_DATA_HOME канала. */
+router.post(
+  '/devin/connections/:connectionId/health',
+  asyncHandler(async (req: Request, res: Response) => {
+    const id = parseConnectionId(req.params.connectionId);
+    const connection = await devinConnectionsService.checkHealth(id);
+    res.json(createApiSuccessResponse({ connection }));
+  }),
+);
+
+/** Чаты, прибитые к каналу: кто инициировал, когда, статус архива. */
+router.get(
+  '/devin/connections/:connectionId/tasks',
+  asyncHandler(async (req: Request, res: Response) => {
+    const id = parseConnectionId(req.params.connectionId);
+    res.json(createApiSuccessResponse({ tasks: devinConnectionsService.listTasks(id) }));
+  }),
+);
 
 const parseSessionRenameSummary = (payload: unknown): string => {
   if (!payload || typeof payload !== 'object') {
@@ -770,10 +893,6 @@ router.post(
   asyncHandler(async (req: Request, res: Response) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const provider = parseProvider(body.provider);
-    if (provider === 'devin') {
-      // Body-carried provider does not pass through the /devin router prefix.
-      assertDevinProviderAccess();
-    }
     const projectPath = typeof body.projectPath === 'string' ? body.projectPath : '';
     const initialMessage = typeof body.initialMessage === 'string' ? body.initialMessage : '';
     const result = sessionsService.createAppSession(provider, projectPath, initialMessage);
@@ -785,11 +904,11 @@ router.get(
   '/sessions/running',
   asyncHandler(async (_req: Request, res: Response) => {
     let sessions = sessionsService.listRunningSessions();
-    // Devin ids are owner-only even in the activity feed — a guest must not
-    // learn a live Devin sessionId and attach to its stream over websocket.
-    if (!isDevinAccessAllowed()) {
-      sessions = sessions.filter((session) => session.provider !== 'devin');
-    }
+    // Devin-строки в общей ленте — только свои: чужой sessionId не должен
+    // подсвечиваться гостю (по нему можно было бы подписаться на поток).
+    sessions = sessions.filter((session) =>
+      session.provider !== 'devin'
+      || isDevinSessionRowVisible(sessionsDb.getSessionById(session.sessionId)));
     res.json(createApiSuccessResponse({ sessions }));
   }),
 );

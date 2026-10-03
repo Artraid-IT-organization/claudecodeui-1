@@ -25,6 +25,9 @@ function createSessionRow(overrides: Record<string, unknown> = {}) {
     isArchived: 0,
     server_scope: 'main' as const,
     is_flagged: 0,
+    account_dir: null,
+    initiated_by_user_id: null,
+    devin_connection_id: null,
     created_at: '2026-01-01T00:00:00.000Z',
     updated_at: '2026-01-01T00:00:00.000Z',
     ...overrides,
@@ -192,7 +195,11 @@ test('Cursor returns an explicit unsupported token usage result', async () => {
 });
 
 test('token usage reports SESSION_NOT_FOUND for an unknown app session id', async () => {
-  const service = createProviderTokenUsageService({ getSessionById: () => null });
+  const service = createProviderTokenUsageService({
+    getSessionById: () => null,
+    // Иначе подмешивается реальный sessionsDb — тест зависел бы от БД хоста.
+    getSessionByProviderSessionId: () => null,
+  });
 
   await assert.rejects(
     () => service.getSessionTokenUsage('missing-session'),

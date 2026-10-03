@@ -14,6 +14,12 @@ import {
   connectSupervisedDevin,
   spawnSupervisedDevin,
 } from '@/modules/providers/list/devin/devin-acp-client.js';
+import { sessionsDb } from '@/modules/database/index.js';
+import {
+  devinConnectionsService,
+  classifyDevinFailure,
+  isFailoverableFailure,
+} from '@/modules/providers/services/devin-connections.service.js';
 import {
   buildDevinChildEnv,
   createCompleteMessage,
@@ -357,7 +363,93 @@ function answerPermissionRequest(request, devinMode, ws, sessionId, run, connect
 }
 
 /**
- * Runs one Devin turn over ACP.
+ * Тег ошибки, по которому ход переезжает на другой канал: сбой случился ДО
+ * выделения Devin-session — в UI ещё ничего не ушло, поэтому ретрай честный.
+ */
+const FAILOVER_TAG = '__devinFailover';
+
+/** Сколько всего попыток у хода: первая + максимум один переход на другой канал. */
+const MAX_TURN_ATTEMPTS = 2;
+
+/**
+ * Runs one Devin turn over ACP — обёртка выбора корпоративного канала.
+ *
+ * Канал решается один раз на чат: новый чат берёт первый годный по приоритету
+ * (`devinConnectionsService.pickConnection`), прибитый (`sessions.
+ * devin_connection_id`) идёт через свой — sessions.db физически лежит в
+ * каталоге канала, и resume иначе её не найдёт.
+ *
+ * Фоллбэк: сбой до `session/new` (auth, rate limit, не поднялся CLI) гасит
+ * канал (`recordOutcome`), и ход пробует следующий годный. После выделения
+ * devin-session переезд невозможен — история живёт внутри каталога канала.
+ * Бесконечных ретраев нет: попыток не больше MAX_TURN_ATTEMPTS.
+ */
+async function queryDevin(command, options = {}, ws, context) {
+  const { sessionId } = options;
+  const providerSessionId = context.resolveProviderSessionId(sessionId);
+  const boundConnectionId = sessionId
+    ? (sessionsDb.getSessionById(sessionId)?.devin_connection_id ?? null)
+    : null;
+  // Наследие до Layer'а: resume-сессия без привязки — ищем канал, чья
+  // sessions.db её хранит, иначе session/load уйдёт в чужую базу.
+  const hostedConnectionId = boundConnectionId == null && providerSessionId
+    ? (devinConnectionsService.findConnectionHostingSession(providerSessionId)?.id ?? null)
+    : boundConnectionId;
+
+  const attempted = [];
+  let lastError = null;
+  for (let attempt = 0; attempt < MAX_TURN_ATTEMPTS; attempt++) {
+    let connection;
+    try {
+      connection = hostedConnectionId != null
+        ? devinConnectionsService.resolveConnectionForSession(sessionId, hostedConnectionId)
+        : devinConnectionsService.pickConnection(attempted);
+    } catch (error) {
+      // Каналов нет вовсе или все перепробованы — причину показываем, а не
+      // молча заканчиваем ход.
+      const failure = lastError ?? (error instanceof Error ? error : new Error(String(error)));
+      sendMessage(ws, createNormalizedMessage({
+        provider: 'devin',
+        sessionId: sessionId || providerSessionId || null,
+        kind: 'error',
+        content: `Devin недоступен: ${failure.message}`,
+      }));
+      throw failure;
+    }
+    attempted.push(connection.id);
+
+    try {
+      await attemptDevinTurn(
+        command, options, ws, context, connection, providerSessionId,
+        hostedConnectionId == null && attempt + 1 < MAX_TURN_ATTEMPTS,
+      );
+      return;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      devinConnectionsService.recordOutcome(connection.id, 'failed', lastError.message);
+      // Уже прибитый чат и сбой после выделения сессии переезжать не могут.
+      if (hostedConnectionId != null || !lastError[FAILOVER_TAG]) {
+        throw lastError;
+      }
+      sendMessage(ws, createNormalizedMessage({
+        provider: 'devin',
+        sessionId: sessionId || null,
+        kind: 'status',
+        text: `Devin connection "${connection.name}" failed — switching to another channel`,
+      }));
+    }
+  }
+  sendMessage(ws, createNormalizedMessage({
+    provider: 'devin',
+    sessionId: sessionId || providerSessionId || null,
+    kind: 'error',
+    content: `Devin недоступен: ${lastError?.message || 'no usable connection'}`,
+  }));
+  throw lastError ?? new Error('Devin run failed: no usable connection');
+}
+
+/**
+ * Один ход через конкретный канал (`devin_connections` row).
  *
  * Devin's `acp` mode speaks JSON-RPC over stdio and handles one session at a
  * time, so each turn owns a fresh `devin acp` process: `session/load` revives
@@ -371,7 +463,7 @@ function answerPermissionRequest(request, devinMode, ws, sessionId, run, connect
  * - exactly one terminal `complete` per turn — the registry drops duplicates
  *   emitted after an abort.
  */
-async function queryDevin(command, options = {}, ws, context) {
+async function attemptDevinTurn(command, options = {}, ws, context, devinConn, providerSessionId, allowFailover = false) {
   const {
     sessionId,
     sessionSummary,
@@ -382,8 +474,6 @@ async function queryDevin(command, options = {}, ws, context) {
     files,
     permissionMode = 'default',
   } = options;
-
-  const providerSessionId = context.resolveProviderSessionId(sessionId);
 
   // Register the run BEFORE the async resolves: `chat.abort` can land while
   // resolveResumeModel is still awaiting — the run must already exist so
@@ -400,7 +490,12 @@ async function queryDevin(command, options = {}, ws, context) {
     startedAt: Date.now(),
     unregisterSurvivor: null,
     finishRun: null,
+    failoverRequested: false,
   };
+  // Переезд на другой канал честен только до выделения devin-session:
+  // в UI ещё ничего не ушло, а после session/new история физически живёт
+  // внутри каталога этого канала.
+  const canFailoverNow = () => allowFailover && !run.aborted && !run.sessionCreatedSent && !run.failoverRequested;
   const sessionKey = sessionId || providerSessionId;
   run.sessionKey = sessionKey;
   if (sessionKey) {
@@ -411,7 +506,9 @@ async function queryDevin(command, options = {}, ws, context) {
   const workingDirectory = cwd || projectPath || process.cwd();
   const devinMode = mapPermissionModeToDevinMode(permissionMode);
 
-  const childEnv = buildDevinChildEnv();
+  // Канал задаёт XDG_DATA_HOME: у каждого корпоративного подключения свои
+  // credentials.toml и sessions.db — run уходит в каталог выбранного канала.
+  const childEnv = buildDevinChildEnv(devinConn.xdg_data_home);
 
   // `devin --permission-mode dangerous acp`: the flag is a top-level option
   // (dangerous = alias of bypass), accepted before the subcommand. It covers
@@ -474,6 +571,9 @@ async function queryDevin(command, options = {}, ws, context) {
       socketPath: child.socketPath || null,
       runId: child.runId || null,
       supervisorPid: child.supervisorPid || null,
+      // Канал, чья sessions.db трогает этот ход — новый сервер читает прогресс
+      // из базы канала, а не из машинного дефолта (survivorProgressStamp).
+      devinDataHome: devinConn.xdg_data_home || null,
     },
   });
 
@@ -482,6 +582,13 @@ async function queryDevin(command, options = {}, ws, context) {
       return; // exactly one `complete` per turn
     }
     run.finishRun = true;
+    if (!aborted) {
+      devinConnectionsService.recordOutcome(
+        devinConn.id,
+        exitCode === 0 ? 'ok' : 'failed',
+        run.lastErrorDetail,
+      );
+    }
 
     // Ход кончился — висящие запросы разрешений гасим, чтобы баннеры во
     // вкладках не остались навсегда, а агент (если жив) получил cancelled.
@@ -514,8 +621,38 @@ async function queryDevin(command, options = {}, ws, context) {
     }));
   };
 
+  // Уборка неудачной попытки без `complete` в UI: ход продолжается на другом
+  // канале, и сказать «закончилось» было бы ложью.
+  const silentCleanup = () => {
+    if (sessionKey) {
+      activeDevinRuns.delete(sessionKey);
+    }
+    cancelPendingPermissions(sessionKey, ws, sessionId || run.devinSessionId);
+    if (run.unregisterSurvivor) {
+      run.unregisterSurvivor();
+      run.unregisterSurvivor = null;
+    }
+    try {
+      child.kill('SIGKILL');
+    } catch {
+      // already gone
+    }
+  };
+
   return await new Promise((resolve, reject) => {
+    const requestFailover = (message) => {
+      run.failoverRequested = true;
+      // Поздний onClose убитого процесса обязан молчать: complete хода теперь
+      // принадлежит следующей попытке на другом канале.
+      run.finishRun = true;
+      silentCleanup();
+      const error = new Error(message);
+      error[FAILOVER_TAG] = true;
+      reject(error);
+    };
+
     const hardFail = (message, extra = {}) => {
+      run.lastErrorDetail = message;
       sendMessage(ws, createNormalizedMessage({
         provider: 'devin',
         sessionId: run.devinSessionId || sessionId || null,
@@ -560,9 +697,16 @@ async function queryDevin(command, options = {}, ws, context) {
           return;
         }
         const tail = connection.getStderrTail();
+        run.lastErrorDetail = tail?.trim().split('\n').pop() || null;
         const message = run.aborted
           ? 'Devin run aborted'
           : `Devin exited before finishing the turn${tail ? `: ${tail.trim().split('\n').pop()}` : ''}`;
+        // Канал умер до выделения сессии (типично: отозванная креда — CLI
+        // печатает 'Authentication required' и выходит) — отдаём ход другому.
+        if (canFailoverNow() && isFailoverableFailure(classifyDevinFailure(message))) {
+          requestFailover(message);
+          return;
+        }
         if (!run.aborted) {
           notifyRunFailed({
             userId: ws?.userId || null,
@@ -599,6 +743,11 @@ async function queryDevin(command, options = {}, ws, context) {
             cwd: workingDirectory,
             mcpServers: [],
           }, HANDSHAKE_TIMEOUT_MS);
+          // Наследие без привязки (чаты до Connection Layer) прибивается к
+          // каналу, через который оно реально поднялось.
+          if (sessionId && sessionsDb.getSessionById(sessionId)?.devin_connection_id == null) {
+            sessionsDb.setSessionDevinConnection(sessionId, devinConn.id);
+          }
         } finally {
           run.muted = false;
         }
@@ -610,6 +759,11 @@ async function queryDevin(command, options = {}, ws, context) {
 
         const newId = created?.sessionId;
         if (newId) {
+          // Чат прибивается к каналу в момент выделения сессии: с этого момента
+          // его sessions.db и resume живут только в каталоге этого канала.
+          if (sessionId) {
+            sessionsDb.setSessionDevinConnection(sessionId, devinConn.id);
+          }
           run.devinSessionId = newId;
           if (typeof ws.setSessionId === 'function') {
             ws.setSessionId(newId);
@@ -725,6 +879,10 @@ async function queryDevin(command, options = {}, ws, context) {
       const detail = tail && !message.includes(tail.trim().split('\n').pop() || '')
         ? `${message} — ${tail.trim().split('\n').pop()}`
         : message;
+      if (!run.failoverRequested && canFailoverNow() && isFailoverableFailure(classifyDevinFailure(detail))) {
+        requestFailover(detail);
+        return;
+      }
       notifyRunFailed({
         userId: ws?.userId || null,
         provider: 'devin',

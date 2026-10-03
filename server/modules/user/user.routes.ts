@@ -121,6 +121,15 @@ export function createUserRouter(service: ReturnType<typeof createUserService>):
     }
   });
 
+  // Devin subscription of the platform owner: email, plan, daily / weekly quota.
+  router.get('/devin-account', async (req, res, next) => {
+    try {
+      res.json(await service.getDevinAccount(readUserId(req)));
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.get('/owner-account-info', async (req, res, next) => {
     try {
       res.json(await service.getOwnerAccountEmail(readUserId(req)));

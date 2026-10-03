@@ -3,7 +3,8 @@ import path from 'node:path';
 import { readFile } from 'node:fs/promises';
 
 import { AppError, getClaudeConfigDir, getClaudeJsonPath, isCodexAllowedForWebUser, isPlatformOwnerWebUser } from '@/shared/utils.js';
-import { getLiveLimits, readCodexAccountLimits } from '@/modules/providers/index.js';
+import { devinConnectionsDb } from '@/modules/database/index.js';
+import { getLiveLimits, readCodexAccountLimits, readDevinAccountLimits } from '@/modules/providers/index.js';
 import { getWebUserClaudeConfigDir } from '@/shared/web-user-paths.js';
 import { resolveWebUserRuntimeContext } from '@/shared/web-user-runtime.js';
 import { getOfficialUsage } from '@/modules/user/official-usage.js';
@@ -251,6 +252,24 @@ export function createUserService(dependencies: UserDependencies) {
         return { success: true, available: false, email: null, planType: null, fetchedAtMs: null, limits: [] };
       }
       return { success: true, ...(await readCodexAccountLimits()) };
+    },
+
+    /**
+     * Подписка Devin — машинная креда `devin/credentials.toml`: почта, тариф
+     * и окна квоты (день, неделя — пятичасового у Devin нет). Креда одна на
+     * сервер, поэтому гостю общего экземпляра отвечаем «нет», как и с Codex
+     * (isCodexAllowedForWebUser — тот же предикат «хостовый вход = владельца»).
+     */
+    async getDevinAccount(userId: number) {
+      if (!isCodexAllowedForWebUser(userId)) {
+        return { success: true, available: false, email: null, planName: null, fetchedAtMs: null, limits: [] };
+      }
+      // Панель «Расход» показывает креды ПЕРВОГО годного канала Connection
+      // Layer; у прибитых чатов своя креда — своя, но здесь нужна главная.
+      const primary = devinConnectionsDb.list().find(
+        (conn) => conn.enabled && conn.health_status !== 'auth_failed',
+      );
+      return { success: true, ...(await readDevinAccountLimits(primary?.xdg_data_home ?? null)) };
     },
 
     async getOwnerAccountEmail(userId: number) {

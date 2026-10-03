@@ -19,3 +19,6 @@ export { startSessionActivitySync, stopSessionActivitySync } from './services/se
 
 // readCodexAccountLimits: used by the user module for the Codex account row and its limits.
 export { readCodexAccountLimits } from './services/codex-account-limits.service.js';
+
+// readDevinAccountLimits: used by the user module for the Devin account row and its daily/weekly quota.
+export { readDevinAccountLimits } from './services/devin-account-limits.service.js';
