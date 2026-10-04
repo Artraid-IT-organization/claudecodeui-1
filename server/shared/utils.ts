@@ -338,6 +338,62 @@ export function normalizeProjectPath(inputPath: string): string {
 }
 
 /**
+ * Приводит запрошенный рабочий каталог к зоне пользователя.
+ *
+ * Единственный расчёт «где может стартовать процесс не-владельца» — общий
+ * для создания сессии (sessions.service) и обоих путей запуска хода
+ * (chat-websocket: runProviderTurn и steerIntoRunningTurn). Потребители берут
+ * корень зоны из `resolveWebUserRuntimeContext(userId).workspaceRoot`
+ * (WS-путь) или из request runtime context (HTTP-путь).
+ *
+ * Семантика — та же, что у `projectsDb.isProjectPathInScope`: корень зоны
+ * приводится через realpath, кандидат — лексически. Это позволяет путям ВНУТРИ
+ * зоны оставаться симлинками наружу (комнаты team-access смонтированы как
+ * `workspace/work -> people/<имя>/home/work`): по букве пути каталог в зоне,
+ * по разрешённому — снаружи, и это задумано.
+ *
+ * - `scopeRootDir` пуст (владелец площадки, OPEN_REGISTRATION выключен,
+ *   пользователь не опознан) — запрошенный путь возвращается как был:
+ *   ограничения нет, поведение прежнее.
+ * - Запрошенный путь лежит внутри зоны И существует — возвращается он.
+ * - Иначе — корень зоны. Не ошибка: клиент мог прислать устаревший или
+ *   чужой путь (так чат, привязанный к исчезнувшему `/tmp/...`, не умирает
+ *   `spawn ENOENT`, а приземляется в зоне). Корень при этом гарантированно
+ *   создаётся — зона обязана работать у всех.
+ */
+export function resolveScopedWorkingDirectory(
+  requestedPath: string | null | undefined,
+  scopeRootDir: string | null | undefined,
+): string | undefined {
+  if (!scopeRootDir) {
+    return typeof requestedPath === 'string' && requestedPath.trim()
+      ? requestedPath.trim()
+      : undefined;
+  }
+
+  let normalizedRoot: string;
+  try {
+    normalizedRoot = normalizeProjectPath(fs.realpathSync(scopeRootDir));
+  } catch {
+    normalizedRoot = normalizeProjectPath(scopeRootDir);
+  }
+  const requested = typeof requestedPath === 'string'
+    ? normalizeProjectPath(requestedPath)
+    : '';
+
+  if (
+    requested
+    && (requested === normalizedRoot || requested.startsWith(`${normalizedRoot}${path.sep}`))
+    && fs.existsSync(requested)
+  ) {
+    return requested;
+  }
+
+  fs.mkdirSync(scopeRootDir, { recursive: true });
+  return scopeRootDir;
+}
+
+/**
  * Validates that a user-supplied workspace path is safe to use.
  *
  * Call this before any filesystem mutation that creates or registers projects.

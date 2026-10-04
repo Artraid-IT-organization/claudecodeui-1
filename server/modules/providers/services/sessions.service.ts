@@ -13,7 +13,8 @@ import type {
   ServerScope,
 } from '@/shared/types.js';
 import { getRequestRuntimeContext } from '@/shared/request-context.js';
-import { AppError, isPlatformOwnerWebUser, normalizeServerScope, OPEN_REGISTRATION } from '@/shared/utils.js';
+import { AppError, isPlatformOwnerWebUser, normalizeServerScope, OPEN_REGISTRATION, resolveScopedWorkingDirectory } from '@/shared/utils.js';
+import { getWebUserWorkspaceRoot } from '@/shared/web-user-paths.js';
 
 /**
  * Devin sessions may only ever be read by the platform owner: the provider's
@@ -258,8 +259,18 @@ export const sessionsService = {
     provider: LLMProvider,
     projectPath: string,
     initialMessage: string,
+    userId?: string | number | null,
   ): CreateAppSessionResult {
-    const normalizedProjectPath = projectPath.trim();
+    // Рабочая зона не-владельца — его ~/.claude-webuser-<id>/workspace:
+    // проект вне зоны (устаревший/чужой путь от клиента) не записывается,
+    // чат приземляется в корень зоны — зона у человека одна.
+    const numericUserId = userId != null ? Number(userId) : NaN;
+    const scopeRoot = OPEN_REGISTRATION
+      && Number.isFinite(numericUserId)
+      && !isPlatformOwnerWebUser(numericUserId)
+      ? getWebUserWorkspaceRoot(numericUserId)
+      : null;
+    const normalizedProjectPath = resolveScopedWorkingDirectory(projectPath, scopeRoot) ?? '';
     if (!normalizedProjectPath) {
       throw new AppError('projectPath is required.', {
         code: 'PROJECT_PATH_REQUIRED',

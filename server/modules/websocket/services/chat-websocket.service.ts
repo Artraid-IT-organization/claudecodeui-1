@@ -43,7 +43,7 @@ import type {
   RealtimeClientConnection,
 } from '@/shared/types.js';
 import type { ProviderAdoptedTurn, ProviderAdoptPayload, ProviderSteerPayload } from '@/shared/interfaces.js';
-import { isCodexAllowedForWebUser, isPlatformOwnerWebUser, OPEN_REGISTRATION, parseIncomingJsonObject } from '@/shared/utils.js';
+import { isCodexAllowedForWebUser, isPlatformOwnerWebUser, OPEN_REGISTRATION, parseIncomingJsonObject, resolveScopedWorkingDirectory } from '@/shared/utils.js';
 import {
   getImageAssetsDirForUser,
   hasOwnClaudeAccess,
@@ -406,11 +406,15 @@ async function steerIntoRunningTurn(input: {
   }
   const attachments = verifiedClientAttachments(clientOptions, userId);
   const session = sessionsDb.getSessionById(sessionId);
+  const runtimeContext = resolveWebUserRuntimeContext(userId);
   return dependencies.runtime.steer(run.provider, sessionId, {
     content,
     images: attachments.filter(isImageAttachmentDescriptor),
     files: attachments.filter((descriptor) => !isImageAttachmentDescriptor(descriptor)),
-    cwd: (typeof clientOptions.cwd === 'string' && clientOptions.cwd) || session?.project_path || undefined,
+    cwd: resolveScopedWorkingDirectory(
+      (typeof clientOptions.cwd === 'string' && clientOptions.cwd) || session?.project_path || undefined,
+      runtimeContext.workspaceRoot,
+    ),
   });
 }
 
@@ -476,8 +480,18 @@ async function runProviderTurn(input: {
     images: uniqueAttachments.filter(isImageAttachmentDescriptor),
     files: uniqueAttachments.filter((descriptor) => !isImageAttachmentDescriptor(descriptor)),
     sessionId,
-    cwd: clientOptions.cwd ?? projectPath ?? undefined,
-    projectPath: projectPath ?? clientOptions.projectPath,
+    // Рабочая зона не-владельца — его workspace; путь за её пределами
+    // (устаревший, удалённый или чужой) приводится к корню зоны, чтобы
+    // процесс ни при каких клиентских данных не стартовал в каталоге хоста.
+    cwd: resolveScopedWorkingDirectory(
+      (typeof clientOptions.cwd === 'string' && clientOptions.cwd.trim() ? clientOptions.cwd : undefined)
+        ?? projectPath ?? undefined,
+      runtimeContext.workspaceRoot,
+    ),
+    projectPath: resolveScopedWorkingDirectory(
+      projectPath ?? (typeof clientOptions.projectPath === 'string' ? clientOptions.projectPath : undefined),
+      runtimeContext.workspaceRoot,
+    ),
     // Per-user Claude SDK env override (claude-runtime.provider.js). Both are
     // null outside OPEN_REGISTRATION, so the runtime falls back to
     // process.env exactly as it always has for Account 1/2.
