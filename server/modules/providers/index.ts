@@ -11,6 +11,10 @@ export { getLiveLimits, recordRateLimitEvent } from './services/usage-limits.sto
 // providerModelsService: used by Commands to list models and resolve the active session model.
 export { providerModelsService } from './services/provider-models.service.js';
 
+// resolveEffectiveProvider: the websocket gateway asks it before every run —
+// a guest without Claude access is silently served by the corporate Devin.
+export { resolveEffectiveProvider } from './services/sessions.service.js';
+
 export { initializeSessionsWatcher } from './services/sessions-watcher.service.js';
 export { closeSessionsWatcher } from './services/sessions-watcher.service.js';
 export { broadcastSessionUpserted } from './services/sessions-watcher.service.js';

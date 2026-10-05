@@ -389,6 +389,49 @@ export const sessionsDb = {
   },
 
   /**
+   * Переводит чат на другого провайдера (миграция Claude → Devin у человека
+   * без своего доступа к Claude).
+   *
+   * `provider_session_id` обнуляется намеренно: новый провайдер не умеет
+   * продолжать чужую сессию, он начнёт свою и назовёт свой id — его запишет
+   * `assignProviderSessionId`. Переписка до перевода не теряется: файл
+   * остаётся в `jsonl_path`, и читалка истории доклеивает его к ленте
+   * (sessions.service.fetchHistory).
+   */
+  retargetSessionProvider(sessionId: string, provider: string): void {
+    const db = getConnection();
+    db.prepare(
+      `UPDATE sessions
+       SET provider = ?,
+           provider_session_id = NULL,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE session_id = ?`
+    ).run(provider, sessionId);
+  },
+
+  /**
+   * Строка чата, которой принадлежит файл переписки.
+   *
+   * Синхронизатор Claude пропускает стенограмму, занятую переведённым на
+   * другого провайдера чатом (`provider <> 'claude'`): иначе обход файлов
+   * посеял бы вторую строку того же разговора под старым провайдером, и в
+   * списке возникал чат-призрак.
+   */
+  getSessionByTranscriptPath(jsonlPath: string): Pick<SessionRow, 'session_id' | 'provider'> | null {
+    const db = getConnection();
+    const row = db
+      .prepare(
+        `SELECT session_id, provider
+         FROM sessions
+         WHERE jsonl_path = ?
+         LIMIT 1`
+      )
+      .get(jsonlPath) as Pick<SessionRow, 'session_id' | 'provider'> | undefined;
+
+    return row ?? null;
+  },
+
+  /**
    * Records the model one session runs with.
    *
    * Called both when the user picks a model for the session and on every send,

@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { WebSocket } from 'ws';
 
 import { chatMessageQueueDb, sessionsDb, type StoredQueuedChatMessage } from '@/modules/database/index.js';
-import { providerModelsService } from '@/modules/providers/index.js';
+import { providerModelsService, resolveEffectiveProvider } from '@/modules/providers/index.js';
 import { chatRunRegistry, onChatRunCompleted } from '@/modules/websocket/services/chat-run-registry.service.js';
 import {
   broadcastChatQueue,
@@ -46,7 +46,6 @@ import type { ProviderAdoptedTurn, ProviderAdoptPayload, ProviderSteerPayload } 
 import { isCodexAllowedForWebUser, isPlatformOwnerWebUser, OPEN_REGISTRATION, parseIncomingJsonObject, resolveScopedWorkingDirectory } from '@/shared/utils.js';
 import {
   getImageAssetsDirForUser,
-  hasOwnClaudeAccess,
   readRequestUserId,
   resolveWebUserRuntimeContext,
 } from '@/shared/web-user-runtime.js';
@@ -232,33 +231,34 @@ async function handleChatSend(
     return;
   }
 
-  const provider = session.provider as LLMProvider;
+  let provider = session.provider as LLMProvider;
   if (!dependencies.runtime.hasRuntime(provider)) {
     sendProtocolError(ws, 'UNSUPPORTED_PROVIDER', `Provider "${provider}" is not available.`, sessionId, clientMessageId);
     return;
   }
 
-  const openRegistrationContext = resolveWebUserRuntimeContext(userId);
-  const numericUserId = userId !== null ? Number(userId) : NaN;
-  // Owner bypass: when the owner's ~/.claude-webuser-<id> is symlinked to
-  // their real ~/.claude, the SDK authenticates via the existing OAuth session
-  // in that directory — no explicit API key is needed or stored.
-  // Остальным хватает любого СВОЕГО доступа: ключа API или входа подпиской в
-  // командной строке сайта (shared/web-user-runtime.ts, hasOwnClaudeAccess).
-  if (
-    OPEN_REGISTRATION &&
-    provider === 'claude' &&
-    !isPlatformOwnerWebUser(numericUserId) &&
-    !(await hasOwnClaudeAccess(openRegistrationContext))
-  ) {
-    sendProtocolError(
-      ws,
-      'CLAUDE_LOGIN_REQUIRED',
-      CLAUDE_LOGIN_REQUIRED_MESSAGE,
-      sessionId,
-      clientMessageId,
-    );
-    return;
+  // Доступа к Claude у человека общей площадки нет — чат мёртвого провайдера
+  // переводится на корпоративный Devin: старая переписка остаётся в
+  // jsonl_path (её доклеивает fetchHistory), новые ходы пишет Devin в своё
+  // хранилище. Владельца и вошедших своим ключом это не касается — проверка
+  // доступа внутри resolveEffectiveProvider.
+  const effectiveProvider = await resolveEffectiveProvider(provider, userId);
+  if (effectiveProvider !== provider) {
+    if (dependencies.runtime.hasRuntime(effectiveProvider)) {
+      sessionsDb.retargetSessionProvider(sessionId, effectiveProvider);
+      provider = effectiveProvider;
+      session.provider_session_id = null;
+      console.log(`[Chat] чат ${sessionId} переведён с Claude на ${effectiveProvider} — у пользователя ${String(userId)} нет доступа к Claude`);
+    } else {
+      sendProtocolError(
+        ws,
+        'CLAUDE_LOGIN_REQUIRED',
+        CLAUDE_LOGIN_REQUIRED_MESSAGE,
+        sessionId,
+        clientMessageId,
+      );
+      return;
+    }
   }
 
   // Вход в Codex на сервере один — хозяина (~/.codex). Гость общего
@@ -603,23 +603,25 @@ async function runQueuedChatMessage(
     return true;
   }
 
-  const provider = session.provider as LLMProvider;
+  let provider = session.provider as LLMProvider;
   if (!dependencies.runtime.hasRuntime(provider)) {
     console.warn(`[Очередь чата] провайдер "${provider}" недоступен — сообщение ${message.id} отброшено`);
     return true;
   }
 
   const userId = message.userId;
-  const runtimeContext = resolveWebUserRuntimeContext(userId);
-  const numericUserId = userId !== null ? Number(userId) : NaN;
-  if (
-    OPEN_REGISTRATION
-    && provider === 'claude'
-    && !isPlatformOwnerWebUser(numericUserId)
-    && !(await hasOwnClaudeAccess(runtimeContext))
-  ) {
-    console.warn(`[Очередь чата] пользователь ${String(userId)} не вошёл в Claude и не добавил ключ — сообщение ${message.id} отброшено`);
-    return true;
+  // Та же миграция, что в handleChatSend: стоявшее в очереди сообщение чата
+  // мёртвого провайдера уходит через корпоративный Devin, а не отбрасывается.
+  const effectiveProvider = await resolveEffectiveProvider(provider, userId);
+  if (effectiveProvider !== provider) {
+    if (dependencies.runtime.hasRuntime(effectiveProvider)) {
+      sessionsDb.retargetSessionProvider(sessionId, effectiveProvider);
+      provider = effectiveProvider;
+      session.provider_session_id = null;
+    } else {
+      console.warn(`[Очередь чата] пользователь ${String(userId)} не вошёл в Claude и не добавил ключ — сообщение ${message.id} отброшено`);
+      return true;
+    }
   }
 
   if (provider === 'codex' && !isCodexAllowedForWebUser(userId)) {

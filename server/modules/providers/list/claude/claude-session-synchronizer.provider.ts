@@ -224,6 +224,17 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
   }
 
   /**
+   * Стенограмма чата, переведённого на другого провайдера (Claude → Devin при
+   * мёртвом доступе к Claude): файл остался у той же строки для показа
+   * истории, а индексировать его заново нельзя — появилась бы вторая строка
+   * того же разговора под провайдером 'claude', чат-призрак в списке.
+   */
+  private isMigratedTranscript(filePath: string): boolean {
+    const owner = sessionsDb.getSessionByTranscriptPath(filePath);
+    return owner !== null && owner.provider !== this.provider;
+  }
+
+  /**
    * Scans ~/.claude/projects and upserts discovered sessions into DB.
    */
   async synchronize(since?: Date): Promise<number> {
@@ -242,6 +253,9 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
     let processed = 0;
     for (const filePath of files) {
       if (this.isSubagentTranscript(filePath)) {
+        continue;
+      }
+      if (this.isMigratedTranscript(filePath)) {
         continue;
       }
 
@@ -279,6 +293,9 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
       return null;
     }
     if (this.isSubagentTranscript(filePath)) {
+      return null;
+    }
+    if (this.isMigratedTranscript(filePath)) {
       return null;
     }
 

@@ -13,28 +13,67 @@ import type {
   ServerScope,
 } from '@/shared/types.js';
 import { getRequestRuntimeContext } from '@/shared/request-context.js';
+import { getActiveAccountDir } from '@/shared/session-scope.js';
 import { AppError, isPlatformOwnerWebUser, normalizeServerScope, OPEN_REGISTRATION, resolveScopedWorkingDirectory } from '@/shared/utils.js';
 import { getWebUserWorkspaceRoot } from '@/shared/web-user-paths.js';
+import { hasOwnClaudeAccess, resolveWebUserRuntimeContext } from '@/shared/web-user-runtime.js';
 
 /**
- * Devin sessions may only ever be read by the platform owner: the provider's
- * credentials and session store are machine-global. A guest who guesses a
- * session id must not be able to read history or provider ids through the
- * provider-agnostic session endpoints.
+ * Devin-чаты читает владелец площадки и человек, которому чат принадлежит
+ * (`initiated_by_user_id` или каталог аккаунта — то же правило, что у
+ * `assertDevinSessionRowAllowed` в provider.routes). Чужой session id не
+ * должен отдавать ни историю, ни provider id: хранилище Devin общее на
+ * машину.
  */
-const assertSessionProviderAllowed = (provider: string): void => {
-  if (provider !== 'devin' || !OPEN_REGISTRATION) {
+const assertSessionReadable = (session: {
+  provider: string;
+  initiated_by_user_id: number | null;
+  account_dir: string | null;
+}): void => {
+  if (session.provider !== 'devin' || !OPEN_REGISTRATION) {
     return;
   }
   const userId = getRequestRuntimeContext()?.userId;
   const numericUserId = userId === undefined || userId === null ? NaN : Number(userId);
-  if (!Number.isFinite(numericUserId) || !isPlatformOwnerWebUser(numericUserId)) {
-    throw new AppError('The Devin provider is only available to the platform owner.', {
-      code: 'PROVIDER_NOT_ALLOWED',
-      statusCode: 403,
-    });
+  if (Number.isFinite(numericUserId) && isPlatformOwnerWebUser(numericUserId)) {
+    return;
   }
+  if (session.initiated_by_user_id != null && Number(session.initiated_by_user_id) === numericUserId) {
+    return;
+  }
+  if (session.account_dir != null && session.account_dir === getActiveAccountDir()) {
+    return;
+  }
+  throw new AppError('This Devin session belongs to another user.', {
+    code: 'PROVIDER_NOT_ALLOWED',
+    statusCode: 403,
+  });
 };
+
+/**
+ * Провайдер, под которым реально пойдёт ход человека общей площадки.
+ *
+ * У гостя без своего входа в Claude (ни ключа API, ни подписки в его
+ * каталоге) `claude` мёртв: браузер мог запомнить его выбор или человек
+ * открыл старый чат, и оба пути упирались в «войдите в Claude». Такой чат и
+ * такое создание молча переводятся на корпоративный Devin — история при этом
+ * остаётся на месте (fetchHistory доклеивает jsonl-стенограмму). Владельца
+ * площадки правило не касается: у него вход в Claude свой и живой.
+ */
+export async function resolveEffectiveProvider(
+  provider: LLMProvider,
+  userId: string | number | null | undefined,
+): Promise<LLMProvider> {
+  if (!OPEN_REGISTRATION || provider !== 'claude') {
+    return provider;
+  }
+  const numericUserId = userId === undefined || userId === null ? NaN : Number(userId);
+  if (!Number.isFinite(numericUserId) || isPlatformOwnerWebUser(numericUserId)) {
+    return provider;
+  }
+  const runtimeContext = resolveWebUserRuntimeContext(userId ?? null);
+  return (await hasOwnClaudeAccess(runtimeContext)) ? 'claude' : 'devin';
+}
 
 type CreateAppSessionResult = {
   sessionId: string;
@@ -255,12 +294,16 @@ export const sessionsService = {
    * comes directly from the first visible CloudCLI message and is limited to
    * four whole words before any provider-owned storage exists.
    */
-  createAppSession(
+  async createAppSession(
     provider: LLMProvider,
     projectPath: string,
     initialMessage: string,
     userId?: string | number | null,
-  ): CreateAppSessionResult {
+  ): Promise<CreateAppSessionResult> {
+    // Устаревший выбор провайдера в браузере («Claude» без живого входа)
+    // заменяется рабочим — строка сразу ложится под тем провайдером, под
+    // которым пойдёт первый ход, и чат не переводится посреди отправки.
+    const effectiveProvider = await resolveEffectiveProvider(provider, userId);
     // Рабочая зона не-владельца — его ~/.claude-webuser-<id>/workspace:
     // проект вне зоны (устаревший/чужой путь от клиента) не записывается,
     // чат приземляется в корень зоны — зона у человека одна.
@@ -280,11 +323,11 @@ export const sessionsService = {
 
     const sessionId = randomUUID();
     const sessionName = buildCloudCliSessionName(initialMessage);
-    sessionsDb.createAppSession(sessionId, provider, normalizedProjectPath, sessionName);
+    sessionsDb.createAppSession(sessionId, effectiveProvider, normalizedProjectPath, sessionName);
 
     return {
       sessionId,
-      provider,
+      provider: effectiveProvider,
       projectPath: normalizedProjectPath,
       sessionName,
     };
@@ -340,7 +383,7 @@ export const sessionsService = {
         statusCode: 404,
       });
     }
-    assertSessionProviderAllowed(session.provider);
+    assertSessionReadable(session);
 
     if (!session.provider_session_id) {
       throw new AppError('This session ID is not available yet.', {
@@ -372,11 +415,18 @@ export const sessionsService = {
         statusCode: 404,
       });
     }
-    assertSessionProviderAllowed(session.provider);
+    assertSessionReadable(session);
+
+    // Чат, переведённый с мёртвого Claude на Devin, держит файл старой
+    // переписки в jsonl_path — она доклеивается префиксом ленты, иначе после
+    // перевода человек увидел бы пустой чат. У родных devin-строк jsonl_path
+    // всегда NULL, поэтому признак встречается только на переведённых.
+    const hasLegacyTranscript = session.provider !== 'claude' && Boolean(session.jsonl_path);
 
     // App-created sessions that never produced a provider transcript yet
-    // (e.g. first message still streaming) simply have no history.
-    if (!session.provider_session_id) {
+    // (e.g. first message still streaming) simply have no history — unless a
+    // legacy transcript remains from the provider migration above.
+    if (!session.provider_session_id && !hasLegacyTranscript) {
       return {
         messages: [],
         total: 0,
@@ -387,19 +437,46 @@ export const sessionsService = {
     }
 
     const provider = session.provider as LLMProvider;
-    const result = await providerRegistry.resolveProvider(provider).sessions.fetchHistory(sessionId, {
-      limit: options.limit ?? null,
-      offset: options.offset ?? 0,
+    const result = session.provider_session_id
+      ? await providerRegistry.resolveProvider(provider).sessions.fetchHistory(sessionId, {
+          limit: options.limit ?? null,
+          offset: options.offset ?? 0,
+          projectPath: session.project_path ?? '',
+          providerSessionId: session.provider_session_id,
+        })
+      : { messages: [], total: 0, hasMore: false, offset: 0, limit: null };
+
+    if (!hasLegacyTranscript) {
+      return {
+        ...result,
+        messages: result.messages.map((message) => ({
+          ...message,
+          sessionId,
+        })),
+      };
+    }
+
+    // Читалка Claude фильтрует строки стенограммы по provider-native id —
+    // он же имя файла (`<id>.jsonl`); в строке его уже нет, после перевода
+    // туда записан id нового провайдера.
+    const legacyProviderSessionId = path.basename(session.jsonl_path as string, '.jsonl');
+    const legacy = await providerRegistry.resolveProvider('claude').sessions.fetchHistory(sessionId, {
+      limit: null,
+      offset: 0,
       projectPath: session.project_path ?? '',
-      providerSessionId: session.provider_session_id,
+      providerSessionId: legacyProviderSessionId,
     });
 
     return {
       ...result,
-      messages: result.messages.map((message) => ({
+      messages: [
+        ...legacy.messages,
+        ...result.messages,
+      ].map((message) => ({
         ...message,
         sessionId,
       })),
+      total: legacy.total + result.total,
     };
   },
 
@@ -421,7 +498,7 @@ export const sessionsService = {
         statusCode: 404,
       });
     }
-    assertSessionProviderAllowed(session.provider);
+    assertSessionReadable(session);
 
     const projectPath = session.project_path?.trim() ? session.project_path : null;
     const project = projectPath ? projectsDb.getProjectPath(projectPath) : null;

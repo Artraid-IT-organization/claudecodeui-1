@@ -38,8 +38,8 @@ test('provider session id returns the mapped native id', { concurrency: false },
 });
 
 test('app session names use at most four whole words from the initial message', { concurrency: false }, async () => {
-  await withIsolatedDatabase(() => {
-    const result = sessionsService.createAppSession(
+  await withIsolatedDatabase(async () => {
+    const result = await sessionsService.createAppSession(
       'codex',
       '/tmp/session-name-project',
       '  short words\nsecond   third fourth fifth  ',
@@ -54,10 +54,10 @@ test('app session names use at most four whole words from the initial message', 
 });
 
 test('app session names are capped by length even within four words', { concurrency: false }, async () => {
-  await withIsolatedDatabase(() => {
+  await withIsolatedDatabase(async () => {
     // A pathologically long first word (still within the four-word cap)
     // used to sail straight through untruncated.
-    const result = sessionsService.createAppSession(
+    const result = await sessionsService.createAppSession(
       'codex',
       '/tmp/session-name-long-word-project',
       'supercalifragilisticexpialidocious second third fourth',
@@ -69,12 +69,12 @@ test('app session names are capped by length even within four words', { concurre
 });
 
 test('app session names for a message with no whitespace are truncated, not left in full', { concurrency: false }, async () => {
-  await withIsolatedDatabase(() => {
+  await withIsolatedDatabase(async () => {
     // A bare URL (or any single long token) has no whitespace at all, so
     // `split(/\s+/)` used to yield one element and the four-word cap was a
     // no-op - the entire raw message became the session title.
     const longUrl = `https://example.com/${'a'.repeat(200)}`;
-    const result = sessionsService.createAppSession('claude', '/tmp/session-name-url-project', longUrl);
+    const result = await sessionsService.createAppSession('claude', '/tmp/session-name-url-project', longUrl);
 
     assert.ok(result.sessionName.length <= 51, `expected a short truncated title, got ${result.sessionName.length} chars`);
     assert.ok(result.sessionName.startsWith('https://example.com/'));
@@ -83,8 +83,8 @@ test('app session names for a message with no whitespace are truncated, not left
 });
 
 test('app sessions without message text receive a stable fallback name', { concurrency: false }, async () => {
-  await withIsolatedDatabase(() => {
-    const result = sessionsService.createAppSession('claude', '/tmp/attachment-only-project', '  \n ');
+  await withIsolatedDatabase(async () => {
+    const result = await sessionsService.createAppSession('claude', '/tmp/attachment-only-project', '  \n ');
 
     assert.equal(result.sessionName, 'Untitled Session');
     assert.equal(sessionsDb.getSessionById(result.sessionId)?.custom_name, 'Untitled Session');
