@@ -273,6 +273,31 @@ CREATE TABLE IF NOT EXISTS devin_connections (
 );
 `;
 
+/**
+ * Дополнительные действующие токены входа `/enter/<token>` поверх
+ * `users.login_token`.
+ *
+ * Одна строка = одна ещё работающая ссылка человека. Заведена под перенос
+ * комнат team-access в общий инстанс (03–04.10.26): у людей остались
+ * закладки и иконки домашнего экрана со старыми ссылками их контейнеров —
+ * после переезда домена на cc2 те давали 401 и вечную перезагрузку
+ * «введите ссылку». Алиасы возвращают старым ссылкам жизнь, не трогая
+ * основной `login_token`.
+ *
+ * Семантика регенерации сохранена: `setLoginToken` удаляет и алиасы
+ * пользователя — «перевыпустить ссылку» обязан гасить ВСЕ ранее
+ * действовавшие ссылки, иначе это была бы видимость отзыва.
+ */
+export const LOGIN_TOKEN_ALIASES_TABLE_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS login_token_aliases (
+    token TEXT PRIMARY KEY NOT NULL,
+    user_id INTEGER NOT NULL,
+    label TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+`;
+
 export const INIT_SCHEMA_SQL = `
 -- Initialize authentication database
 PRAGMA foreign_keys = ON;
@@ -325,4 +350,6 @@ CREATE INDEX IF NOT EXISTS idx_provider_models_provider_order
 ON provider_models(provider, sort_order, id);
 
 ${DEVIN_CONNECTIONS_TABLE_SCHEMA_SQL}
+
+${LOGIN_TOKEN_ALIASES_TABLE_SCHEMA_SQL}
 `;

@@ -157,18 +157,49 @@ export const userDb = {
     return { id: result.lastInsertRowid, username };
   },
 
-  /** Looks up an active user by their persistent login-link token. */
+  /**
+   * Looks up an active user by their persistent login-link token.
+   *
+   * Принимает и токены-алиасы из `login_token_aliases` — старые ссылки
+   * комнат, оставшиеся у людей в закладках после переезда доменов на общий
+   * инстанс. Алиас и основной токен равнозначны: и тот и другой — это вход
+   * человека без пароля.
+   */
   getUserByLoginToken(loginToken: string): UserRow | undefined {
     const db = getConnection();
     return db
-      .prepare('SELECT * FROM users WHERE login_token = ? AND is_active = 1')
-      .get(loginToken) as UserRow | undefined;
+      .prepare(
+        `SELECT * FROM users
+         WHERE is_active = 1
+           AND (login_token = ?
+                OR id IN (SELECT user_id FROM login_token_aliases WHERE token = ?))`
+      )
+      .get(loginToken, loginToken) as UserRow | undefined;
   },
 
-  /** Replaces a user's login-link token (used to invalidate a leaked link). */
+  /**
+   * Adds a still-valid login link for a user on top of `users.login_token`.
+   * Consumers: migration/ops scripts carrying over pre-consolidation room
+   * links; deliberately not exposed through the HTTP API.
+   */
+  addLoginTokenAlias(userId: number, loginToken: string, label?: string): void {
+    const db = getConnection();
+    db.prepare(
+      'INSERT OR IGNORE INTO login_token_aliases (token, user_id, label) VALUES (?, ?, ?)'
+    ).run(loginToken, userId, label ?? null);
+  },
+
+  /**
+   * Replaces a user's login-link token (used to invalidate a leaked link).
+   * Алиасы гасятся вместе с основным: «перевыпустить» должен убивать ВСЕ
+   * ранее действовавшие ссылки человека, иначе отзыв был бы мнимым.
+   */
   setLoginToken(userId: number, loginToken: string): void {
     const db = getConnection();
-    db.prepare('UPDATE users SET login_token = ? WHERE id = ?').run(loginToken, userId);
+    db.transaction(() => {
+      db.prepare('DELETE FROM login_token_aliases WHERE user_id = ?').run(userId);
+      db.prepare('UPDATE users SET login_token = ? WHERE id = ?').run(loginToken, userId);
+    })();
   },
 
   /** Returns the user's current login-link token, or null if none is set. */
