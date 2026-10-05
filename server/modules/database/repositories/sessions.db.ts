@@ -394,8 +394,10 @@ export const sessionsDb = {
    *
    * `provider_session_id` обнуляется намеренно: новый провайдер не умеет
    * продолжать чужую сессию, он начнёт свою и назовёт свой id — его запишет
-   * `assignProviderSessionId`. Переписка до перевода не теряется: файл
-   * остаётся в `jsonl_path`, и читалка истории доклеивает его к ленте
+   * `assignProviderSessionId`. `model`/`effort` сбрасываются тоже — записанная
+   * Claude-модель передалась бы новому провайдеру как `--model claude-…` и
+   * завалила бы ход. Переписка до перевода не теряется: файл остаётся в
+   * `jsonl_path`, и читалка истории доклеивает его к ленте
    * (sessions.service.fetchHistory).
    */
   retargetSessionProvider(sessionId: string, provider: string): void {
@@ -404,6 +406,8 @@ export const sessionsDb = {
       `UPDATE sessions
        SET provider = ?,
            provider_session_id = NULL,
+           model = NULL,
+           effort = NULL,
            updated_at = CURRENT_TIMESTAMP
        WHERE session_id = ?`
     ).run(provider, sessionId);

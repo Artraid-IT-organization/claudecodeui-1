@@ -243,10 +243,12 @@ async function handleChatSend(
   // хранилище. Владельца и вошедших своим ключом это не касается — проверка
   // доступа внутри resolveEffectiveProvider.
   const effectiveProvider = await resolveEffectiveProvider(provider, userId);
+  let providerMigrated = false;
   if (effectiveProvider !== provider) {
     if (dependencies.runtime.hasRuntime(effectiveProvider)) {
       sessionsDb.retargetSessionProvider(sessionId, effectiveProvider);
       provider = effectiveProvider;
+      providerMigrated = true;
       session.provider_session_id = null;
       console.log(`[Chat] чат ${sessionId} переведён с Claude на ${effectiveProvider} — у пользователя ${String(userId)} нет доступа к Claude`);
     } else {
@@ -283,6 +285,12 @@ async function handleChatSend(
   }
 
   const clientOptions = (data.options ?? {}) as AnyRecord;
+  if (providerMigrated) {
+    // Клиент прислал выбор для старого провайдера (модель/усилие Claude) —
+    // Devin такие имена не знает, и ход упал бы на `--model claude-…`.
+    delete clientOptions.model;
+    delete clientOptions.effort;
+  }
   const command = typeof data.content === 'string' ? data.content : '';
 
   const run = chatRunRegistry.startRun({
@@ -613,10 +621,12 @@ async function runQueuedChatMessage(
   // Та же миграция, что в handleChatSend: стоявшее в очереди сообщение чата
   // мёртвого провайдера уходит через корпоративный Devin, а не отбрасывается.
   const effectiveProvider = await resolveEffectiveProvider(provider, userId);
+  let providerMigrated = false;
   if (effectiveProvider !== provider) {
     if (dependencies.runtime.hasRuntime(effectiveProvider)) {
       sessionsDb.retargetSessionProvider(sessionId, effectiveProvider);
       provider = effectiveProvider;
+      providerMigrated = true;
       session.provider_session_id = null;
     } else {
       console.warn(`[Очередь чата] пользователь ${String(userId)} не вошёл в Claude и не добавил ключ — сообщение ${message.id} отброшено`);
@@ -647,6 +657,11 @@ async function runQueuedChatMessage(
   }
 
   const clientOptions = (message.options ?? {}) as AnyRecord;
+  if (providerMigrated) {
+    // Модель/усилие в сообщении выбраны под старый провайдер — Devin их не знает.
+    delete clientOptions.model;
+    delete clientOptions.effort;
+  }
   console.log(`[Очередь чата] отправляю сообщение ${message.id} (чат ${sessionId})`);
 
   // Плашка «работает» во всех вкладках: ход начался не по нажатию человека,
