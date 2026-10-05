@@ -15,6 +15,16 @@ export { providerModelsService } from './services/provider-models.service.js';
 // a guest without Claude access is silently served by the corporate Devin.
 export { resolveEffectiveProvider } from './services/sessions.service.js';
 
+// survivor-runs: claude/devin-ходы, пережившие перезапуск службы (reattach) —
+// websocket-модуль узнаёт «идущий» чат и может остановить его.
+export {
+  getSurvivorPhase,
+  getSurvivorProvider,
+  isSurvivorRunning,
+  listSurvivors,
+  stopSurvivor,
+} from './list/claude/survivor-runs.js';
+
 export { initializeSessionsWatcher } from './services/sessions-watcher.service.js';
 export { closeSessionsWatcher } from './services/sessions-watcher.service.js';
 export { broadcastSessionUpserted } from './services/sessions-watcher.service.js';

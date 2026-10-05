@@ -1,8 +1,7 @@
 import path from 'node:path';
 
-import { projectsDb, sessionsDb } from '@/modules/database/index.js';
-import { chatGroupsDb } from '@/modules/database/repositories/chat-groups.js';
-import { isSurvivorRunning, listSurvivors } from '@/modules/providers/list/claude/survivor-runs.js';
+import { chatGroupsDb, projectsDb, sessionsDb } from '@/modules/database/index.js';
+import { isSurvivorRunning, listSurvivors } from '@/modules/providers/index.js';
 import { generateDisplayName } from '@/modules/projects/index.js';
 import { ChatSessionWriter } from '@/modules/websocket/services/chat-session-writer.service.js';
 import { broadcastRealtimeEvent } from '@/modules/websocket/services/websocket-state.service.js';

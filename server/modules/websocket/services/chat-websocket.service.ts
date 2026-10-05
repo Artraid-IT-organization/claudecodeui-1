@@ -3,7 +3,14 @@ import path from 'node:path';
 import type { WebSocket } from 'ws';
 
 import { chatMessageQueueDb, sessionsDb, type StoredQueuedChatMessage } from '@/modules/database/index.js';
-import { providerModelsService, resolveEffectiveProvider } from '@/modules/providers/index.js';
+import {
+  getSurvivorPhase,
+  getSurvivorProvider,
+  isSurvivorRunning,
+  providerModelsService,
+  resolveEffectiveProvider,
+  stopSurvivor,
+} from '@/modules/providers/index.js';
 import { chatRunRegistry, onChatRunCompleted } from '@/modules/websocket/services/chat-run-registry.service.js';
 import {
   broadcastChatQueue,
@@ -21,7 +28,6 @@ import {
   readClientMessageId,
   rememberAcceptedSend,
 } from '@/modules/websocket/services/chat-send-ledger.service.js';
-import { getSurvivorPhase, getSurvivorProvider, isSurvivorRunning, stopSurvivor } from '@/modules/providers/list/claude/survivor-runs.js';
 import {
   broadcastRealtimeEvent,
   clientUserIds,
