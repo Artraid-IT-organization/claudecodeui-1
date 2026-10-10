@@ -15,7 +15,11 @@ export type DevinConnectionOption = {
   accountEmail: string | null;
 };
 
-/** localStorage-ключ канала, выбранного в пикере; уходит серверу с каждым новым чатом Devin. */
+/**
+ * localStorage-ключ подписки, выбранной в пикере; уходит серверу с каждым
+ * ходом Devin — и в новом чате, и в открытом (история чата живёт в его линии,
+ * платить за ход может любая подписка: devin-connections.service).
+ */
 const SELECTED_DEVIN_CONNECTION_KEY = 'selected-devin-connection';
 
 /** Выбрать канал Devin для новых чатов: запоминает его и переключает помощника на Devin. */

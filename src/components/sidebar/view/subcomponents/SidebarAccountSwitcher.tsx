@@ -226,6 +226,11 @@ export default function SidebarAccountSwitcher({
                     </button>
                   );
                 })}
+                {devinConnections.length > 0 && (
+                  <div className="px-3 pb-2 pt-0.5 text-[10px] leading-snug text-muted-foreground">
+                    Подписка Devin платит за следующий ответ — и в новом, и в открытом чате. Кончился лимит — чат сам продолжится на другой.
+                  </div>
+                )}
                 {codexReady && (
                   <button
                     type="button"

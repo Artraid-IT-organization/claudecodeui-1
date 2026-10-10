@@ -4,9 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { closeConnection } from '@/modules/database/connection.js';
-import { initializeDatabase } from '@/modules/database/init-db.js';
-import { devinConnectionsDb } from '@/modules/database/index.js';
+import { closeConnection, devinConnectionsDb, initializeDatabase } from '@/modules/database/index.js';
+
 import { devinRuntime } from './devin-runtime.provider.js';
 import { DevinSessionsProvider, mapPermissionModeToDevinMode } from './devin-sessions.provider.js';
 
@@ -79,6 +78,17 @@ rl.on('line', (line) => {
     case 'session/prompt': {
       if (process.env.DEVIN_HANG === '1') return; // never answer → abort test
       const sid = msg.params.sessionId;
+      // Подписка = credentials.toml под XDG_DATA_HOME процесса; «limited» — исчерпана.
+      const credPath = require('node:path').join(process.env.XDG_DATA_HOME || '', 'devin', 'credentials.toml');
+      const cred = fs.existsSync(credPath) ? fs.readFileSync(credPath, 'utf8') : '';
+      if (process.env.DEVIN_TURN_LOG) {
+        fs.appendFileSync(process.env.DEVIN_TURN_LOG, JSON.stringify({ xdg: process.env.XDG_DATA_HOME, cred: cred.trim(), methods: seen.map((m) => m.method) }) + '\\n');
+      }
+      if (cred.includes('limited')) {
+        // Живой формат лимита Devin (журнал cc2 09.10.26): ошибка на prompt, до вывода.
+        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code: -32010, message: 'Reached free model rate limit. Your limit will reset in 34 minutes (at 21:01 UTC). (trace ID: afd89c403f6c)' } }) + '\\n');
+        return;
+      }
       if (process.env.DEVIN_PERMISSION_TEST === '1') {
         // Ask permission and hold the prompt until the client answers.
         pendingPrompt = { id: msg.id, sid };
@@ -219,6 +229,91 @@ test('devin runtime: resume — session/load replays are muted, no session_creat
     assert.ok(!writer.messages.some((m) => m.content === 'REPLAYED-OLD-TEXT'), 'load replay muted');
     assert.ok(writer.messages.some((m) => m.content === 'LIVE-REPLY'));
     assert.equal(writer.messages.filter((m) => m.kind === 'complete').length, 1);
+  });
+});
+
+/**
+ * Две подписки: канал test-conn (линия, его креда «исчерпана») и spare.
+ * Возвращает id каналов и путь журнала ходов фейкового CLI.
+ */
+async function setupExhaustedLane(tempRoot, { hostSession }) {
+  const fsSync = await import('node:fs');
+  process.env.DEVIN_CONNECTIONS_ROOT = path.join(tempRoot, 'connections');
+  process.env.DEVIN_TURN_LOG = path.join(tempRoot, 'turns.jsonl');
+  const laneXdg = path.join(tempRoot, 'conn-xdg');
+  fsSync.writeFileSync(path.join(laneXdg, 'devin', 'credentials.toml'), 'windsurf_api_key = "limited"\n');
+  if (hostSession) {
+    // sessions.db линии знает devin-sess-1 — по ней рантайм находит линию чата.
+    fsSync.mkdirSync(path.join(laneXdg, 'devin', 'cli'), { recursive: true });
+    const { default: Database } = await import('better-sqlite3');
+    const db = new Database(path.join(laneXdg, 'devin', 'cli', 'sessions.db'));
+    db.exec("CREATE TABLE sessions (id TEXT PRIMARY KEY); INSERT INTO sessions VALUES ('devin-sess-1');");
+    db.close();
+  }
+  const spareXdg = path.join(tempRoot, 'spare-xdg');
+  fsSync.mkdirSync(path.join(spareXdg, 'devin'), { recursive: true });
+  fsSync.writeFileSync(path.join(spareXdg, 'devin', 'credentials.toml'), 'windsurf_api_key = "fresh"\n');
+  const lane = devinConnectionsDb.getByName('test-conn');
+  const spare = devinConnectionsDb.create({ name: 'spare', priority: 1, xdgDataHome: spareXdg });
+  const readTurns = async () => (await readFile(process.env.DEVIN_TURN_LOG, 'utf8'))
+    .trim().split('\n').map((line) => JSON.parse(line));
+  return { lane, spare, laneXdg, readTurns };
+}
+
+function restoreLaneEnv() {
+  delete process.env.DEVIN_CONNECTIONS_ROOT;
+  delete process.env.DEVIN_TURN_LOG;
+}
+
+test('devin runtime: лимит подписки — существующий чат продолжается на другой подписке в той же линии', async () => {
+  await withFakeDevin(async (tempRoot) => {
+    try {
+      const { lane, spare, laneXdg, readTurns } = await setupExhaustedLane(tempRoot, { hostSession: true });
+      const writer = makeWriter();
+      await devinRuntime.run('Hi', { cwd: tempRoot, sessionId: 'app-resume' }, writer, runtimeContext);
+
+      const turns = await readTurns();
+      assert.equal(turns.length, 2, 'одна попытка на исчерпанной, одна на запасной');
+      assert.equal(turns[0].xdg, laneXdg);
+      assert.match(turns[0].cred, /limited/);
+      assert.notEqual(turns[1].xdg, laneXdg, 'вторая попытка — через тень линии');
+      assert.match(turns[1].cred, /fresh/, 'платит запасная подписка');
+      assert.ok(turns[1].methods.includes('session/load'), 'та же сессия грузится из линии');
+      const fsSync = await import('node:fs');
+      assert.equal(fsSync.realpathSync(path.join(turns[1].xdg, 'devin', 'cli')), fsSync.realpathSync(path.join(laneXdg, 'devin', 'cli')));
+
+      assert.ok(writer.messages.some((m) => m.kind === 'status' && /исчерпан лимит/.test(m.text || '')), 'человек видит переход');
+      assert.ok(writer.messages.some((m) => m.content === 'LIVE-REPLY'), 'ответ дошёл');
+      assert.ok(!writer.messages.some((m) => m.kind === 'error'), 'без ошибки');
+      const completes = writer.messages.filter((m) => m.kind === 'complete');
+      assert.equal(completes.length, 1);
+      assert.equal(completes[0].exitCode, 0);
+      assert.equal(devinConnectionsDb.getById(lane.id).health_status, 'rate_limited', 'исчерпанная подписка ушла в cooldown');
+      assert.equal(devinConnectionsDb.getById(spare.id).health_status, 'ok');
+    } finally {
+      restoreLaneEnv();
+    }
+  });
+});
+
+test('devin runtime: новый чат упёрся в лимит после session/new — повтор грузит ту же сессию, без второго session_created', async () => {
+  await withFakeDevin(async (tempRoot) => {
+    try {
+      const { readTurns } = await setupExhaustedLane(tempRoot, { hostSession: false });
+      const writer = makeWriter();
+      await devinRuntime.run('Hi', { cwd: tempRoot, sessionId: 'app-new-1' }, writer, runtimeContext);
+
+      const turns = await readTurns();
+      assert.equal(turns.length, 2);
+      assert.ok(turns[0].methods.includes('session/new'));
+      assert.ok(turns[1].methods.includes('session/load'), 'повтор продолжает выделенную сессию');
+      assert.ok(!turns[1].methods.includes('session/new'), 'вторую сессию не заводит');
+      assert.equal(writer.messages.filter((m) => m.kind === 'session_created').length, 1);
+      assert.ok(writer.messages.some((m) => m.content === 'LIVE-REPLY'));
+      assert.equal(writer.messages.filter((m) => m.kind === 'complete').length, 1);
+    } finally {
+      restoreLaneEnv();
+    }
   });
 });
 

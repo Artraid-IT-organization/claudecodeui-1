@@ -7,10 +7,15 @@
  * `devin/credentials.toml` и `devin/cli/sessions.db`, поэтому каналы
  * изолированы друг от друга и от машинного дефолта.
  *
- * Выбор канала на ход: `resolveConnectionForSession` — прибитый чат
- * (`sessions.devin_connection_id`) идёт через свой канал всегда (sessions.db
- * лежит внутри его каталога, иначе resume не найдёт сессию); новый чат берёт
- * первый годный по приоритету.
+ * Линия и подписка — разные вещи (10.10.26). Канал чата
+ * (`sessions.devin_connection_id`) — ЛИНИЯ: каталог, где лежит его
+ * sessions.db; чат прибит к ней навсегда. Платит за ход ПОДПИСКА — креда
+ * любого годного канала (`pickCredentialForLane`). Чужая креда подаётся
+ * теневым XDG (`prepareTurnDataHome`): всё содержимое линии симлинками +
+ * credentials.toml выбранной подписки. Так чат продолжается, когда у его
+ * подписки кончился лимит — то же, что logout/login руками, только без
+ * переключения машинной креды. Проверено вживую: сессия, начатая под одной
+ * подпиской, продолжилась под другой с полной памятью.
  *
  * Здоровье канала: ошибки хода классифицируются (`classifyDevinFailure`) —
  * 'auth_failed' не пересматривается само (креда отозвана, ретраи бессмысленны),
@@ -87,13 +92,15 @@ function ensureSeeded(): void {
  * отозванная/битая креда, rate — лимиты и квоты, остальное — transient.
  */
 export function classifyDevinFailure(message: string): DevinFailureClass {
-  const text = message.toLowerCase();
+  // trace ID (hex) убирается до проверки: «…c403…» в нём читался бы как HTTP 403,
+  // и лимит превращался в вечный auth_failed. Коды статусов — только целым словом.
+  const text = message.toLowerCase().replace(/trace id:\s*[0-9a-f]+/g, '');
   if (
-    /401|403|unauthori[sz]ed|not authenticated|authentication required|invalid (service key|token|credential)|no credentials|devin auth login/.test(text)
+    /\b40[13]\b|unauthori[sz]ed|not authenticated|authentication required|invalid (service key|token|credential)|no credentials|devin auth login/.test(text)
   ) {
     return 'auth';
   }
-  if (/429|rate.?limit|too many requests|quota|usage limit|insufficient|exceeded|over.*limit/.test(text)) {
+  if (/\b429\b|rate.?limit|too many requests|quota|usage limit|insufficient|exceeded|over.*limit/.test(text)) {
     return 'rate_limit';
   }
   return 'transient';
@@ -103,6 +110,108 @@ export function classifyDevinFailure(message: string): DevinFailureClass {
 export function isFailoverableFailure(cls: DevinFailureClass): boolean {
   // auth-тоже годится для фоллбэка: у следующего канала может быть живая креда.
   return cls === 'auth' || cls === 'rate_limit' || cls === 'transient';
+}
+
+/**
+ * Минуты до сброса лимита из текста Devin: «Your limit will reset in 34
+ * minutes (at 21:01 UTC)». Берётся «at HH:MM UTC» (оно точнее «in N»), время в
+ * прошлом — значит завтра. null — в тексте срока нет.
+ */
+function parseRateLimitResetMinutes(message: string, now: Date = new Date()): number | null {
+  const at = /reset[^.]*\bat (\d{1,2}):(\d{2}) UTC/i.exec(message);
+  if (!at) {
+    return null;
+  }
+  const reset = new Date(now);
+  reset.setUTCHours(Number(at[1]), Number(at[2]), 0, 0);
+  if (reset.getTime() <= now.getTime()) {
+    reset.setUTCDate(reset.getUTCDate() + 1);
+  }
+  return Math.max(1, Math.ceil((reset.getTime() - now.getTime()) / 60_000));
+}
+
+/** Корень теневых XDG «линия + чужая креда»; реестр каналов его не знает и не сканирует. */
+function getCredentialOverlaysRoot(): string {
+  return path.join(getDevinConnectionsRoot(), '.overlays');
+}
+
+/**
+ * Зеркалит каталог `sourceDir` в `overlayDir` симлинками (кроме `skip`).
+ * Сначала возвращает в источник то, что процесс создал прямо в тени
+ * (новые каталоги MCP-серверов, файлы CLI) — иначе эти данные жили бы
+ * только в тени конкретной пары «линия + подписка». Висячие ссылки убираются,
+ * иначе открытие с O_CREAT создало бы файл по старому адресу.
+ */
+function mirrorDirectoryWithSymlinks(sourceDir: string, overlayDir: string, skip: Set<string>): void {
+  fsSync.mkdirSync(overlayDir, { recursive: true, mode: 0o700 });
+  for (const entry of fsSync.readdirSync(overlayDir)) {
+    if (skip.has(entry)) {
+      continue;
+    }
+    const overlayEntry = path.join(overlayDir, entry);
+    const sourceEntry = path.join(sourceDir, entry);
+    const stat = fsSync.lstatSync(overlayEntry);
+    if (stat.isSymbolicLink()) {
+      if (!fsSync.existsSync(overlayEntry)) {
+        fsSync.unlinkSync(overlayEntry);
+      }
+      continue;
+    }
+    if (!fsSync.existsSync(sourceEntry)) {
+      try {
+        fsSync.renameSync(overlayEntry, sourceEntry);
+      } catch (error) {
+        // Другая ФС или гонка с соседним ходом — запись остаётся в тени, ход не ломаем.
+        console.warn(`[Devin] overlay: не вернул ${overlayEntry} в линию:`, (error as Error).message);
+      }
+    }
+  }
+  for (const entry of fsSync.readdirSync(sourceDir)) {
+    if (skip.has(entry)) {
+      continue;
+    }
+    const overlayEntry = path.join(overlayDir, entry);
+    try {
+      fsSync.lstatSync(overlayEntry);
+    } catch {
+      try {
+        fsSync.symlinkSync(path.join(sourceDir, entry), overlayEntry);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+          throw error;
+        }
+      }
+    }
+  }
+}
+
+/**
+ * credentials.toml тени = ссылка на креду подписки. Если CLI переписал её
+ * настоящим файлом (атомарная запись при обновлении токена) — содержимое
+ * относится к той же подписке и возвращается в её каталог, затем ссылка
+ * ставится заново.
+ */
+function linkOverlayCredential(overlayDevinDir: string, credentialPath: string): void {
+  const overlayCredential = path.join(overlayDevinDir, 'credentials.toml');
+  let stat: fsSync.Stats | null = null;
+  try {
+    stat = fsSync.lstatSync(overlayCredential);
+  } catch {
+    stat = null;
+  }
+  if (stat?.isSymbolicLink() && fsSync.readlinkSync(overlayCredential) === credentialPath) {
+    return;
+  }
+  if (stat && !stat.isSymbolicLink() && stat.isFile()) {
+    const rewritten = fsSync.readFileSync(overlayCredential, 'utf8');
+    if (/^\s*windsurf_api_key\s*=/m.test(rewritten)) {
+      fsSync.writeFileSync(credentialPath, rewritten, { mode: 0o600 });
+    }
+  }
+  if (stat) {
+    fsSync.rmSync(overlayCredential, { force: true, recursive: true });
+  }
+  fsSync.symlinkSync(credentialPath, overlayCredential);
 }
 
 export type DevinConnectionView = {
@@ -178,29 +287,60 @@ export const devinConnectionsService = {
   },
 
   /**
-   * Канал существующего чата. Прибитый чат обязан идти через свой канал —
-   * sessions.db физически лежит в его каталоге. Выключенный канал для resume
-   * даёт понятную ошибку, а не тихий перескок (чужая sessions.db сессию не
-   * знает — молчаливый failover создавал бы «другой» чат с той же историей).
+   * ЛИНИЯ существующего чата — канал, в чьём каталоге лежит его sessions.db.
+   * Выключенный канал линией остаться может: выключение снимает его креду с
+   * оплаты ходов, но история чата никуда не девается и платит за неё другая
+   * подписка. Ошибка — только если канал удалён (каталога больше не знаем).
    */
-  resolveConnectionForSession(sessionId: string | null | undefined, boundConnectionId: number | null | undefined): DevinConnectionRow {
+  resolveLaneForSession(boundConnectionId: number): DevinConnectionRow {
     ensureSeeded();
-    if (boundConnectionId != null) {
-      const bound = devinConnectionsDb.getById(boundConnectionId);
-      if (!bound) {
-        throw new AppError(`The Devin connection #${boundConnectionId} this session uses was deleted.`, {
-          code: 'DEVIN_CONNECTION_GONE', statusCode: 410,
-        });
-      }
-      if (!bound.enabled) {
-        throw new AppError(`Devin connection "${bound.name}" is disabled — enable it to resume this session.`, {
-          code: 'DEVIN_CONNECTION_DISABLED', statusCode: 503,
-        });
-      }
-      return bound;
+    const lane = devinConnectionsDb.getById(boundConnectionId);
+    if (!lane) {
+      throw new AppError(`The Devin connection #${boundConnectionId} this session uses was deleted.`, {
+        code: 'DEVIN_CONNECTION_GONE', statusCode: 410,
+      });
     }
-    void sessionId;
-    return this.pickConnection();
+    return lane;
+  },
+
+  /**
+   * ПОДПИСКА, которая оплатит ход чата на линии `lane`. Порядок: выбранная в
+   * пикере (`preferredId`) → собственная креда линии → первая годная по
+   * приоритету. Перепробованные в этом ходе (`excludedIds`) и негодные
+   * (выключены, в cooldown, креда отозвана) пропускаются. Ничего не годно —
+   * AppError, как у pickConnection.
+   */
+  pickCredentialForLane(lane: DevinConnectionRow, excludedIds: number[] = [], preferredId: number | null = null): DevinConnectionRow {
+    ensureSeeded();
+    const usable = (id: number) => !excludedIds.includes(id) && devinConnectionsDb.isEligible(id);
+    if (preferredId != null && usable(preferredId)) {
+      return devinConnectionsDb.getById(preferredId)!;
+    }
+    if (usable(lane.id)) {
+      return lane;
+    }
+    return this.pickConnection(excludedIds);
+  },
+
+  /**
+   * XDG_DATA_HOME хода: линия чата, если платит её собственная креда; иначе
+   * теневой каталог `<root>/.overlays/lane-<L>-cred-<C>` — всё содержимое
+   * линии симлинками (sessions.db, transcripts, MCP-данные пишутся в линию),
+   * кроме `devin/credentials.toml`, который указывает на креду подписки.
+   * Тень пересобирается перед каждым ходом и общая для всех чатов пары.
+   */
+  prepareTurnDataHome(lane: DevinConnectionRow, credential: DevinConnectionRow): string {
+    if (lane.id === credential.id) {
+      return lane.xdg_data_home;
+    }
+    const overlay = path.join(getCredentialOverlaysRoot(), `lane-${lane.id}-cred-${credential.id}`);
+    fsSync.mkdirSync(getCredentialOverlaysRoot(), { recursive: true, mode: 0o700 });
+    const laneDevinDir = path.join(lane.xdg_data_home, 'devin');
+    fsSync.mkdirSync(laneDevinDir, { recursive: true, mode: 0o700 });
+    mirrorDirectoryWithSymlinks(lane.xdg_data_home, overlay, new Set(['devin']));
+    mirrorDirectoryWithSymlinks(laneDevinDir, path.join(overlay, 'devin'), new Set(['credentials.toml']));
+    linkOverlayCredential(path.join(overlay, 'devin'), path.join(credential.xdg_data_home, 'devin', 'credentials.toml'));
+    return overlay;
   },
 
   /**
@@ -211,10 +351,8 @@ export const devinConnectionsService = {
    */
   findConnectionHostingSession(providerSessionId: string): DevinConnectionRow | null {
     ensureSeeded();
+    // Выключенные каналы тоже: линией чата канал остаётся и выключенным.
     for (const conn of devinConnectionsDb.list()) {
-      if (!conn.enabled) {
-        continue;
-      }
       const dbPath = path.join(conn.xdg_data_home, 'devin', 'cli', 'sessions.db');
       if (!fsSync.existsSync(dbPath)) {
         continue;
@@ -407,7 +545,9 @@ export const devinConnectionsService = {
     if (cls === 'auth') {
       devinConnectionsDb.markHealth(id, 'auth_failed', { lastError: clipped });
     } else if (cls === 'rate_limit') {
-      devinConnectionsDb.markHealth(id, 'rate_limited', { lastError: clipped, cooldownMinutes: RATE_LIMIT_COOLDOWN_MINUTES });
+      // Devin называет время сброса — подписка отдыхает ровно до него, а не 15 мин наугад.
+      const cooldownMinutes = parseRateLimitResetMinutes(errorMessage ?? '') ?? RATE_LIMIT_COOLDOWN_MINUTES;
+      devinConnectionsDb.markHealth(id, 'rate_limited', { lastError: clipped, cooldownMinutes });
     } else {
       devinConnectionsDb.markHealth(id, 'error', { lastError: clipped });
     }

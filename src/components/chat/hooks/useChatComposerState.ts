@@ -848,7 +848,7 @@ export function useChatComposerState({
     const toolsSettings = getToolsSettings();
 
     return {
-      // Канал Devin, выбранный в пикере аккаунтов; для нового чата сервер берёт его, если он годен.
+      // Подписка Devin из пикера аккаунтов: платит за этот ход (новый или открытый чат), если годна.
       ...(provider === 'devin' ? { devinConnectionId: readSelectedDevinConnectionId() } : {}),
       model: currentProviderModel,
       effort: currentProviderEffort,

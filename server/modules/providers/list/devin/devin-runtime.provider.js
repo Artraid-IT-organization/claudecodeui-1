@@ -363,32 +363,37 @@ function answerPermissionRequest(request, devinMode, ws, sessionId, run, connect
 }
 
 /**
- * Тег ошибки, по которому ход переезжает на другой канал: сбой случился ДО
- * выделения Devin-session — в UI ещё ничего не ушло, поэтому ретрай честный.
+ * Тег ошибки, по которому ход переезжает на другую подписку: сбой случился
+ * ДО первого живого вывода — в UI от этого хода ещё ничего не показано,
+ * поэтому повтор честный (без дублей и потерь).
  */
 const FAILOVER_TAG = '__devinFailover';
 
-/** Сколько всего попыток у хода: первая + максимум один переход на другой канал. */
-const MAX_TURN_ATTEMPTS = 2;
+/** Сколько всего попыток у хода: по одной на подписку, с запасом на будущие. */
+const MAX_TURN_ATTEMPTS = 4;
 
 /**
- * Runs one Devin turn over ACP — обёртка выбора корпоративного канала.
+ * Runs one Devin turn over ACP — обёртка выбора линии и подписки.
  *
- * Канал решается один раз на чат: новый чат берёт первый годный по приоритету
- * (`devinConnectionsService.pickConnection`), прибитый (`sessions.
- * devin_connection_id`) идёт через свой — sessions.db физически лежит в
- * каталоге канала, и resume иначе её не найдёт.
+ * ЛИНИЯ (`sessions.devin_connection_id`) — каталог с sessions.db чата, она
+ * не меняется никогда. ПОДПИСКА — креда, которая платит за этот ход:
+ * выбранная в пикере → своя креда линии → первая годная
+ * (`pickCredentialForLane`). Чужая подписка подаётся теневым XDG
+ * (`prepareTurnDataHome`), поэтому чат продолжает свою историю под любой
+ * подпиской. Новый чат: линией становится канал первой подписки, на которой
+ * Devin выделил сессию.
  *
- * Фоллбэк: сбой до `session/new` (auth, rate limit, не поднялся CLI) гасит
- * канал (`recordOutcome`), и ход пробует следующий годный. После выделения
- * devin-session переезд невозможен — история живёт внутри каталога канала.
- * Бесконечных ретраев нет: попыток не больше MAX_TURN_ATTEMPTS.
+ * Фоллбэк: лимит/auth/сбой до первого живого вывода гасит подписку
+ * (`recordOutcome`, cooldown до названного Devin времени сброса), и тот же
+ * ход повторяется на следующей годной подписке на той же линии. Человек
+ * видит строку «подписка X исчерпана — продолжаю на Y». После того как ответ
+ * начал идти, повтора нет (иначе дубль). Попыток не больше MAX_TURN_ATTEMPTS.
  */
 async function queryDevin(command, options = {}, ws, context) {
   const { sessionId } = options;
-  // Канал, выбранный человеком в пикере аккаунтов; нерабочий — молча уступает авто-выбору.
+  // Подписка, выбранная человеком в пикере; нерабочая — молча уступает авто-выбору.
   const preferredConnectionId = Number(options.devinConnectionId) > 0 ? Number(options.devinConnectionId) : null;
-  const providerSessionId = context.resolveProviderSessionId(sessionId);
+  let providerSessionId = context.resolveProviderSessionId(sessionId);
   const boundConnectionId = sessionId
     ? (sessionsDb.getSessionById(sessionId)?.devin_connection_id ?? null)
     : null;
@@ -398,14 +403,20 @@ async function queryDevin(command, options = {}, ws, context) {
     ? (devinConnectionsService.findConnectionHostingSession(providerSessionId)?.id ?? null)
     : boundConnectionId;
 
+  let lane = null;
   const attempted = [];
   let lastError = null;
   for (let attempt = 0; attempt < MAX_TURN_ATTEMPTS; attempt++) {
     let connection;
+    let dataHome;
     try {
-      connection = hostedConnectionId != null
-        ? devinConnectionsService.resolveConnectionForSession(sessionId, hostedConnectionId)
+      if (lane == null && hostedConnectionId != null) {
+        lane = devinConnectionsService.resolveLaneForSession(hostedConnectionId);
+      }
+      connection = lane != null
+        ? devinConnectionsService.pickCredentialForLane(lane, attempted, preferredConnectionId)
         : devinConnectionsService.pickConnection(attempted, preferredConnectionId);
+      dataHome = devinConnectionsService.prepareTurnDataHome(lane ?? connection, connection);
     } catch (error) {
       // Каналов нет вовсе или все перепробованы — причину показываем, а не
       // молча заканчиваем ход.
@@ -422,22 +433,33 @@ async function queryDevin(command, options = {}, ws, context) {
 
     try {
       await attemptDevinTurn(
-        command, options, ws, context, connection, providerSessionId,
-        hostedConnectionId == null && attempt + 1 < MAX_TURN_ATTEMPTS,
+        command, options, ws, context, { lane: lane ?? connection, credential: connection, dataHome },
+        providerSessionId, attempt + 1 < MAX_TURN_ATTEMPTS,
       );
       return;
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
       devinConnectionsService.recordOutcome(connection.id, 'failed', lastError.message);
-      // Уже прибитый чат и сбой после выделения сессии переезжать не могут.
-      if (hostedConnectionId != null || !lastError[FAILOVER_TAG]) {
+      // Сбой после начала живого ответа повтор не лечит — ход заканчивается ошибкой.
+      if (!lastError[FAILOVER_TAG]) {
         throw lastError;
       }
+      // Новый чат успел получить сессию на этой линии — повтор продолжает её же,
+      // под другой подпиской, а не заводит вторую.
+      if (lastError.devinSessionId) {
+        providerSessionId = lastError.devinSessionId;
+        lane = lane ?? connection;
+      }
+      // Без имени подписки: строку видит и гость, а реестр подписок — только владелец.
+      const reason = classifyDevinFailure(lastError.message) === 'rate_limit'
+        ? 'У текущей подписки Devin исчерпан лимит'
+        : 'Текущая подписка Devin не отвечает';
+      console.log(`[Devin] ход чата ${sessionId || '-'}: подписка #${connection.id} (${connection.name}) — ${reason}, переход на другую`);
       sendMessage(ws, createNormalizedMessage({
         provider: 'devin',
         sessionId: sessionId || null,
         kind: 'status',
-        text: `Devin connection "${connection.name}" failed — switching to another channel`,
+        text: `${reason} — продолжаю на другой подписке`,
       }));
     }
   }
@@ -465,7 +487,10 @@ async function queryDevin(command, options = {}, ws, context) {
  * - exactly one terminal `complete` per turn — the registry drops duplicates
  *   emitted after an abort.
  */
-async function attemptDevinTurn(command, options = {}, ws, context, devinConn, providerSessionId, allowFailover = false) {
+async function attemptDevinTurn(command, options = {}, ws, context, route, providerSessionId, allowFailover = false) {
+  // route.lane — где живёт sessions.db чата; route.credential — чья подписка
+  // платит; route.dataHome — XDG_DATA_HOME процесса (линия или её тень).
+  const { lane, credential: devinConn, dataHome } = route;
   const {
     sessionId,
     sessionSummary,
@@ -493,11 +518,14 @@ async function attemptDevinTurn(command, options = {}, ws, context, devinConn, p
     unregisterSurvivor: null,
     finishRun: null,
     failoverRequested: false,
+    // Первый живой вывод хода (дельта, мысль, запрос разрешения) ушёл в UI.
+    liveOutputSent: false,
   };
-  // Переезд на другой канал честен только до выделения devin-session:
-  // в UI ещё ничего не ушло, а после session/new история физически живёт
-  // внутри каталога этого канала.
-  const canFailoverNow = () => allowFailover && !run.aborted && !run.sessionCreatedSent && !run.failoverRequested;
+  // Повтор на другой подписке честен, пока человек не увидел ни строчки
+  // этого хода: лимит Devin отвечает ошибкой на session/prompt сразу, до
+  // вывода. Сессия при этом уже может существовать — она в линии, и
+  // следующая попытка её загрузит.
+  const canFailoverNow = () => allowFailover && !run.aborted && !run.liveOutputSent && !run.failoverRequested;
   const sessionKey = sessionId || providerSessionId;
   run.sessionKey = sessionKey;
   if (sessionKey) {
@@ -508,9 +536,8 @@ async function attemptDevinTurn(command, options = {}, ws, context, devinConn, p
   const workingDirectory = cwd || projectPath || process.cwd();
   const devinMode = mapPermissionModeToDevinMode(permissionMode);
 
-  // Канал задаёт XDG_DATA_HOME: у каждого корпоративного подключения свои
-  // credentials.toml и sessions.db — run уходит в каталог выбранного канала.
-  const childEnv = buildDevinChildEnv(devinConn.xdg_data_home);
+  // XDG_DATA_HOME = линия чата (своя креда) или её тень с кредой подписки.
+  const childEnv = buildDevinChildEnv(dataHome);
 
   // `devin --permission-mode dangerous acp`: the flag is a top-level option
   // (dangerous = alias of bypass), accepted before the subcommand. It covers
@@ -573,9 +600,9 @@ async function attemptDevinTurn(command, options = {}, ws, context, devinConn, p
       socketPath: child.socketPath || null,
       runId: child.runId || null,
       supervisorPid: child.supervisorPid || null,
-      // Канал, чья sessions.db трогает этот ход — новый сервер читает прогресс
-      // из базы канала, а не из машинного дефолта (survivorProgressStamp).
-      devinDataHome: devinConn.xdg_data_home || null,
+      // Линия, чья sessions.db трогает этот ход — новый сервер читает прогресс
+      // из базы линии, а не из машинного дефолта (survivorProgressStamp).
+      devinDataHome: lane.xdg_data_home || null,
     },
   });
 
@@ -650,6 +677,8 @@ async function attemptDevinTurn(command, options = {}, ws, context, devinConn, p
       silentCleanup();
       const error = new Error(message);
       error[FAILOVER_TAG] = true;
+      // Сессия, которую Devin успел выделить на линии: повтор её загрузит.
+      error.devinSessionId = run.devinSessionId || null;
       reject(error);
     };
 
@@ -677,12 +706,14 @@ async function attemptDevinTurn(command, options = {}, ws, context, devinConn, p
         }
         const normalized = context.normalizeMessage(params.update ?? params, sessionId || run.devinSessionId || null);
         for (const message of normalized) {
+          run.liveOutputSent = true;
           sendMessage(ws, message);
         }
       },
 
       onRequest: (msg) => {
         if (msg.method === 'session/request_permission') {
+          run.liveOutputSent = true;
           const result = answerPermissionRequest(msg, devinMode, ws, sessionId || run.devinSessionId, run, connection);
           if (result) {
             connection.respond(msg.id, result);
@@ -746,9 +777,9 @@ async function attemptDevinTurn(command, options = {}, ws, context, devinConn, p
             mcpServers: [],
           }, HANDSHAKE_TIMEOUT_MS);
           // Наследие без привязки (чаты до Connection Layer) прибивается к
-          // каналу, через который оно реально поднялось.
+          // линии, из чьей sessions.db оно реально поднялось.
           if (sessionId && sessionsDb.getSessionById(sessionId)?.devin_connection_id == null) {
-            sessionsDb.setSessionDevinConnection(sessionId, devinConn.id);
+            sessionsDb.setSessionDevinConnection(sessionId, lane.id);
           }
         } finally {
           run.muted = false;
@@ -761,10 +792,10 @@ async function attemptDevinTurn(command, options = {}, ws, context, devinConn, p
 
         const newId = created?.sessionId;
         if (newId) {
-          // Чат прибивается к каналу в момент выделения сессии: с этого момента
-          // его sessions.db и resume живут только в каталоге этого канала.
+          // Чат прибивается к ЛИНИИ в момент выделения сессии: его sessions.db
+          // живёт в её каталоге; платить за ходы дальше может любая подписка.
           if (sessionId) {
-            sessionsDb.setSessionDevinConnection(sessionId, devinConn.id);
+            sessionsDb.setSessionDevinConnection(sessionId, lane.id);
           }
           run.devinSessionId = newId;
           if (typeof ws.setSessionId === 'function') {

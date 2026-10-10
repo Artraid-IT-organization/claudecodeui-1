@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -125,4 +125,90 @@ test('pickConnection: chosen channel in cooldown or already tried falls back to 
     assert.equal(devinConnectionsService.pickConnection([], limited.id).id, top.id);
     assert.equal(devinConnectionsService.pickConnection([top.id], top.id).id, spare.id);
   });
+});
+
+test('classifyDevinFailure: hex trace ID with "403" inside is still a rate limit, not auth', () => {
+  const live = 'Reached free model rate limit. Your limit will reset in 34 minutes (at 21:01 UTC). (trace ID: afd89c403f6c84cbe2c1)';
+  assert.equal(classifyDevinFailure(live), 'rate_limit');
+  assert.equal(classifyDevinFailure('HTTP 403 Forbidden'), 'auth');
+});
+
+test('recordOutcome: rate limit cools the subscription down until the reset time Devin names', async () => {
+  await withIsolatedDatabase(() => {
+    const conn = devinConnectionsDb.create({ name: 'limited', xdgDataHome: '/tmp/xdg-cool' });
+    const reset = new Date(Date.now() + 47 * 60_000);
+    const hhmm = `${String(reset.getUTCHours()).padStart(2, '0')}:${String(reset.getUTCMinutes()).padStart(2, '0')}`;
+    devinConnectionsService.recordOutcome(conn.id, 'failed', `Reached free model rate limit. Your limit will reset in 47 minutes (at ${hhmm} UTC).`);
+    const row = devinConnectionsDb.getById(conn.id)!;
+    assert.equal(row.health_status, 'rate_limited');
+    const cooldownMinutes = (Date.parse(`${row.cooldown_until!.replace(' ', 'T')}Z`) - Date.now()) / 60_000;
+    assert.ok(cooldownMinutes > 44 && cooldownMinutes <= 48, `cooldown ≈ 47 min, got ${cooldownMinutes}`);
+  });
+});
+
+test('pickCredentialForLane: picker choice → lane own credential → any eligible', async () => {
+  await withIsolatedDatabase(() => {
+    const lane = devinConnectionsDb.create({ name: 'lane', priority: 5, xdgDataHome: '/tmp/xdg-lane' });
+    const top = devinConnectionsDb.create({ name: 'top', priority: 0, xdgDataHome: '/tmp/xdg-top' });
+    const chosen = devinConnectionsDb.create({ name: 'chosen', priority: 9, xdgDataHome: '/tmp/xdg-chosen' });
+    assert.equal(devinConnectionsService.pickCredentialForLane(lane, [], chosen.id).id, chosen.id);
+    assert.equal(devinConnectionsService.pickCredentialForLane(lane).id, lane.id);
+    // Своя подписка линии исчерпана — платит первая годная по приоритету.
+    devinConnectionsDb.markHealth(lane.id, 'rate_limited', { cooldownMinutes: 30 });
+    assert.equal(devinConnectionsService.pickCredentialForLane(lane).id, top.id);
+    assert.equal(devinConnectionsService.pickCredentialForLane(lane, [top.id]).id, chosen.id);
+    // Выключенная линия остаётся линией (resolveLaneForSession), но не платит.
+    devinConnectionsDb.update(lane.id, { enabled: false });
+    assert.equal(devinConnectionsService.resolveLaneForSession(lane.id).id, lane.id);
+  });
+});
+
+test('prepareTurnDataHome: shadow XDG mirrors the lane and carries the subscription credential', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'devin-overlay-'));
+  const previousRoot = process.env.DEVIN_CONNECTIONS_ROOT;
+  process.env.DEVIN_CONNECTIONS_ROOT = path.join(root, 'connections');
+  try {
+    await withIsolatedDatabase(async () => {
+      const laneXdg = path.join(root, 'lane');
+      const credXdg = path.join(root, 'cred');
+      await mkdir(path.join(laneXdg, 'devin', 'cli'), { recursive: true });
+      await mkdir(path.join(laneXdg, 'notebooklm-mcp'), { recursive: true });
+      await writeFile(path.join(laneXdg, 'devin', 'cli', 'sessions.db'), 'LANE-DB');
+      await writeFile(path.join(laneXdg, 'devin', 'credentials.toml'), 'windsurf_api_key = "lane"\n');
+      await mkdir(path.join(credXdg, 'devin'), { recursive: true });
+      await writeFile(path.join(credXdg, 'devin', 'credentials.toml'), 'windsurf_api_key = "cred"\n');
+      const lane = devinConnectionsDb.create({ name: 'lane', xdgDataHome: laneXdg });
+      const credential = devinConnectionsDb.create({ name: 'cred', xdgDataHome: credXdg });
+
+      assert.equal(devinConnectionsService.prepareTurnDataHome(lane, lane), laneXdg, 'own credential — no shadow');
+
+      const shadow = devinConnectionsService.prepareTurnDataHome(lane, credential);
+      assert.notEqual(shadow, laneXdg);
+      assert.equal(await readFile(path.join(shadow, 'devin', 'cli', 'sessions.db'), 'utf8'), 'LANE-DB');
+      assert.match(await readFile(path.join(shadow, 'devin', 'credentials.toml'), 'utf8'), /"cred"/);
+      assert.ok((await lstat(path.join(shadow, 'notebooklm-mcp'))).isSymbolicLink(), 'other XDG apps mirrored');
+
+      // Запись через тень попадает в линию.
+      await writeFile(path.join(shadow, 'devin', 'cli', 'new-lock'), 'x');
+      assert.equal(await readFile(path.join(laneXdg, 'devin', 'cli', 'new-lock'), 'utf8'), 'x');
+
+      // Созданное процессом прямо в тени возвращается в линию при следующей сборке.
+      await mkdir(path.join(shadow, 'fresh-mcp'));
+      await writeFile(path.join(shadow, 'fresh-mcp', 'state.json'), '{}');
+      devinConnectionsService.prepareTurnDataHome(lane, credential);
+      assert.equal(await readFile(path.join(laneXdg, 'fresh-mcp', 'state.json'), 'utf8'), '{}');
+      assert.ok((await lstat(path.join(shadow, 'fresh-mcp'))).isSymbolicLink());
+
+      // Креду, переписанную CLI настоящим файлом, получает её подписка, ссылка — восстанавливается.
+      await rm(path.join(shadow, 'devin', 'credentials.toml'));
+      await writeFile(path.join(shadow, 'devin', 'credentials.toml'), 'windsurf_api_key = "cred-refreshed"\n');
+      devinConnectionsService.prepareTurnDataHome(lane, credential);
+      assert.match(await readFile(path.join(credXdg, 'devin', 'credentials.toml'), 'utf8'), /cred-refreshed/);
+      assert.ok((await lstat(path.join(shadow, 'devin', 'credentials.toml'))).isSymbolicLink());
+      assert.match(await readFile(path.join(laneXdg, 'devin', 'credentials.toml'), 'utf8'), /"lane"/, 'lane credential untouched');
+    });
+  } finally {
+    if (previousRoot === undefined) delete process.env.DEVIN_CONNECTIONS_ROOT; else process.env.DEVIN_CONNECTIONS_ROOT = previousRoot;
+    await rm(root, { recursive: true, force: true });
+  }
 });

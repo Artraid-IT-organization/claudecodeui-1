@@ -525,25 +525,37 @@ CLI отдаёт модели отказ стоп-хука (`decision: block`) �
 
 Devin — не одна машинная креда, а реестр серверных каналов `devin_connections`.
 Сотрудники не логинятся в Devin сами: ход идёт через канал, который сервер
-выбирает по приоритету; каждый чат прибит к каналу и к автору.
+выбирает по приоритету; каждый чат прибит к линии (каталогу истории) и к автору.
 
 - **Канал = каталог.** `xdg_data_home` строки — это XDG_DATA_HOME дочернего
   `devin acp`: внутри `<xdg>/devin/credentials.toml` (0600, каталоги 0700) и
   `<xdg>/devin/cli/sessions.db`. Креды в БД и в API не живут — только путь и
-  метаданные. Привязка чата к каналу — `sessions.devin_connection_id`; сменить
-  канал у чата нельзя (его sessions.db физически в каталоге канала). Кто начал
-  чат — `sessions.initiated_by_user_id` (ставит createAppSession из
-  request-контекста; наследие до Layer'а — NULL, видно только владельцу).
-- **Выбор** (`devin-connections.service.ts`): `pickConnection` — enabled, без
-  auth_failed, без живого cooldown, по priority. `resolveConnectionForSession`
-  для прибитых чатов — свой канал всегда (выключенный → 503, не перескок).
-  Непривязанное наследие (devinSessionId есть, привязки нет) ищется по
-  sessions.db всех каналов — `findConnectionHostingSession`.
-- **Фоллбэк**: сбой ДО `session/new` (auth, rate limit, не поднялся CLI)
-  помечает канал (`recordOutcome`: auth_failed навсегда до замены креды,
-  rate_limited + cooldown 15 мин, прочее — error) и ход пробует следующий
-  канал, максимум MAX_TURN_ATTEMPTS=2. После выделения сессии переезда нет —
-  история в каталоге первого канала.
+  метаданные. Кто начал чат — `sessions.initiated_by_user_id` (ставит
+  createAppSession из request-контекста; наследие до Layer'а — NULL, видно
+  только владельцу).
+- **Линия ≠ подписка (10.10.26).** `sessions.devin_connection_id` — ЛИНИЯ:
+  каталог с sessions.db чата, не меняется никогда. Платит за ход ПОДПИСКА —
+  креда любого годного канала: пикер → своя креда линии → первая годная
+  (`pickCredentialForLane`). Чужая креда подаётся теневым XDG
+  `<connections-root>/.overlays/lane-L-cred-C` (`prepareTurnDataHome`):
+  содержимое линии симлинками (запись идёт в линию), `devin/credentials.toml`
+  → креда подписки; созданное процессом прямо в тени (каталоги MCP-серверов —
+  они тоже пишут в XDG_DATA_HOME) при следующей сборке переезжает в линию.
+  В схеме sessions.db Devin поля аккаунта нет — проверено вживую: сессия,
+  начатая под mywork-djn, продолжилась под default с полной памятью.
+  Выключенный канал остаётся линией (`resolveLaneForSession`, ошибка только
+  если канал удалён), его креда просто не платит.
+- **Фоллбэк по подпискам**: лимит Devin приходит ошибкой на `session/prompt`
+  ДО вывода («Reached free model rate limit… reset… at HH:MM UTC»). Пока
+  человек не увидел ни строчки хода (`run.liveOutputSent`), ход повторяется
+  на следующей подписке в той же линии (новый чат — грузит уже выделенную
+  сессию, второй session_created не шлётся), MAX_TURN_ATTEMPTS=4. В UI —
+  статус «У текущей подписки Devin исчерпан лимит — продолжаю на другой»
+  (без имени подписки: строку видит гость). `recordOutcome`: auth_failed —
+  навсегда до замены креды; rate_limited — cooldown до времени сброса из
+  текста Devin (иначе 15 мин); прочее — error. **Грабля:** классификатор
+  искал `403`/`401` подстрокой, а в тексте лимита hex trace ID — «…c403…»
+  превращал лимит в вечный auth_failed; trace ID теперь вырезается, коды — `\b`.
 - **Админка**: владелец — `Settings → API` → «Devin — корпоративные каналы»
   (список, здоровье, вкл/выкл, замена креды credentials.toml целиком,
   живая проба `devin auth status`, список задач канала). API —
@@ -554,12 +566,13 @@ Devin — не одна машинная креда, а реестр серве�
   «default» (xdg = общий `~/.local/share`), файлы не копируются.
 - **Пикер аккаунтов (09.10.26)**: в меню сайдбара — Claude (только слоты с
   вошедшим аккаунтом: пустой слот 2 скрыт, `readOwnerSlotInfo` в user.service),
-  Devin (все включённые каналы реестра, email берётся из `devin auth status`
-  при пробе → `devin_connections.account_email`), Codex. Выбор канала Devin →
+  Devin (все включённые каналы реестра, подпись — ярлык
+  `devin_connections.account_email`), Codex. Выбор канала Devin →
   localStorage `selected-devin-connection` → `options.devinConnectionId` в
-  `chat.send` → `pickConnection(excluded, preferred)`: годный выбранный берётся,
-  иначе авто-фолбэк по приоритету. Выбор действует только на НОВЫЙ чат (прибитый
-  к каналу чат канал не меняет). Список каналов в пикере — owner-only (403 — пункты скрыты).
+  `chat.send` (каждый ход) → подписка следующего ответа и в новом, и в открытом
+  чате; негодная — авто-фолбэк. Почту CLI не отдаёт — ярлык ставится кнопкой
+  «Ярлык» в админке (PATCH accountEmail). Список каналов в пикере — owner-only
+  (403 — пункты скрыты); гостям фолбэк по подпискам работает автоматически.
 - **Ошибки видны**: `canReceiveProviderEvents` для devin фильтрует по
   sessionId → initiated_by_user_id (наследие — владельцу); websocket-гейт
   `isDevinSessionForbiddenForUser` — по той же авторской проверке.
