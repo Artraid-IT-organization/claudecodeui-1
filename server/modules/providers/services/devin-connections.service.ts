@@ -92,9 +92,10 @@ function ensureSeeded(): void {
  * отозванная/битая креда, rate — лимиты и квоты, остальное — transient.
  */
 export function classifyDevinFailure(message: string): DevinFailureClass {
-  // trace ID (hex) убирается до проверки: «…c403…» в нём читался бы как HTTP 403,
-  // и лимит превращался в вечный auth_failed. Коды статусов — только целым словом.
-  const text = message.toLowerCase().replace(/trace id:\s*[0-9a-f]+/g, '');
+  // Хвост «(trace ID: …) — журнал CLI» отбрасываем: в нём случайный hex и тайминги
+  // вида `time.busy=403µs`, которые читались как HTTP 403 — и лимит становился
+  // вечным auth_failed (бывший local-patch 0010). Коды статусов — целым словом.
+  const text = message.toLowerCase().replace(/\(trace id:[\s\S]*$/, '');
   if (
     /\b40[13]\b|unauthori[sz]ed|not authenticated|authentication required|invalid (service key|token|credential)|no credentials|devin auth login/.test(text)
   ) {

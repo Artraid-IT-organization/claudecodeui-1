@@ -130,6 +130,9 @@ test('pickConnection: chosen channel in cooldown or already tried falls back to 
 test('classifyDevinFailure: hex trace ID with "403" inside is still a rate limit, not auth', () => {
   const live = 'Reached free model rate limit. Your limit will reset in 34 minutes (at 21:01 UTC). (trace ID: afd89c403f6c84cbe2c1)';
   assert.equal(classifyDevinFailure(live), 'rate_limit');
+  // Живой хвост из журнала: тайминг `time.busy=403µs` после trace ID (бывший local-patch 0010).
+  const limitWithTrace = 'Devin run failed: Reached free model rate limit. Your limit will reset in 45 seconds. (trace ID: 294c57b83d29bb7b9cbcc12271cffef5) — INFO chisel_agent::acp_server: close time.busy=403µs time.idle=1.33s';
+  assert.equal(classifyDevinFailure(limitWithTrace), 'rate_limit');
   assert.equal(classifyDevinFailure('HTTP 403 Forbidden'), 'auth');
 });
 
