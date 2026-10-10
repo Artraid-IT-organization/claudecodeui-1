@@ -29,6 +29,7 @@ export type DevinConnectionRow = {
   cooldown_until: string | null;
   last_error: string | null;
   last_health_check_at: string | null;
+  account_email: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -67,6 +68,13 @@ export const devinConnectionsDb = {
     return (getConnection()
       .prepare('SELECT * FROM devin_connections WHERE name = ?')
       .get(name) as DevinConnectionRow | undefined) ?? null;
+  },
+
+  /** Годен ли канал прямо сейчас (тот же критерий, что у выбора на новый ход). */
+  isEligible(id: number): boolean {
+    return Boolean(getConnection()
+      .prepare(`SELECT 1 FROM devin_connections ${ELIGIBLE_WHERE} AND id = ?`)
+      .get(id));
   },
 
   /** Первый годный канал для нового хода или null, если все выключены/в кулдауне. */
@@ -109,13 +117,15 @@ export const devinConnectionsDb = {
     description?: string;
     enabled?: boolean;
     priority?: number;
+    accountEmail?: string | null;
   }): DevinConnectionRow | null {
     const sets: string[] = [];
-    const params: Array<string | number> = [];
+    const params: Array<string | number | null> = [];
     if (fields.name !== undefined) { sets.push('name = ?'); params.push(fields.name); }
     if (fields.description !== undefined) { sets.push('description = ?'); params.push(fields.description); }
     if (fields.enabled !== undefined) { sets.push('enabled = ?'); params.push(fields.enabled ? 1 : 0); }
     if (fields.priority !== undefined) { sets.push('priority = ?'); params.push(fields.priority); }
+    if (fields.accountEmail !== undefined) { sets.push('account_email = ?'); params.push(fields.accountEmail); }
     if (sets.length === 0) {
       return this.getById(id);
     }
@@ -130,6 +140,8 @@ export const devinConnectionsDb = {
   markHealth(id: number, health: DevinConnectionHealth, options?: {
     lastError?: string | null;
     cooldownMinutes?: number;
+    /** Почта аккаунта из `devin auth status`; undefined — не трогать сохранённую. */
+    accountEmail?: string | null;
   }): void {
     getConnection()
       .prepare(
@@ -137,11 +149,19 @@ export const devinConnectionsDb = {
            health_status = ?,
            last_error = ?,
            cooldown_until = CASE WHEN ? IS NULL THEN NULL ELSE datetime('now', '+' || ? || ' minutes') END,
+           account_email = COALESCE(?, account_email),
            last_health_check_at = CURRENT_TIMESTAMP,
            updated_at = CURRENT_TIMESTAMP
          WHERE id = ?`,
       )
-      .run(health, options?.lastError ?? null, options?.cooldownMinutes ?? null, options?.cooldownMinutes ?? null, id);
+      .run(
+        health,
+        options?.lastError ?? null,
+        options?.cooldownMinutes ?? null,
+        options?.cooldownMinutes ?? null,
+        options?.accountEmail ?? null,
+        id,
+      );
   },
 
   /** Снять с канала диагноз (после замены креды): обратно в неизвестное, но годное. */

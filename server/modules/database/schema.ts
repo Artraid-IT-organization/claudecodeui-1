@@ -268,6 +268,7 @@ CREATE TABLE IF NOT EXISTS devin_connections (
     cooldown_until DATETIME,
     last_error TEXT,
     last_health_check_at DATETIME,
+    account_email TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );

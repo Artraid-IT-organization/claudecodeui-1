@@ -386,6 +386,8 @@ const MAX_TURN_ATTEMPTS = 2;
  */
 async function queryDevin(command, options = {}, ws, context) {
   const { sessionId } = options;
+  // Канал, выбранный человеком в пикере аккаунтов; нерабочий — молча уступает авто-выбору.
+  const preferredConnectionId = Number(options.devinConnectionId) > 0 ? Number(options.devinConnectionId) : null;
   const providerSessionId = context.resolveProviderSessionId(sessionId);
   const boundConnectionId = sessionId
     ? (sessionsDb.getSessionById(sessionId)?.devin_connection_id ?? null)
@@ -403,7 +405,7 @@ async function queryDevin(command, options = {}, ws, context) {
     try {
       connection = hostedConnectionId != null
         ? devinConnectionsService.resolveConnectionForSession(sessionId, hostedConnectionId)
-        : devinConnectionsService.pickConnection(attempted);
+        : devinConnectionsService.pickConnection(attempted, preferredConnectionId);
     } catch (error) {
       // Каналов нет вовсе или все перепробованы — причину показываем, а не
       // молча заканчиваем ход.

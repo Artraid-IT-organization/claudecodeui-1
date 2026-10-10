@@ -440,6 +440,7 @@ router.patch(
       description: typeof body.description === 'string' ? body.description : undefined,
       enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
       priority: typeof body.priority === 'number' ? body.priority : undefined,
+      accountEmail: typeof body.accountEmail === 'string' ? body.accountEmail : (body.accountEmail === null ? null : undefined),
     });
     res.json(createApiSuccessResponse({ connection }));
   }),

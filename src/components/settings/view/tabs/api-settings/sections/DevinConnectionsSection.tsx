@@ -16,6 +16,8 @@ type DevinConnection = {
   lastError: string | null;
   boundSessions: number;
   hasCredentials: boolean;
+  /** Ярлык в пикере аккаунтов (почта подписки или произвольный текст). */
+  accountEmail: string | null;
 };
 
 type Task = {
@@ -50,6 +52,8 @@ export default function DevinConnectionsSection() {
   const [showNewForm, setShowNewForm] = useState(false);
   const [credentialFor, setCredentialFor] = useState<number | null>(null);
   const [credentialText, setCredentialText] = useState('');
+  const [labelFor, setLabelFor] = useState<number | null>(null);
+  const [labelText, setLabelText] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -136,6 +140,17 @@ export default function DevinConnectionsSection() {
     setBusy(null);
   };
 
+  const saveLabel = async (conn: DevinConnection) => {
+    setBusy(conn.id);
+    await call(`/api/providers/devin/connections/${conn.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ accountEmail: labelText.trim() === '' ? null : labelText.trim() }),
+    });
+    setLabelFor(null);
+    await load();
+    setBusy(null);
+  };
+
   const loadTasks = async (conn: DevinConnection) => {
     const result = await call(`/api/providers/devin/connections/${conn.id}/tasks`);
     if (result) {
@@ -175,6 +190,7 @@ export default function DevinConnectionsSection() {
                   <div className="mt-1 text-xs text-muted-foreground">
                     приоритет {conn.priority} · чатов {conn.boundSessions}
                     {conn.hasCredentials ? '' : ' · креды нет'}
+                    {conn.accountEmail ? ` · ярлык: ${conn.accountEmail}` : ''}
                     {conn.description ? ` · ${conn.description}` : ''}
                   </div>
                   {conn.lastError && (
@@ -194,11 +210,37 @@ export default function DevinConnectionsSection() {
                     onClick={() => setCredentialFor(credentialFor === conn.id ? null : conn.id)}>
                     Креда
                   </Button>
+                  <Button size="sm" variant="outline" disabled={isBusy}
+                    onClick={() => {
+                      setLabelFor(labelFor === conn.id ? null : conn.id);
+                      setLabelText(conn.accountEmail ?? '');
+                    }}>
+                    Ярлык
+                  </Button>
                   <Button size="sm" variant="outline" disabled={isBusy} onClick={() => void loadTasks(conn)}>
                     Задачи
                   </Button>
                 </div>
               </div>
+
+              {labelFor === conn.id && (
+                <div className="mt-3 space-y-2">
+                  <input
+                    className="w-full rounded-md border bg-background p-2 text-sm"
+                    placeholder="Ярлык в пикере аккаунтов (напр. devin-pro-1 или почта)"
+                    value={labelText}
+                    onChange={(e) => setLabelText(e.target.value)}
+                  />
+                  <div className="flex gap-2">
+                    <Button size="sm" disabled={isBusy} onClick={() => void saveLabel(conn)}>
+                      Сохранить
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={() => setLabelFor(null)}>
+                      Отмена
+                    </Button>
+                  </div>
+                </div>
+              )}
 
               {credentialFor === conn.id && (
                 <div className="mt-3 space-y-2">

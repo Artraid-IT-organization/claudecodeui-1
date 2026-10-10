@@ -718,6 +718,13 @@ export const runMigrations = (db: Database) => {
     `);
 
     db.exec(DEVIN_CONNECTIONS_TABLE_SCHEMA_SQL);
+    addColumnToTableIfNotExists(
+      db,
+      'devin_connections',
+      (db.prepare('PRAGMA table_info(devin_connections)').all() as { name: string }[]).map((column) => column.name),
+      'account_email',
+      'TEXT',
+    );
     db.exec(LOGIN_TOKEN_ALIASES_TABLE_SCHEMA_SQL);
 
     db.exec(PROJECTS_TABLE_SCHEMA_SQL);

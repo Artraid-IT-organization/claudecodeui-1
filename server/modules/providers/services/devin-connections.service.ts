@@ -117,6 +117,7 @@ export type DevinConnectionView = {
   lastHealthCheckAt: string | null;
   boundSessions: number;
   hasCredentials: boolean;
+  accountEmail: string | null;
 };
 
 function toView(row: DevinConnectionRow): DevinConnectionView {
@@ -138,6 +139,7 @@ function toView(row: DevinConnectionRow): DevinConnectionView {
     lastHealthCheckAt: row.last_health_check_at,
     boundSessions: devinConnectionsDb.countBoundSessions(row.id),
     hasCredentials,
+    accountEmail: row.account_email,
   };
 }
 
@@ -153,9 +155,16 @@ export const devinConnectionsService = {
     return devinConnectionsDb.getById(id);
   },
 
-  /** Канал для НОВОГО хода — первый годный по приоритету, либо AppError. */
-  pickConnection(excludedIds: number[] = []): DevinConnectionRow {
+  /**
+   * Канал для НОВОГО хода. Выбранный человеком канал (`preferredId`) берётся,
+   * если он годен и ещё не перепробован; иначе — первый годный по приоритету
+   * (авто-фолбэк). Если ничего не годно — AppError.
+   */
+  pickConnection(excludedIds: number[] = [], preferredId: number | null = null): DevinConnectionRow {
     ensureSeeded();
+    if (preferredId != null && !excludedIds.includes(preferredId) && devinConnectionsDb.isEligible(preferredId)) {
+      return devinConnectionsDb.getById(preferredId)!;
+    }
     const row = excludedIds.length === 0
       ? devinConnectionsDb.pickAvailable()
       : devinConnectionsDb.pickAvailableExcluding(excludedIds);
@@ -257,7 +266,7 @@ export const devinConnectionsService = {
     return toView(row);
   },
 
-  updateConnection(id: number, fields: { name?: string; description?: string; enabled?: boolean; priority?: number }): DevinConnectionView {
+  updateConnection(id: number, fields: { name?: string; description?: string; enabled?: boolean; priority?: number; accountEmail?: string | null }): DevinConnectionView {
     ensureSeeded();
     const row = devinConnectionsDb.getById(id);
     if (!row) {
@@ -275,6 +284,15 @@ export const devinConnectionsService = {
         throw new AppError(`Devin connection "${name}" already exists.`, { code: 'CONNECTION_EXISTS', statusCode: 409 });
       }
       fields.name = name;
+    }
+    if (fields.accountEmail !== undefined && fields.accountEmail !== null) {
+      // Ярлык канала в пикере аккаунтов: обычно почта подписки, но поле свободное —
+      // у devin CLI почту из auth status не прочитать, ярлык ставит владелец.
+      const label = fields.accountEmail.trim();
+      if (label.length === 0 || label.length > 254) {
+        throw new AppError('accountEmail must be 1-254 chars or null to clear.', { code: 'INVALID_ACCOUNT_EMAIL', statusCode: 400 });
+      }
+      fields.accountEmail = label;
     }
     const updated = devinConnectionsDb.update(id, fields);
     return toView(updated!);
@@ -363,8 +381,9 @@ export const devinConnectionsService = {
       child.on('close', (code) => resolve({ stdout, code }));
     });
     const lower = result.stdout.toLowerCase();
+    const accountEmail = /^\s*email:\s*(\S+)/im.exec(result.stdout)?.[1] ?? undefined;
     if (/logged in/.test(lower) && !/authentication required|failed to fetch/.test(lower)) {
-      devinConnectionsDb.markHealth(id, 'ok', { lastError: null });
+      devinConnectionsDb.markHealth(id, 'ok', { lastError: null, accountEmail });
     } else if (/authentication required|not authenticated|invalid service key/.test(lower)) {
       devinConnectionsDb.markHealth(id, 'auth_failed', { lastError: 'devin auth status: authentication required' });
     } else {

@@ -552,6 +552,14 @@ Devin — не одна машинная креда, а реестр серве�
   /:id/credential с телом креды.
 - **Посев**: если реестр пуст и есть машинная креда — она становится каналом
   «default» (xdg = общий `~/.local/share`), файлы не копируются.
+- **Пикер аккаунтов (09.10.26)**: в меню сайдбара — Claude (только слоты с
+  вошедшим аккаунтом: пустой слот 2 скрыт, `readOwnerSlotInfo` в user.service),
+  Devin (все включённые каналы реестра, email берётся из `devin auth status`
+  при пробе → `devin_connections.account_email`), Codex. Выбор канала Devin →
+  localStorage `selected-devin-connection` → `options.devinConnectionId` в
+  `chat.send` → `pickConnection(excluded, preferred)`: годный выбранный берётся,
+  иначе авто-фолбэк по приоритету. Выбор действует только на НОВЫЙ чат (прибитый
+  к каналу чат канал не меняет). Список каналов в пикере — owner-only (403 — пункты скрыты).
 - **Ошибки видны**: `canReceiveProviderEvents` для devin фильтрует по
   sessionId → initiated_by_user_id (наследие — владельцу); websocket-гейт
   `isDevinSessionForbiddenForUser` — по той же авторской проверке.

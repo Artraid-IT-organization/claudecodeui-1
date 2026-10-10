@@ -29,7 +29,7 @@ export const SELECT_PROVIDER_EVENT = 'ccui:select-provider';
  * это делает выбор модели на пустом экране: запись в localStorage плюс событие
  * для уже открытого поля ввода.
  */
-export function selectChatProvider(provider: 'claude' | 'codex'): void {
+export function selectChatProvider(provider: 'claude' | 'codex' | 'devin'): void {
   localStorage.setItem('selected-provider', provider);
   window.dispatchEvent(new CustomEvent(SELECT_PROVIDER_EVENT, { detail: provider }));
 }

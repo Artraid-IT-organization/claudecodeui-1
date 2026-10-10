@@ -107,3 +107,22 @@ test('pickConnection throws AppError when nothing is available', async () => {
     }
   });
 });
+
+test('pickConnection: chosen channel wins over priority when eligible', async () => {
+  await withIsolatedDatabase(() => {
+    devinConnectionsDb.create({ name: 'first', priority: 0, xdgDataHome: '/tmp/xdg-p1' });
+    const chosen = devinConnectionsDb.create({ name: 'chosen', priority: 5, xdgDataHome: '/tmp/xdg-p2' });
+    assert.equal(devinConnectionsService.pickConnection([], chosen.id).id, chosen.id);
+  });
+});
+
+test('pickConnection: chosen channel in cooldown or already tried falls back to priority', async () => {
+  await withIsolatedDatabase(() => {
+    const top = devinConnectionsDb.create({ name: 'top', priority: 0, xdgDataHome: '/tmp/xdg-f1' });
+    const limited = devinConnectionsDb.create({ name: 'limited', priority: 1, xdgDataHome: '/tmp/xdg-f2' });
+    devinConnectionsDb.markHealth(limited.id, 'rate_limited', { cooldownMinutes: 15 });
+    const spare = devinConnectionsDb.create({ name: 'spare', priority: 2, xdgDataHome: '/tmp/xdg-f3' });
+    assert.equal(devinConnectionsService.pickConnection([], limited.id).id, top.id);
+    assert.equal(devinConnectionsService.pickConnection([top.id], top.id).id, spare.id);
+  });
+});

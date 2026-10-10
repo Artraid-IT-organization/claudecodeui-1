@@ -13,6 +13,7 @@ import { useDropzone } from 'react-dropzone';
 
 import { authenticatedFetch } from '../../../utils/api';
 import type { MarkSessionProcessing, SessionActivityMap } from '../../../hooks/useSessionProtection';
+import { readSelectedDevinConnectionId } from '../../../hooks/useDevinConnectionPicker';
 import { grantClaudeToolPermission } from '../utils/chatPermissions';
 import { useSessionMessageQueue } from './useSessionMessageQueue';
 import {
@@ -847,6 +848,8 @@ export function useChatComposerState({
     const toolsSettings = getToolsSettings();
 
     return {
+      // Канал Devin, выбранный в пикере аккаунтов; для нового чата сервер берёт его, если он годен.
+      ...(provider === 'devin' ? { devinConnectionId: readSelectedDevinConnectionId() } : {}),
       model: currentProviderModel,
       effort: currentProviderEffort,
       permissionMode: resolvePermissionModeForProvider(provider, permissionMode),

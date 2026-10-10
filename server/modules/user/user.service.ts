@@ -306,19 +306,7 @@ export function createUserService(dependencies: UserDependencies) {
 
       const activeSlot = dependencies.users.getActiveOwnerAccountSlot(userId);
 
-      const readSlotInfo = async (slot: number): Promise<OwnerAccountInfo> => {
-        try {
-          const configDir = getWebUserClaudeConfigDir(userId, slot);
-          const claudeJsonPath = path.join(configDir, '.claude.json');
-          const raw = await readFile(claudeJsonPath, 'utf-8');
-          const parsed = JSON.parse(raw) as { oauthAccount?: { emailAddress?: string } };
-          return { slot, email: parsed.oauthAccount?.emailAddress ?? null, available: true };
-        } catch {
-          return { slot, email: null, available: false };
-        }
-      };
-
-      const accounts = await Promise.all([readSlotInfo(1), readSlotInfo(2)]);
+      const accounts = await Promise.all([readOwnerSlotInfo(userId, 1), readOwnerSlotInfo(userId, 2)]);
       return { success: true, activeSlot, accounts };
     },
 
@@ -363,17 +351,7 @@ export function createUserService(dependencies: UserDependencies) {
 
       // Return the same shape as getOwnerAccounts so the client can update in place.
       const activeSlot = slot;
-      const readSlotInfo = async (s: number): Promise<OwnerAccountInfo> => {
-        try {
-          const dir = getWebUserClaudeConfigDir(userId, s);
-          const raw = await readFile(path.join(dir, '.claude.json'), 'utf-8');
-          const parsed = JSON.parse(raw) as { oauthAccount?: { emailAddress?: string } };
-          return { slot: s, email: parsed.oauthAccount?.emailAddress ?? null, available: true };
-        } catch {
-          return { slot: s, email: null, available: false };
-        }
-      };
-      const accounts = await Promise.all([readSlotInfo(1), readSlotInfo(2)]);
+      const accounts = await Promise.all([readOwnerSlotInfo(userId, 1), readOwnerSlotInfo(userId, 2)]);
       return { success: true, activeSlot, accounts };
     },
   };
@@ -384,3 +362,19 @@ type OwnerAccountInfo = {
   email: string | null;
   available: boolean;
 };
+
+/**
+ * Состояние одного слота Claude хозяина. Слот доступен только с вошедшим
+ * аккаунтом: файл `.claude.json` может существовать и без `oauthAccount`
+ * (пустой слот) — тогда в пикере его быть не должно.
+ */
+async function readOwnerSlotInfo(userId: number, slot: number): Promise<OwnerAccountInfo> {
+  try {
+    const raw = await readFile(path.join(getWebUserClaudeConfigDir(userId, slot), '.claude.json'), 'utf-8');
+    const email = (JSON.parse(raw) as { oauthAccount?: { emailAddress?: string } }).oauthAccount?.emailAddress ?? null;
+    return { slot, email, available: email !== null };
+  } catch {
+    return { slot, email: null, available: false };
+  }
+}
+
