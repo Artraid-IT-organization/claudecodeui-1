@@ -167,6 +167,14 @@ export const sessionsDb = {
    * original "freeze once any custom_name exists" behavior unchanged, so
    * this fix stays scoped to the provider it was reported for.
    */
+  /*
+   * `project_path` у рождённой в вебе строки (`origin='web'`) провайдер не
+   * перетирает: человек выбрал проект при создании, а cwd, который присылает
+   * синхронизатор, может быть другим написанием того же места (Devin пишет в
+   * sessions.db realpath — у гостей team-access `workspace/work` это симлинк,
+   * и чат уезжал в одноимённую папку-двойник: «не все чаты в списке»).
+   * Строкам без веб-выбора (terminal/auto/CLI) cwd провайдера — правда.
+   */
   createSession(
     providerSessionId: string,
     provider: string,
@@ -204,7 +212,10 @@ export const sessionsDb = {
           `UPDATE sessions SET
              provider = ?,
              updated_at = COALESCE(?, CURRENT_TIMESTAMP),
-             project_path = ?,
+             project_path = CASE
+               WHEN origin = 'web' AND project_path IS NOT NULL THEN project_path
+               ELSE ?
+             END,
              jsonl_path = ?,
              account_dir = COALESCE(?, account_dir),
              origin = COALESCE(origin, ?),
@@ -227,7 +238,10 @@ export const sessionsDb = {
           `UPDATE sessions SET
              provider = ?,
              updated_at = COALESCE(?, CURRENT_TIMESTAMP),
-             project_path = ?,
+             project_path = CASE
+               WHEN origin = 'web' AND project_path IS NOT NULL THEN project_path
+               ELSE ?
+             END,
              jsonl_path = ?,
              account_dir = COALESCE(?, account_dir),
              origin = COALESCE(origin, ?),
@@ -261,7 +275,11 @@ export const sessionsDb = {
          provider = excluded.provider,
          provider_session_id = excluded.provider_session_id,
          updated_at = excluded.updated_at,
-         project_path = excluded.project_path,
+         project_path = CASE
+           WHEN sessions.origin = 'web' AND sessions.project_path IS NOT NULL
+             THEN sessions.project_path
+           ELSE excluded.project_path
+         END,
          jsonl_path = excluded.jsonl_path,
          account_dir = COALESCE(excluded.account_dir, sessions.account_dir),
          origin = COALESCE(sessions.origin, excluded.origin),
@@ -669,6 +687,46 @@ export const sessionsDb = {
     return normalizeSessionRow(row) ?? null;
   },
 
+  /**
+   * Все ожидающие provider-id app-строки провайдера — кандидаты на привязку,
+   * когда точного совпадения `project_path` нет. Devin хранит в sessions.db
+   * `working_directory` в realpath-написании, а app-строка рождается с
+   * лексическим путём (у гостей team-access `workspace/work` — симлинк), так
+   * что равенство строк тут не работает: сравнивать по realpath обязан
+   * вызывающий. Потребитель — devin-session-synchronizer.
+   */
+  findPendingAppSessions(provider: string): SessionRow[] {
+    const db = getConnection();
+    const rows = db
+      .prepare(
+        `SELECT ${SESSION_ROW_COLUMNS}
+         FROM sessions
+         WHERE provider = ?
+           AND provider_session_id IS NULL
+           AND isArchived = 0
+         ORDER BY datetime(COALESCE(updated_at, created_at)) DESC, session_id DESC`
+      )
+      .all(provider) as SessionRow[];
+
+    return normalizeSessionRows(rows);
+  },
+
+  /**
+   * Все известные пути транскриптов из таблицы сессий. Инкрементальный скан
+   * сверяет с ними диск: файл, которого нет в базе, индексируется независимо
+   * от mtime — иначе появившийся с «старым» временем (копия с сохранённым
+   * mtime, файл, долившийся между курсором и границей скана) навсегда
+   * оставался невидимым. Потребитель — claude-session-synchronizer.
+   */
+  listTranscriptPaths(): string[] {
+    const db = getConnection();
+    const rows = db
+      .prepare(`SELECT jsonl_path FROM sessions WHERE jsonl_path IS NOT NULL`)
+      .all() as { jsonl_path: string }[];
+
+    return rows.map((row) => row.jsonl_path);
+  },
+
   getAllSessions(): SessionRow[] {
     const db = getConnection();
     const rows = db
@@ -772,13 +830,16 @@ export const sessionsDb = {
   getSessionsByProjectPathIncludingArchived(projectPath: string): SessionRow[] {
     const db = getConnection();
     const normalizedProjectPath = normalizeProjectPath(projectPath);
+    // Скоуп обязателен и здесь: путь проекта не уникален между аккаунтами
+    // (симлинк/realpath дают один project_path у разных webuser-корней), и без
+    // него архивный вид показывал чужие сессии.
     const rows = db
       .prepare(
         `SELECT ${SESSION_ROW_COLUMNS}
          FROM sessions
-         WHERE project_path = ?`
+         WHERE project_path = ?` + ACCOUNT_SCOPE_SQL
       )
-      .all(normalizedProjectPath) as SessionRow[];
+      .all(normalizedProjectPath, getActiveAccountDir()) as SessionRow[];
 
     return normalizeSessionRows(rows);
   },

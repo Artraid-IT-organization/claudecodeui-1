@@ -32,13 +32,22 @@ type SynchronizeRowsResult = {
  * dir — the server's own config dir, NOT the request context (a guest listing
  * projects triggers this sync and must not claim the owner's sessions).
  */
-function getMachineAccountDir(): string {
-  const dir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+/**
+ * Каноническое написание пути: realpath, а при недоступном/несуществующем
+ * пути — разрешённый абсолют. Симлинки team-access (`workspace/work` →
+ * `people/<имя>/home/work`) схлопываются в одно написание.
+ */
+function resolveCanonicalPath(dir: string): string {
   try {
     return fsSync.realpathSync.native(dir);
   } catch {
     return path.resolve(dir);
   }
+}
+
+function getMachineAccountDir(): string {
+  const dir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+  return resolveCanonicalPath(dir);
 }
 
 /**
@@ -151,7 +160,8 @@ export class DevinSessionSynchronizer implements IProviderSessionSynchronizer {
     const fallbackTitle = 'Untitled Devin Session';
     const pendingAppSession = sessionsDb.getSessionByProviderSessionId(sessionId)
       ?? sessionsDb.getSessionById(sessionId)
-      ?? sessionsDb.findLatestPendingAppSession(this.provider, projectPath);
+      ?? sessionsDb.findLatestPendingAppSession(this.provider, projectPath)
+      ?? this.findPendingAppSessionByRealpath(projectPath);
     if (pendingAppSession && !pendingAppSession.provider_session_id) {
       // Race guard: the DB watcher can index a session before the runtime's
       // provider-id mapping lands — bind the id to the fresh app row first.
@@ -180,5 +190,22 @@ export class DevinSessionSynchronizer implements IProviderSessionSynchronizer {
       undefined,
       { accountDir: existingSession?.account_dir ? null : getMachineAccountDir(), origin: 'terminal' },
     );
+  }
+
+  /**
+   * Devin пишет `working_directory` в realpath-написании, а app-строка
+   * рождается с лексическим путём, который человек выбрал в интерфейсе (у
+   * гостей team-access `workspace/work` — симлинк на `people/<имя>/home/work`).
+   * Равенство строк их не связывает, и чат уезжал в одноимённый проект-
+   * двойник — сверяем realpath каждой ожидающей app-строки провайдера.
+   */
+  private findPendingAppSessionByRealpath(projectPath: string) {
+    const target = resolveCanonicalPath(projectPath);
+    for (const row of sessionsDb.findPendingAppSessions(this.provider)) {
+      if (row.project_path && resolveCanonicalPath(row.project_path) === target) {
+        return row;
+      }
+    }
+    return null;
   }
 }

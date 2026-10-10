@@ -330,16 +330,21 @@ const assertDevinAdminAccess = (): void => {
 };
 
 /**
- * Devin-чат теперь имеет account_dir инициатора — гость может трогать только
- * свои строки. Строки без владельца (наследие до атрибуции) — только владельцу,
- * как и раньше.
+ * Любая session-строка имеет владельца: `account_dir` аккаунта и/или
+ * `initiated_by_user_id` автора. Гость может трогать только свои строки.
+ * Строки без владельца (наследие до атрибуции, машинные записи) — только
+ * владельцу площадки.
+ *
+ * Проверка общая для ВСЕХ провайдеров: раньше она стояла только на
+ * devin-строках, и чужой claude-чат открывался по прямой ссылке — история,
+ * rewind, переименование, удаление (IDOR, аудит 10.10.26).
  */
-const assertDevinSessionRowAllowed = (sessionId: string): void => {
+const assertSessionRowAllowed = (sessionId: string): void => {
   if (!OPEN_REGISTRATION) {
     return;
   }
   const row = sessionsDb.getSessionById(sessionId);
-  if (row?.provider !== 'devin') {
+  if (!row) {
     return;
   }
   const userId = getRequestRuntimeContext()?.userId;
@@ -353,7 +358,7 @@ const assertDevinSessionRowAllowed = (sessionId: string): void => {
   }
   const activeDir = getActiveAccountDir();
   if (row.account_dir == null || row.account_dir !== activeDir) {
-    throw new AppError('This Devin session belongs to another user.', {
+    throw new AppError('This session belongs to another user.', {
       code: 'PROVIDER_NOT_ALLOWED',
       statusCode: 403,
     });
@@ -954,7 +959,7 @@ router.post(
   '/sessions/:sessionId/server-scope',
   asyncHandler(async (req: Request, res: Response) => {
     const sessionId = parseSessionId(req.params.sessionId);
-    assertDevinSessionRowAllowed(sessionId);
+    assertSessionRowAllowed(sessionId);
     // null — «как у папки»; строка — явный блок верхней панели.
     const raw = (req.body ?? {}).serverScope;
     const serverScope = raw === null ? null : normalizeServerScope(raw);
@@ -967,6 +972,7 @@ router.post(
   '/sessions/:sessionId/flag',
   asyncHandler(async (req: Request, res: Response) => {
     const sessionId = parseSessionId(req.params.sessionId);
+    assertSessionRowAllowed(sessionId);
     const flagged = (req.body ?? {}).flagged;
     if (typeof flagged !== 'boolean') {
       throw new AppError('flagged must be a boolean.', { code: 'INVALID_FLAGGED', statusCode: 400 });
@@ -985,6 +991,7 @@ router.get(
   '/sessions/:sessionId/provider-id',
   asyncHandler(async (req: Request, res: Response) => {
     const sessionId = parseSessionId(req.params.sessionId);
+    assertSessionRowAllowed(sessionId);
     const providerSessionId = sessionsService.getProviderSessionId(sessionId);
     res.json(createApiSuccessResponse({ sessionId: providerSessionId }));
   }),
@@ -999,6 +1006,7 @@ router.post(
   '/sessions/:sessionId/rewind',
   asyncHandler(async (req: Request, res: Response) => {
     const sessionId = parseSessionId(req.params.sessionId);
+    assertSessionRowAllowed(sessionId);
     const body = (req.body ?? {}) as Record<string, unknown>;
     const messageId = typeof body.messageId === 'string' && body.messageId.trim() ? body.messageId.trim() : null;
     const text = typeof body.text === 'string' && body.text.trim() ? body.text : null;
@@ -1017,6 +1025,7 @@ router.get(
   '/sessions/:sessionId/token-usage',
   asyncHandler(async (req: Request, res: Response) => {
     const sessionId = parseSessionId(req.params.sessionId);
+    assertSessionRowAllowed(sessionId);
     const result = await providerTokenUsageService.getSessionTokenUsage(sessionId);
     res.json(createApiSuccessResponse(result));
   }),
@@ -1028,6 +1037,7 @@ router.get(
   '/sessions/:sessionId',
   asyncHandler(async (req: Request, res: Response) => {
     const sessionId = parseSessionId(req.params.sessionId);
+    assertSessionRowAllowed(sessionId);
     const result = sessionsService.getSessionDetailsById(sessionId);
     res.json(createApiSuccessResponse(result));
   }),
@@ -1037,7 +1047,7 @@ router.delete(
   '/sessions/:sessionId',
   asyncHandler(async (req: Request, res: Response) => {
     const sessionId = parseSessionId(req.params.sessionId);
-    assertDevinSessionRowAllowed(sessionId);
+    assertSessionRowAllowed(sessionId);
     const force = parseOptionalBooleanQuery(req.query.force, 'force') ?? false;
     const deletedFromDisk = parseOptionalBooleanQuery(req.query.deletedFromDisk, 'deletedFromDisk') ?? force;
     const result = await sessionsService.deleteOrArchiveSessionById(sessionId, {
@@ -1052,7 +1062,7 @@ router.post(
   '/sessions/:sessionId/restore',
   asyncHandler(async (req: Request, res: Response) => {
     const sessionId = parseSessionId(req.params.sessionId);
-    assertDevinSessionRowAllowed(sessionId);
+    assertSessionRowAllowed(sessionId);
     const result = sessionsService.restoreSessionById(sessionId);
     res.json(createApiSuccessResponse(result));
   }),
@@ -1062,7 +1072,7 @@ router.put(
   '/sessions/:sessionId',
   asyncHandler(async (req: Request, res: Response) => {
     const sessionId = parseSessionId(req.params.sessionId);
-    assertDevinSessionRowAllowed(sessionId);
+    assertSessionRowAllowed(sessionId);
     const summary = parseSessionRenameSummary(req.body);
     const result = sessionsService.renameSessionById(sessionId, summary);
     res.json(createApiSuccessResponse(result));
@@ -1073,6 +1083,7 @@ router.get(
   '/sessions/:sessionId/messages',
   asyncHandler(async (req: Request, res: Response) => {
     const sessionId = parseSessionId(req.params.sessionId);
+    assertSessionRowAllowed(sessionId);
     const limit = parseBoundedIntegerQuery(req.query.limit, 'limit', null, 0);
     const offset = parseBoundedIntegerQuery(req.query.offset, 'offset', 0, 0);
 

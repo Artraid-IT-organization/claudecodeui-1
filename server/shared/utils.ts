@@ -1207,12 +1207,24 @@ export function sanitizeLeafDirectoryName(inputName: string, label = 'directory 
  * forever, since birthtime never changes after creation. The sidebar showed
  * a long-running chat as stuck "1d ago" indefinitely even while it was being
  * actively used, because the synchronizer stopped ever re-visiting it.
+ *
+ * `knownPaths` (optional) is the set of transcript paths already present in
+ * the sessions DB. When provided, a file that is NOT in the set is collected
+ * regardless of mtime: a transcript can land in the tree with an mtime older
+ * than the scan cursor (copied with preserved timestamps, appended during a
+ * scan between cursor read and tree walk), and mtime filtering alone would
+ * skip it forever — the file existed on disk but stayed invisible in the UI
+ * (audit 10.10.26: two Vince transcripts, one 50 MB, invisible for days).
+ * Corollary: a transcript whose DB row was deleted while the file was kept
+ * (`deletedFromDisk=false`) will be re-indexed — the file on disk is the
+ * source of truth.
  */
 export async function findFilesRecursivelyCreatedAfter(
   rootDir: string,
   extension: string,
   lastScanAt: Date | null,
-  fileList: string[] = []
+  fileList: string[] = [],
+  knownPaths?: ReadonlySet<string>
 ): Promise<string[]> {
   try {
     const entries = await readdir(rootDir, { withFileTypes: true });
@@ -1220,7 +1232,7 @@ export async function findFilesRecursivelyCreatedAfter(
       const fullPath = path.join(rootDir, entry.name);
 
       if (entry.isDirectory()) {
-        await findFilesRecursivelyCreatedAfter(fullPath, extension, lastScanAt, fileList);
+        await findFilesRecursivelyCreatedAfter(fullPath, extension, lastScanAt, fileList, knownPaths);
         continue;
       }
 
@@ -1234,7 +1246,7 @@ export async function findFilesRecursivelyCreatedAfter(
       }
 
       const fileStat = await stat(fullPath);
-      if (fileStat.mtime > lastScanAt) {
+      if (fileStat.mtime > lastScanAt || (knownPaths && !knownPaths.has(fullPath))) {
         fileList.push(fullPath);
       }
     }

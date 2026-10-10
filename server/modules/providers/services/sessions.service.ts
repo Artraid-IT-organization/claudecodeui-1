@@ -19,18 +19,18 @@ import { getWebUserWorkspaceRoot } from '@/shared/web-user-paths.js';
 import { hasOwnClaudeAccess, resolveWebUserRuntimeContext } from '@/shared/web-user-runtime.js';
 
 /**
- * Devin-чаты читает владелец площадки и человек, которому чат принадлежит
+ * Любой чат читает владелец площадки и человек, которому чат принадлежит
  * (`initiated_by_user_id` или каталог аккаунта — то же правило, что у
- * `assertDevinSessionRowAllowed` в provider.routes). Чужой session id не
- * должен отдавать ни историю, ни provider id: хранилище Devin общее на
- * машину.
+ * `assertSessionRowAllowed` в provider.routes). Чужой session id не должен
+ * отдавать ни историю, ни provider id, ни метаданные: проверка раньше стояла
+ * только на devin, и claude-чаты открывались по прямой ссылке (IDOR, аудит
+ * 10.10.26).
  */
 const assertSessionReadable = (session: {
-  provider: string;
   initiated_by_user_id: number | null;
   account_dir: string | null;
 }): void => {
-  if (session.provider !== 'devin' || !OPEN_REGISTRATION) {
+  if (!OPEN_REGISTRATION) {
     return;
   }
   const userId = getRequestRuntimeContext()?.userId;
@@ -44,7 +44,7 @@ const assertSessionReadable = (session: {
   if (session.account_dir != null && session.account_dir === getActiveAccountDir()) {
     return;
   }
-  throw new AppError('This Devin session belongs to another user.', {
+  throw new AppError('This session belongs to another user.', {
     code: 'PROVIDER_NOT_ALLOWED',
     statusCode: 403,
   });
@@ -349,6 +349,7 @@ export const sessionsService = {
         statusCode: 404,
       });
     }
+    assertSessionReadable(session);
 
     sessionsDb.setSessionServerScope(sessionId, serverScope);
     return { serverScope };
@@ -366,6 +367,7 @@ export const sessionsService = {
         statusCode: 404,
       });
     }
+    assertSessionReadable(session);
 
     sessionsDb.setSessionFlagged(sessionId, flagged);
     return { flagged };
@@ -585,6 +587,7 @@ export const sessionsService = {
         statusCode: 404,
       });
     }
+    assertSessionReadable(session);
 
     if (!options.force) {
       sessionsDb.updateSessionIsArchived(sessionId, true);
@@ -626,6 +629,7 @@ export const sessionsService = {
         statusCode: 404,
       });
     }
+    assertSessionReadable(session);
 
     sessionsDb.updateSessionIsArchived(sessionId, false);
     return { sessionId, isArchived: false };
@@ -642,6 +646,7 @@ export const sessionsService = {
         statusCode: 404,
       });
     }
+    assertSessionReadable(session);
 
     sessionsDb.renameSessionByUser(sessionId, summary);
     return { sessionId, summary };
