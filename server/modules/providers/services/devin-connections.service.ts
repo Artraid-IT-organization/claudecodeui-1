@@ -40,7 +40,11 @@ const RATE_LIMIT_COOLDOWN_MINUTES = 15;
 /** Проба здоровья канала — живой вызов CLI, не «файл на месте». */
 const HEALTH_CHECK_TIMEOUT_MS = 20_000;
 
-export type DevinFailureClass = 'auth' | 'rate_limit' | 'transient';
+/**
+ * 'session_locked' — сессию держит другой процесс devin (предыдущий ход чата
+ * ещё жив): подписка ни при чём, перебор подписок ничего не даст.
+ */
+export type DevinFailureClass = 'auth' | 'rate_limit' | 'session_locked' | 'transient';
 
 const DEVIN_CONNECTION_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 
@@ -96,6 +100,11 @@ export function classifyDevinFailure(message: string): DevinFailureClass {
   // вида `time.busy=403µs`, которые читались как HTTP 403 — и лимит становился
   // вечным auth_failed (бывший local-patch 0010). Коды статусов — целым словом.
   const text = message.toLowerCase().replace(/\(trace id:[\s\S]*$/, '');
+  // Живой текст 10.10.26: «Session 'x' is already open in another process (PID n)»,
+  // errorKind session_locked. Проверка первой: в хвосте stderr бывают и «403».
+  if (/already open in another process|session_locked/.test(message.toLowerCase())) {
+    return 'session_locked';
+  }
   if (
     /\b40[13]\b|unauthori[sz]ed|not authenticated|authentication required|invalid (service key|token|credential)|no credentials|devin auth login/.test(text)
   ) {
@@ -110,6 +119,7 @@ export function classifyDevinFailure(message: string): DevinFailureClass {
 /** Можно ли попробовать другой канал при таком классе сбоя. */
 export function isFailoverableFailure(cls: DevinFailureClass): boolean {
   // auth-тоже годится для фоллбэка: у следующего канала может быть живая креда.
+  // session_locked — нет: замок на сессии в линии, его держит не подписка.
   return cls === 'auth' || cls === 'rate_limit' || cls === 'transient';
 }
 
@@ -543,6 +553,9 @@ export const devinConnectionsService = {
     }
     const cls = classifyDevinFailure(errorMessage ?? '');
     const clipped = (errorMessage ?? '').slice(0, 500);
+    if (cls === 'session_locked') {
+      return; // подписка здорова — занят чат, а не она
+    }
     if (cls === 'auth') {
       devinConnectionsDb.markHealth(id, 'auth_failed', { lastError: clipped });
     } else if (cls === 'rate_limit') {

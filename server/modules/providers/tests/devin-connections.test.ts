@@ -134,6 +134,10 @@ test('classifyDevinFailure: hex trace ID with "403" inside is still a rate limit
   const limitWithTrace = 'Devin run failed: Reached free model rate limit. Your limit will reset in 45 seconds. (trace ID: 294c57b83d29bb7b9cbcc12271cffef5) — INFO chisel_agent::acp_server: close time.busy=403µs time.idle=1.33s';
   assert.equal(classifyDevinFailure(limitWithTrace), 'rate_limit');
   assert.equal(classifyDevinFailure('HTTP 403 Forbidden'), 'auth');
+  assert.equal(
+    classifyDevinFailure("Session 'sequoia-hearing' is already open in another process (PID 291819). Close the other instance before opening it here."),
+    'session_locked',
+  );
 });
 
 test('recordOutcome: rate limit cools the subscription down until the reset time Devin names', async () => {

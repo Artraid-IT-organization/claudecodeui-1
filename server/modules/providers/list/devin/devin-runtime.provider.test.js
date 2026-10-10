@@ -67,6 +67,12 @@ rl.on('line', (line) => {
       respond(msg.id, { sessionId: 'devin-sess-1' });
       break;
     case 'session/load':
+      if (process.env.DEVIN_SESSION_LOCKED === '1') {
+        // Живой ответ Devin 10.10.26: сессию держит процесс прошлого хода.
+        if (process.env.DEVIN_TURN_LOG) fs.appendFileSync(process.env.DEVIN_TURN_LOG, JSON.stringify({ locked: true, xdg: process.env.XDG_DATA_HOME }) + '\\n');
+        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code: -32015, message: "Session '" + msg.params.sessionId + "' is already open in another process (PID 291819). Close the other instance before opening it here.", data: { 'cognition.ai/errorKind': 'session_locked' } } }) + '\\n');
+        break;
+      }
       // Replayed history MUST be muted by the runtime.
       notify('session/update', { sessionId: msg.params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'REPLAYED-OLD-TEXT' } } });
       respond(msg.id, { sessionId: msg.params.sessionId });
@@ -312,6 +318,31 @@ test('devin runtime: новый чат упёрся в лимит после ses
       assert.ok(writer.messages.some((m) => m.content === 'LIVE-REPLY'));
       assert.equal(writer.messages.filter((m) => m.kind === 'complete').length, 1);
     } finally {
+      restoreLaneEnv();
+    }
+  });
+});
+
+test('devin runtime: сессию держит прошлый ход — без перебора подписок и без штрафа им, человеку понятная ошибка', async () => {
+  await withFakeDevin(async (tempRoot) => {
+    process.env.DEVIN_SESSION_LOCKED = '1';
+    try {
+      const { lane, spare, readTurns } = await setupExhaustedLane(tempRoot, { hostSession: true });
+      devinConnectionsDb.markHealth(lane.id, 'ok', { lastError: null });
+      const fsSync = await import('node:fs');
+      fsSync.writeFileSync(path.join(tempRoot, 'conn-xdg', 'devin', 'credentials.toml'), 'windsurf_api_key = "ok"\n');
+      const writer = makeWriter();
+      await devinRuntime.run('Hi', { cwd: tempRoot, sessionId: 'app-resume' }, writer, runtimeContext).catch(() => {});
+
+      assert.equal((await readTurns()).length, 1, 'одна попытка — другие подписки замок не снимут');
+      const errors = writer.messages.filter((m) => m.kind === 'error');
+      assert.equal(errors.length, 1);
+      assert.match(errors[0].content, /чат ещё занят/);
+      assert.equal(writer.messages.filter((m) => m.kind === 'complete').length, 1);
+      assert.equal(devinConnectionsDb.getById(lane.id).health_status, 'ok', 'подписка линии не штрафуется');
+      assert.equal(devinConnectionsDb.getById(spare.id).health_status, 'unknown');
+    } finally {
+      delete process.env.DEVIN_SESSION_LOCKED;
       restoreLaneEnv();
     }
   });

@@ -109,7 +109,11 @@ if [ ! -f "$REL/.verified" ]; then
 
     if [ "${CCUI_RUN_TESTS:-1}" = "1" ]; then
         say "Тесты сервера версии $SHORT (несколько минут)"
-        nice -n 19 ionice -c 3 npm test > .test.log 2>&1
+        # Окружение сервера (OPEN_REGISTRATION, DATABASE_PATH боевой, каталоги
+        # живых ходов) тестам не передаём: запущенные из чата cc2 они читали
+        # живые папки и давали «регрессии», которых в коде нет.
+        env -i PATH="$PATH" HOME="$HOME" HUSKY=0 NODE_OPTIONS="$NODE_OPTIONS" \
+            nice -n 19 ionice -c 3 npm test > .test.log 2>&1
         fails="$(grep -E '^# fail [0-9]+' .test.log | tail -1 | awk '{print $3}')"
         [ -n "$fails" ] \
             || { status "ОШИБКА: тесты версии $SHORT не запустились, работает прежняя. Лог: $REL/.test.log"; exit 1; }
@@ -128,8 +132,14 @@ if [ ! -f "$REL/.verified" ]; then
     smoke_home="$(mktemp -d)"
     smoke_port=$((PORT + 100))
     while ss -ltn 2>/dev/null | grep -q ":$smoke_port "; do smoke_port=$((smoke_port + 1)); done
-    HOME="$smoke_home" HOST=127.0.0.1 SERVER_PORT="$smoke_port" NODE_ENV=production \
+    # env -i: проба не наследует окружение запустившего. 10.10.26 выкатку
+    # запустили из чата cc2 — у той оболочки CLOUDCLI_LIVE_RUNS_DIR боевой, и
+    # проба «усыновила» живые ходы Devin, перехватила сокеты их супервизоров;
+    # боевой сервер стёр записи, после рестарта ходы остались сиротами и
+    # держали замок сессии («already open in another process»).
+    env -i PATH="$PATH" HOME="$smoke_home" HOST=127.0.0.1 SERVER_PORT="$smoke_port" NODE_ENV=production \
         DATABASE_PATH="$smoke_home/smoke.db" OPEN_REGISTRATION=true \
+        CLOUDCLI_LIVE_RUNS_DIR="$smoke_home/live-runs" CLOUDCLI_DEVIN_RUNS_DIR="$smoke_home/devin-runs" \
         node dist-server/server/index.js > .smoke.log 2>&1 &
     smoke_pid=$!
     smoke_ok=0

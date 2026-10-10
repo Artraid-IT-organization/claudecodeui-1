@@ -912,8 +912,26 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
       const detail = tail && !message.includes(tail.trim().split('\n').pop() || '')
         ? `${message} — ${tail.trim().split('\n').pop()}`
         : message;
-      if (!run.failoverRequested && canFailoverNow() && isFailoverableFailure(classifyDevinFailure(detail))) {
+      const failureClass = classifyDevinFailure(detail);
+      if (!run.failoverRequested && canFailoverNow() && isFailoverableFailure(failureClass)) {
         requestFailover(detail);
+        return;
+      }
+      if (failureClass === 'session_locked') {
+        // Сессию держит живой процесс прошлого хода этого чата — подписки ни при чём.
+        const holderPid = /\(PID (\d+)\)/.exec(detail)?.[1];
+        console.warn(`[Devin] чат ${sessionId || '-'}: сессия ${run.devinSessionId || providerSessionId} занята процессом ${holderPid || '?'}`);
+        // Исходный текст — в учёт исхода (recordOutcome узнаёт session_locked и
+        // подписку не штрафует); человеку — что делать.
+        run.lastErrorDetail = detail;
+        sendMessage(ws, createNormalizedMessage({
+          provider: 'devin',
+          sessionId: run.devinSessionId || sessionId || null,
+          kind: 'error',
+          content: 'Этот чат ещё занят: предыдущий ход Devin не завершился. Подождите, пока он закончит, и отправьте сообщение снова.',
+        }));
+        finish(1, false);
+        reject(new Error(detail));
         return;
       }
       notifyRunFailed({
