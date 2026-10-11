@@ -29,9 +29,19 @@ export default function ProtectedRoute({ children }: ProtectedRouteProps) {
     inviteToken,
     inviteStatus,
     error,
+    statusCheckFailedAt,
   } = useAuth();
 
   if (isLoading) {
+    return <AuthLoadingScreen />;
+  }
+
+  // Проверка входа упала по связи и идёт повтор (см. AuthContext): какой экран
+  // нужен — ещё неизвестно, а форма логина при недоступном сервере всё равно
+  // не сработает. Держим честный экран «проверяю / сервер не отвечает» вместо
+  // парольной формы (11.10.26: на общем сервере с входом по ссылке при сбое
+  // проверки всплывало старое окно «Добро пожаловать»).
+  if (!user && statusCheckFailedAt !== null) {
     return <AuthLoadingScreen />;
   }
 
