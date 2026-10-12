@@ -27,45 +27,92 @@ const SPACER_ATTR = 'data-md-copy-spacer';
 type Restore = () => void;
 
 // Номер пункта — как на экране: от `start` списка, с учётом `value` у пункта.
-const insertListNumbers = (range: Range, restores: Restore[]) => {
-  document.querySelectorAll<HTMLOListElement>(`[${MARKDOWN_ROOT_ATTR}] ol`).forEach((ol) => {
-    if (!range.intersectsNode(ol)) return;
-    const items = Array.from(ol.children).filter((el): el is HTMLLIElement => el.tagName === 'LI');
+// Сам тег списка на время копирования убирается совсем: Telegram читает из
+// «богатой» копии <ol> и дорисовывает свои номера поверх вставленных текстом —
+// `list-style: none` его не останавливал, и вставка давала «1. 1.» (12.10.26).
+// Плоские div такой разметки не дают ни в одном приложении.
+const flattenOrderedLists = (range: Range, restores: Restore[]) => {
+  // Перенос детей пункта в промежуточный div для движка — «удаление узла»:
+  // он сам пересаживает границы диапазона на место бывшего списка, и выделение
+  // сползало на весь список. Исходные границы запоминаем до перестановок
+  // и после ставим заново: переехавшие узлы — те же самые.
+  const startNode = range.startContainer;
+  const startOffset = range.startOffset;
+  const endNode = range.endContainer;
+  const endOffset = range.endOffset;
+  type Pair = { li: HTMLLIElement; item: HTMLDivElement; label: HTMLSpanElement };
+  const flats: { ol: HTMLOListElement; container: HTMLDivElement; pairs: Pair[] }[] = [];
+  const lists = Array.from(
+    document.querySelectorAll<HTMLOListElement>(`[${MARKDOWN_ROOT_ATTR}] ol`),
+  ).filter((ol) => range.intersectsNode(ol));
+  lists.forEach((ol) => {
+    const container = document.createElement('div');
+    const pairs: Pair[] = [];
     let counter = ol.start || 1;
-    let touched = false;
-    items.forEach((li) => {
-      if (li.hasAttribute('value')) counter = li.value;
-      const number = counter;
-      counter += 1;
-      if (!range.intersectsNode(li)) return;
-      // Абзац пункта — это div, номер ставится в него,
-      // иначе номер окажется отдельной строкой над текстом.
-      const first = li.firstElementChild;
-      const host = first && first.tagName === 'DIV' && li.firstChild === first ? first : li;
-      const label = document.createElement('span');
-      label.setAttribute(SPACER_ATTR, '');
-      label.textContent = `${number}. `;
-      host.insertBefore(label, host.firstChild);
-      restores.push(() => label.remove());
-      // Выделение пальцем или мышью от первой буквы пункта начинается внутри
-      // текста, правее вставленного номера, и номер первого пункта в копию не
-      // попадал. Если до начала выделения в пункте ничего нет — захватить номер.
-      if (range.comparePoint(label, 0) < 0) {
-        const gap = document.createRange();
-        gap.setStartAfter(label);
-        gap.setEnd(range.startContainer, range.startOffset);
-        if (gap.toString().trim() === '') range.setStartBefore(label);
+    const step = ol.reversed ? -1 : 1;
+    Array.from(ol.childNodes).forEach((child) => {
+      if (!(child instanceof HTMLLIElement)) {
+        container.appendChild(child);
+        return;
       }
-      touched = true;
+      const li = child;
+      if (li.hasAttribute('value')) counter = li.value;
+      const item = document.createElement('div');
+      while (li.firstChild) item.appendChild(li.firstChild);
+      // Абзац пункта — это div, номер ставится внутрь него,
+      // иначе номер окажется отдельной строкой над текстом.
+      const first = item.firstElementChild;
+      const host = first && first.tagName === 'DIV' && item.firstChild === first ? first : item;
+      const label = document.createElement('span');
+      label.textContent = `${counter}. `;
+      host.insertBefore(label, host.firstChild);
+      counter += step;
+      container.appendChild(item);
+      pairs.push({ li, item, label });
     });
-    if (touched) {
-      const previous = ol.style.listStyleType;
-      ol.style.listStyleType = 'none';
-      restores.push(() => {
-        ol.style.listStyleType = previous;
+    ol.replaceWith(container);
+    flats.push({ ol, container, pairs });
+    restores.push(() => {
+      pairs.forEach(({ li, item, label }) => {
+        label.remove();
+        while (item.firstChild) li.appendChild(item.firstChild);
+        item.replaceWith(li);
       });
-    }
+      while (container.firstChild) ol.appendChild(container.firstChild);
+      container.replaceWith(ol);
+    });
   });
+  if (flats.length === 0) return;
+  // Границы, стоявшие на самих тегах списка или пункта (выделение «по блокам»),
+  // пересадить на новые элементы — снятые узлы вне документа, иначе копия
+  // обрывается. Если номер стал ребёнком пункта-обёртки (абзац — не div),
+  // смещение больше нуля сдвигается на 1.
+  const mapBoundary = (node: Node, offset: number): [Node, number] => {
+    for (const { ol, container, pairs } of flats) {
+      if (node === ol) return [container, offset];
+      for (const { li, item, label } of pairs) {
+        if (node === li) {
+          const shift = item.firstChild === label ? 1 : 0;
+          return [item, offset === 0 ? 0 : offset + shift];
+        }
+      }
+    }
+    return [node, offset];
+  };
+  const [sN, sO] = mapBoundary(startNode, startOffset);
+  const [eN, eO] = mapBoundary(endNode, endOffset);
+  range.setStart(sN, sO);
+  range.setEnd(eN, eO);
+  // Выделение пальцем или мышью от первой буквы пункта начинается правее
+  // вставленного номера: если до начала выделения в пункте ничего нет —
+  // захватить номер, иначе первый «1.» терялся.
+  flats.forEach(({ pairs }) => pairs.forEach(({ label }) => {
+    if (range.comparePoint(label, 0) >= 0) return;
+    const gap = document.createRange();
+    gap.setStartAfter(label);
+    gap.setEnd(range.startContainer, range.startOffset);
+    if (gap.toString().trim() === '') range.setStartBefore(label);
+  }));
 };
 
 // Пометка «не проверено» (подчёркнутая фраза, Markdown.tsx) — только для глаз в
@@ -120,7 +167,7 @@ const insertSpacers = (): { restores: Restore[]; selection: Selection; range: Ra
       restores.push(() => spacer.remove());
     }
   });
-  insertListNumbers(range, restores);
+  flattenOrderedLists(range, restores);
   neutralizeUncertain(range, restores);
   if (restores.length > 0) reselect(selection, range);
   return { restores, selection, range };
