@@ -58,8 +58,6 @@ interface ChatMessagesPaneProps {
   topSentinelRef?: (element: HTMLDivElement | null) => void;
   /** Запрос истории упал — вместо «Продолжить разговор» ошибка с повтором. */
   historyLoadError?: boolean;
-  /** Категория ошибки загрузки (auth/denied/notfound/server/timeout/network). */
-  historyLoadErrorKind?: string | null;
   onRetryHistoryLoad?: () => void;
   /** Номер разговора есть, а переписка на диске не сохранилась. */
   transcriptMissing?: boolean;
@@ -124,7 +122,6 @@ function ChatMessagesPane({
   onLoadOlderMessages,
   topSentinelRef,
   historyLoadError = false,
-  historyLoadErrorKind = null,
   onRetryHistoryLoad,
   transcriptMissing = false,
   totalMessages,
@@ -214,13 +211,7 @@ function ChatMessagesPane({
         // Переписка не пришла (обрыв связи, перезапуск сайта). Раньше здесь
         // вставал «Продолжить разговор» — как будто чат пуст (Егор, 15.09.26).
         <div className="mt-8 text-center text-gray-500 dark:text-gray-400">
-          <p>
-            {historyLoadErrorKind && historyLoadErrorKind !== 'unknown'
-              ? t(`session.loading.failed_${historyLoadErrorKind}`, {
-                  defaultValue: t('session.loading.failed'),
-                })
-              : t('session.loading.failed')}
-          </p>
+          <p>{t('session.loading.failed')}</p>
           <button
             type="button"
             onClick={onRetryHistoryLoad}

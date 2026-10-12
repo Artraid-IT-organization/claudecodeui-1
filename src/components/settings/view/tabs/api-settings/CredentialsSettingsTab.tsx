@@ -9,7 +9,6 @@ import GithubCredentialsSection from './sections/GithubCredentialsSection';
 import InvitesSection from './sections/InvitesSection';
 import LoginLinkSection from './sections/LoginLinkSection';
 import NewApiKeyAlert from './sections/NewApiKeyAlert';
-import DevinConnectionsSection from './sections/DevinConnectionsSection';
 import OwnerAccountSection from './sections/OwnerAccountSection';
 
 export default function CredentialsSettingsTab() {
@@ -109,11 +108,6 @@ export default function CredentialsSettingsTab() {
           <InvitesSection />
         </>
       )}
-
-      {/* Корпоративные Devin-каналы. Самогейт по 403 на
-          /api/providers/devin/connections: на общей площадке — только
-          владелец, на однопользовательской — тоже видна. */}
-      <DevinConnectionsSection />
     </div>
   );
 }

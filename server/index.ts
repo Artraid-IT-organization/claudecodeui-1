@@ -26,7 +26,7 @@ import {
     stopSessionActivitySync,
 } from '@/modules/providers/index.js';
 import { userDb, initializeDatabase, sessionsDb  } from '@/modules/database/index.js';
-import { createWebSocketServer, dispatchChatQueues } from '@/modules/websocket/index.js';
+import { chatRunRegistry, createWebSocketServer, dispatchChatQueues } from '@/modules/websocket/index.js';
 
 import { getConnectableHost } from '../shared/networkHosts.js';
 
@@ -49,6 +49,7 @@ import { promptPresetsRoutes } from './modules/presets/index.js';
 import { chatGroupsRoutes } from './modules/chat-groups/index.js';
 import { handoffRoutes } from './modules/handoff/index.js';
 import { openTabsRoutes } from './modules/open-tabs/index.js';
+import { updatesRoutes } from './modules/updates/index.js';
 import { startChatGroupClassifier } from './modules/chat-groups/chat-group-classifier.js';
 import { userRoutes } from './modules/user/index.js';
 import {
@@ -191,6 +192,10 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Public health check endpoint (no authentication required)
 app.get('/health', (req, res) => {
+    const activeRuns = chatRunRegistry.listRunningRuns();
+    const restartBlockingRuns = activeRuns.filter(
+        (run) => !chatRunRegistry.isRestartSafeProvider(run.provider),
+    );
     res.json({
         status: 'ok',
         timestamp: new Date().toISOString(),
@@ -199,7 +204,10 @@ app.get('/health', (req, res) => {
         accountLabel: ACCOUNT_LABEL,
         secondServerLabel: SECOND_SERVER_LABEL,
         switchAccountUrl: SWITCH_ACCOUNT_URL,
-        accountEmail: CLAUDE_ACCOUNT_EMAIL
+        accountEmail: CLAUDE_ACCOUNT_EMAIL,
+        activeRuns: activeRuns.length,
+        restartBlockingRuns: restartBlockingRuns.length,
+        draining: chatRunRegistry.isShutdownDraining(),
     });
 });
 
@@ -247,6 +255,8 @@ app.use('/api/chat-groups', withUserRuntimeContext, chatGroupsRoutes);
 // «Продолжить в новом чате»: выжимка главного из длинного чата.
 app.use('/api/handoff', withUserRuntimeContext, handoffRoutes);
 app.use('/api/open-tabs', withUserRuntimeContext, openTabsRoutes);
+// Плашка «Обновить»: пул изменений с другого сервера — применить/отложить/разобрать.
+app.use('/api/updates', withUserRuntimeContext, updatesRoutes);
 
 // User API Routes (protected)
 app.use('/api/user', withUserRuntimeContext, userRoutes);
@@ -553,12 +563,12 @@ async function startServer() {
                 },
                 // Этап по хвосту переписки — иначе плашка до конца работы
                 // писала «Ожидает модель», и чат выглядел зависшим.
-                onPhase: (appSessionId, provider, phase) => {
+                onPhase: (appSessionId, phase, provider) => {
                     if (!phase) return;
                     const event = JSON.stringify({
                         kind: 'run_phase',
                         sessionId: appSessionId,
-                        provider: provider || 'claude',
+                        provider,
                         text: phase.phase,
                         detail: phase.detail,
                         timestamp: new Date().toISOString(),
@@ -581,7 +591,7 @@ async function startServer() {
                         kind: 'complete',
                         sessionId: appSessionId,
                         actualSessionId: appSessionId,
-                        provider: provider || 'claude',
+                        provider,
                         exitCode: 0,
                         success: true,
                         timestamp: new Date().toISOString(),
@@ -590,6 +600,17 @@ async function startServer() {
                     // Агент, переживший перезапуск сайта, закончил — значит и
                     // очередь этого чата может идти дальше.
                     dispatchChatQueues();
+                },
+                // Codex can discover its native thread id after the old web
+                // process has already exited. Persist the mapping when the
+                // new server adopts the worker so history/resume still use
+                // the same conversation.
+                onProviderSession: (appSessionId, providerSessionId, _provider, transcriptPath) => {
+                    sessionsDb.assignProviderSessionId(appSessionId, providerSessionId);
+                    if (transcriptPath) {
+                        sessionsDb.setJsonlPathIfMissing(appSessionId, transcriptPath);
+                    }
+                    void broadcastSessionUpserted(appSessionId).catch(() => {});
                 },
                 // У пережившего рестарт Devin-хода есть живой супервизор:
                 // переподключаемся к его сокету, чтобы незакрытые запросы
@@ -608,6 +629,9 @@ async function startServer() {
                     }
                 },
             });
+            // Survivor map is now authoritative: queued messages cannot race
+            // a still-running process from the previous server generation.
+            dispatchChatQueues();
 
             // Выжимки переписки для поиска — заранее и не сразу после старта:
             // первый поиск после выкатки не ждёт разбора всей переписки.
@@ -627,27 +651,89 @@ async function startServer() {
 
         await closeSessionsWatcher();
         stopSessionActivitySync();
-        // Clean up plugin processes on shutdown
-        const shutdownRuntimeServices = async () => {
-            // Первым делом: агенты не должны умереть вместе с сервером.
-            markShuttingDown();
-            try {
-                await browserUseService.stopAllSessions();
-            } catch (err) {
-                console.error('[Browser] Error stopping sessions during shutdown:', getErrorMessage(err));
+        let shutdownPromise: Promise<void> | null = null;
+        const shutdownRuntimeServices = (): Promise<void> => {
+            if (shutdownPromise) {
+                return shutdownPromise;
             }
-            try {
-                await stopAllPlugins();
-            } catch (err) {
-                console.error('[Plugins] Error stopping plugins during shutdown:', getErrorMessage(err));
-            }
-            try {
-                await removeLocalServerMarker();
-            } catch (err) {
-                console.error('[Local Server] Error removing server marker during shutdown:', getErrorMessage(err));
-            }
-            process.exit(0);
+
+            shutdownPromise = (async () => {
+                // Сразу закрываем вход новым запускам: сообщения, пришедшие во
+                // время ожидания, остаются в серверной очереди и уйдут после
+                // подъёма новой версии. Claude и Codex живут отдельно от сайта и
+                // усыновляются новым сервером; ждём только остальные, неживучие runtime.
+                chatRunRegistry.beginShutdownDrain();
+                markShuttingDown();
+
+                const waitingSince = Date.now();
+                let lastProgressLog = 0;
+                while (true) {
+                    const blockingRuns = chatRunRegistry
+                        .listRunningRuns()
+                        .filter((run) => !chatRunRegistry.isRestartSafeProvider(run.provider));
+                    if (blockingRuns.length === 0) {
+                        break;
+                    }
+
+                    const now = Date.now();
+                    if (lastProgressLog === 0 || now - lastProgressLog >= 30_000) {
+                        const labels = blockingRuns
+                            .map((run) => `${run.provider}:${run.sessionId}`)
+                            .join(', ');
+                        console.log(
+                            `[shutdown-drain] жду ${blockingRuns.length} активн. ход(а/ов) перед перезапуском: ${labels}`,
+                        );
+                        lastProgressLog = now;
+                    }
+                    await new Promise((resolve) => setTimeout(resolve, 1_000));
+                }
+                if (lastProgressLog !== 0) {
+                    console.log(`[shutdown-drain] активные ходы закончились за ${Math.round((Date.now() - waitingSince) / 1000)} с — перезапускаюсь`);
+                }
+
+                try {
+                    await browserUseService.stopAllSessions();
+                } catch (err) {
+                    console.error('[Browser] Error stopping sessions during shutdown:', getErrorMessage(err));
+                }
+                try {
+                    await stopAllPlugins();
+                } catch (err) {
+                    console.error('[Plugins] Error stopping plugins during shutdown:', getErrorMessage(err));
+                }
+                try {
+                    await removeLocalServerMarker();
+                } catch (err) {
+                    console.error('[Local Server] Error removing server marker during shutdown:', getErrorMessage(err));
+                }
+                process.exit(0);
+            })();
+
+            return shutdownPromise;
         };
+        // Штатная выкладка заранее закрывает вход новым запускам этим
+        // сигналом и ждёт restartBlockingRuns=0 ещё ДО systemctl restart.
+        // Поэтому даже системный 90-секундный TimeoutStopSec не участвует.
+        // Это аренда на 2 минуты: скрипт повторяет сигнал каждые 5 с, а если
+        // он оборвался — вход открывается сам (chat-run-registry, 04.10.26).
+        // Закрывать вход — только когда мешающих ходов уже нет: 04.10.26 22:01 и
+        // 22:15 выкладка закрыла вход и ждала ход Devin десятки минут — всё это
+        // время чаты Devin отвечали «В очереди». Защита здесь, а не в скрипте:
+        // скрипт каждый чат берёт из своей копии кода, старая копия закрывала бы
+        // вход снова. Скрипт ждёт draining=true при restartBlockingRuns=0 — это
+        // наступит, когда ходы закончатся и придёт следующий сигнал.
+        process.on('SIGUSR2', () => {
+            const blocking = chatRunRegistry
+                .listRunningRuns()
+                .filter((run) => !chatRunRegistry.isRestartSafeProvider(run.provider));
+            if (blocking.length > 0) {
+                // Аренду не выдаём и не продлеваем: выданная сама погаснет за 2 мин.
+                return;
+            }
+            if (chatRunRegistry.beginPreRestartDrain()) {
+                console.log('[shutdown-drain] новые ходы неживучих провайдеров закрыты до перезапуска, их сообщения остаются в очереди');
+            }
+        });
         process.on('SIGTERM', () => void shutdownRuntimeServices());
         process.on('SIGINT', () => void shutdownRuntimeServices());
     } catch (error) {

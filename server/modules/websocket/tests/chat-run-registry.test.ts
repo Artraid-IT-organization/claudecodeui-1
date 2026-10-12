@@ -283,6 +283,85 @@ test('startRun rejects a second concurrent run for the same session', async () =
   });
 });
 
+test('shutdown drain lets the active run finish but rejects every new run', async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createAppSession('app-run-drain-active', 'codex', '/workspace/demo');
+    sessionsDb.createAppSession('app-run-drain-new', 'codex', '/workspace/demo');
+    const connection = new FakeConnection();
+    const active = chatRunRegistry.startRun({
+      appSessionId: 'app-run-drain-active',
+      provider: 'codex',
+      providerSessionId: null,
+      connection,
+      userId: null,
+    });
+    assert.ok(active);
+
+    chatRunRegistry.beginShutdownDrain();
+    assert.equal(chatRunRegistry.isShutdownDraining(), true);
+    assert.equal(chatRunRegistry.isProcessing('app-run-drain-active'), true);
+
+    const rejected = chatRunRegistry.startRun({
+      appSessionId: 'app-run-drain-new',
+      provider: 'codex',
+      providerSessionId: null,
+      connection,
+      userId: null,
+    });
+    assert.equal(rejected, null);
+
+    chatRunRegistry.completeRun('app-run-drain-active', { exitCode: 0 });
+    assert.equal(chatRunRegistry.isProcessing('app-run-drain-active'), false);
+  });
+});
+
+test('ожидание перед выкладкой держит только неживучих и само истекает без продления', async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createAppSession('app-predrain-claude', 'claude', '/workspace/demo');
+    sessionsDb.createAppSession('app-predrain-devin', 'devin', '/workspace/demo');
+    sessionsDb.createAppSession('app-predrain-opencode', 'opencode', '/workspace/demo');
+    const connection = new FakeConnection();
+    const realNow = Date.now;
+    let now = realNow();
+    Date.now = () => now;
+    try {
+      assert.equal(chatRunRegistry.beginPreRestartDrain(), true);
+      assert.equal(chatRunRegistry.beginPreRestartDrain(), false, 'продление — не новое ожидание');
+      assert.equal(chatRunRegistry.isShutdownDraining(), true);
+
+      const opencodeBlocked = chatRunRegistry.startRun({
+        appSessionId: 'app-predrain-opencode', provider: 'opencode', providerSessionId: null, connection, userId: null,
+      });
+      assert.equal(opencodeBlocked, null, 'неживучий провайдер ждёт перезапуска');
+
+      const claudeRun = chatRunRegistry.startRun({
+        appSessionId: 'app-predrain-claude', provider: 'claude', providerSessionId: null, connection, userId: null,
+      });
+      assert.ok(claudeRun, 'Claude переживает перезапуск — его чат не держим');
+      chatRunRegistry.completeRun('app-predrain-claude', { exitCode: 0 });
+
+      // Devin тоже переживает: ход держит devin-acp-supervisor, новый сервер
+      // подключается к его сокету обратно (isRestartSafeProvider).
+      const devinRun = chatRunRegistry.startRun({
+        appSessionId: 'app-predrain-devin', provider: 'devin', providerSessionId: null, connection, userId: null,
+      });
+      assert.ok(devinRun, 'Devin переживает перезапуск через супервизора — его чат не держим');
+      chatRunRegistry.completeRun('app-predrain-devin', { exitCode: 0 });
+
+      // Скрипт выкладки оборвался и больше не продлевает аренду.
+      now += 121_000;
+      assert.equal(chatRunRegistry.isShutdownDraining(), false);
+      const opencodeAfter = chatRunRegistry.startRun({
+        appSessionId: 'app-predrain-opencode', provider: 'opencode', providerSessionId: null, connection, userId: null,
+      });
+      assert.ok(opencodeAfter, 'вход открылся сам');
+      chatRunRegistry.completeRun('app-predrain-opencode', { exitCode: 0 });
+    } finally {
+      Date.now = realNow;
+    }
+  });
+});
+
 test('каждое событие работы несёт метку этой работы', async () => {
   await withIsolatedDatabase(() => {
     sessionsDb.createAppSession('app-run-stamp', 'claude', '/workspace/demo');

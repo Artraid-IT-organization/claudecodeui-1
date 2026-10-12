@@ -32,6 +32,35 @@ say() { echo "[$(date '+%F %T')] $*"; }
 status() { printf '%s\n%s\n' "$(date '+%F %T')" "$*" > "$STATUS_FILE"; say "$*"; }
 envval() { [ -f "$ENV_FILE" ] && grep -E "^$1=" "$ENV_FILE" | tail -1 | cut -d= -f2- | tr -d '"' ; }
 
+# Уборка старых версий: остаются перечисленные в аргументах пути плюс ещё
+# $1 самых свежих. Пути приводятся через readlink -f — симлинк или слэш
+# на конце в CCUI_APP_DIR не должны выпускать работающую версию под нож.
+cleanup_releases() {
+    local keep_extra="${1:-1}"; shift
+    local protected="" p
+    for p in "$@"; do
+        protected="$protected $(readlink -f "$p" 2>/dev/null || printf '%s' "$p") "
+    done
+    local kept=0 dir
+    for dir in $(ls -1dt "$APP"/releases/*/ 2>/dev/null); do
+        dir="$(readlink -f "${dir%/}")"
+        case "$protected" in *" $dir "*) continue ;; esac
+        kept=$((kept + 1))
+        [ "$kept" -le "$keep_extra" ] && continue
+        git -C "$REPO" worktree remove --force "$dir" 2>/dev/null || rm -rf "$dir"
+    done
+    git -C "$REPO" worktree prune 2>/dev/null
+}
+
+# Ошибка после создания каталога версии: журналы сборки (.npm-ci.log и др.)
+# остаются для разбора, а node_modules (~1.9 ГБ) удаляется — это почти весь
+# вес версии, и без него каталог безопасно дождётся разбора или уборки.
+fail() {
+    [ -n "${REL:-}" ] && rm -rf "$REL/node_modules" 2>/dev/null
+    status "ОШИБКА: $*"
+    exit 1
+}
+
 if [ "$MODE" = "--status" ]; then
     echo "Сейчас работает версия: $(basename "$(readlink -f "$APP/current" 2>/dev/null || echo нет)")"
     cat "$STATUS_FILE" 2>/dev/null || echo "Обновлений ещё не было"
@@ -55,6 +84,10 @@ SHORT="${NEW:0:12}"
 SUBJECT="$(git -C "$REPO" log -1 --format=%s "$NEW")"
 CUR_DIR="$(readlink -f "$APP/current" 2>/dev/null || true)"
 CUR="$(basename "${CUR_DIR:-нет}")"
+
+# Чистка последствий прошлых падений при каждом запуске: остаются работающая
+# версия, свежая цель обновления и ещё две папки.
+cleanup_releases 2 "$CUR_DIR" "$APP/releases/$SHORT"
 
 if [ "$CUR" = "$SHORT" ] && [ "$MODE" != "--force" ]; then
     status "Актуально: $SHORT — $SUBJECT"
@@ -80,12 +113,24 @@ fi
 REL="$APP/releases/$SHORT"
 
 if [ ! -f "$REL/.verified" ]; then
+    # На почти полном диске npm ci гарантированно упадёт и оставит
+    # недособранную версию, которая ещё сильнее забивает диск. Уже собранная
+    # (.verified) версия доходит до переключения без этой проверки.
+    free_kb="$(df -Pk "$APP" 2>/dev/null | awk 'NR==2 {print $4}')"
+    free_mb=$(( ${free_kb:-0} / 1024 ))
+    min_free_mb="${CCUI_MIN_FREE_MB:-5120}"
+    [[ "$min_free_mb" =~ ^[0-9]+$ ]] || min_free_mb=5120
+    if [ "$free_mb" -lt "$min_free_mb" ]; then
+        status "ПРОПУСК: на диске свободно $((free_mb / 1024)) ГБ (нужно $((min_free_mb / 1024))) — освободите место"
+        exit 0
+    fi
+
     git -C "$REPO" worktree prune
     if [ -e "$REL" ]; then
         git -C "$REPO" worktree remove --force "$REL" 2>/dev/null || rm -rf "$REL"
     fi
     git -C "$REPO" worktree add -q --detach "$REL" "$NEW" \
-        || { status "ОШИБКА: не удалось подготовить каталог версии $SHORT"; exit 1; }
+        || fail "не удалось подготовить каталог версии $SHORT"
     cd "$REL" || exit 1
 
     # Node подбирает размер кучи по свободной памяти на момент старта и на
@@ -96,7 +141,7 @@ if [ ! -f "$REL/.verified" ]; then
     # --include=dev: сборке нужны инструменты разработки (vite, tsc, husky), а
     # NODE_ENV=production или omit=dev в настройках npm молча их пропускают.
     nice -n 19 ionice -c 3 npm ci --include=dev --no-audit --no-fund > .npm-ci.log 2>&1 \
-        || { status "ОШИБКА: не установились зависимости версии $SHORT, работает прежняя. Лог: $REL/.npm-ci.log"; exit 1; }
+        || fail "не установились зависимости версии $SHORT, работает прежняя. Лог: $REL/.npm-ci.log"
 
     built=0
     for attempt in 1 2 3; do
@@ -105,24 +150,19 @@ if [ ! -f "$REL/.verified" ]; then
         sleep 30
     done
     [ "$built" -eq 1 ] \
-        || { status "ОШИБКА: версия $SHORT не собралась, работает прежняя. Лог: $REL/.build.log"; exit 1; }
+        || fail "версия $SHORT не собралась, работает прежняя. Лог: $REL/.build.log"
 
     if [ "${CCUI_RUN_TESTS:-1}" = "1" ]; then
         say "Тесты сервера версии $SHORT (несколько минут)"
-        # Окружение сервера (OPEN_REGISTRATION, DATABASE_PATH боевой, каталоги
-        # живых ходов) тестам не передаём: запущенные из чата cc2 они читали
-        # живые папки и давали «регрессии», которых в коде нет.
-        env -i PATH="$PATH" HOME="$HOME" HUSKY=0 NODE_OPTIONS="$NODE_OPTIONS" \
-            nice -n 19 ionice -c 3 npm test > .test.log 2>&1
+        nice -n 19 ionice -c 3 npm test > .test.log 2>&1
         fails="$(grep -E '^# fail [0-9]+' .test.log | tail -1 | awk '{print $3}')"
         [ -n "$fails" ] \
-            || { status "ОШИБКА: тесты версии $SHORT не запустились, работает прежняя. Лог: $REL/.test.log"; exit 1; }
+            || fail "тесты версии $SHORT не запустились, работает прежняя. Лог: $REL/.test.log"
         # Часть тестов зависит от окружения сервера и падает одинаково в любой
         # версии, поэтому мерка — работающая версия: новая не должна падать чаще.
         base="$(cat "$CUR_DIR/.test-fails" 2> /dev/null || true)"
         if [ -n "$base" ] && [ "$fails" -gt "$base" ]; then
-            status "ОШИБКА: у версии $SHORT упало тестов $fails, у работающей $base — не ставлю. Лог: $REL/.test.log"
-            exit 1
+            fail "у версии $SHORT упало тестов $fails, у работающей $base — не ставлю. Лог: $REL/.test.log"
         fi
         echo "$fails" > .test-fails
     fi
@@ -132,14 +172,8 @@ if [ ! -f "$REL/.verified" ]; then
     smoke_home="$(mktemp -d)"
     smoke_port=$((PORT + 100))
     while ss -ltn 2>/dev/null | grep -q ":$smoke_port "; do smoke_port=$((smoke_port + 1)); done
-    # env -i: проба не наследует окружение запустившего. 10.10.26 выкатку
-    # запустили из чата cc2 — у той оболочки CLOUDCLI_LIVE_RUNS_DIR боевой, и
-    # проба «усыновила» живые ходы Devin, перехватила сокеты их супервизоров;
-    # боевой сервер стёр записи, после рестарта ходы остались сиротами и
-    # держали замок сессии («already open in another process»).
-    env -i PATH="$PATH" HOME="$smoke_home" HOST=127.0.0.1 SERVER_PORT="$smoke_port" NODE_ENV=production \
+    HOME="$smoke_home" HOST=127.0.0.1 SERVER_PORT="$smoke_port" NODE_ENV=production \
         DATABASE_PATH="$smoke_home/smoke.db" OPEN_REGISTRATION=true \
-        CLOUDCLI_LIVE_RUNS_DIR="$smoke_home/live-runs" CLOUDCLI_DEVIN_RUNS_DIR="$smoke_home/devin-runs" \
         node dist-server/server/index.js > .smoke.log 2>&1 &
     smoke_pid=$!
     smoke_ok=0
@@ -156,7 +190,7 @@ if [ ! -f "$REL/.verified" ]; then
     wait "$smoke_pid" 2>/dev/null
     rm -rf "$smoke_home"
     [ "$smoke_ok" -eq 1 ] \
-        || { status "ОШИБКА: версия $SHORT не запустилась на пробе, работает прежняя. Лог: $REL/.smoke.log"; exit 1; }
+        || fail "версия $SHORT не запустилась на пробе, работает прежняя. Лог: $REL/.smoke.log"
 
     touch .verified
     cd "$APP" || exit 1
@@ -207,14 +241,5 @@ status "Обновлено до $SHORT — $SUBJECT"
 
 # ── Уборка: работающая, прежняя и ещё одна версия остаются ───────────────────
 
-kept=0
-for dir in $(ls -1dt "$APP"/releases/*/ 2>/dev/null); do
-    dir="${dir%/}"
-    [ "$dir" = "$APP/releases/$SHORT" ] && continue
-    [ "$dir" = "$CUR_DIR" ] && continue
-    kept=$((kept + 1))
-    [ "$kept" -le 1 ] && continue
-    git -C "$REPO" worktree remove --force "$dir" 2>/dev/null || rm -rf "$dir"
-done
-git -C "$REPO" worktree prune
+cleanup_releases 1 "$APP/releases/$SHORT" "$CUR_DIR"
 exit 0

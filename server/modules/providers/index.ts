@@ -6,17 +6,8 @@ export { sessionSynchronizerService } from './services/session-synchronizer.serv
 export { providerSkillsService } from './services/skills.service.js';
 export { providerMcpService } from './services/mcp.service.js';
 export { providerRuntimeService } from './services/provider-runtime.service.js';
-export { getLiveLimits, recordRateLimitEvent } from './services/usage-limits.store.js';
-
-// providerModelsService: used by Commands to list models and resolve the active session model.
-export { providerModelsService } from './services/provider-models.service.js';
-
-// resolveEffectiveProvider: the websocket gateway asks it before every run —
-// a guest without Claude access is silently served by the corporate Devin.
-export { resolveEffectiveProvider } from './services/sessions.service.js';
-
-// survivor-runs: claude/devin-ходы, пережившие перезапуск службы (reattach) —
-// websocket-модуль узнаёт «идущий» чат и может остановить его.
+// Survivor status: prevents a second run while a detached Claude/Codex process
+// from the previous web-server generation still owns the chat.
 export {
   getSurvivorPhase,
   getSurvivorProvider,
@@ -24,6 +15,13 @@ export {
   listSurvivors,
   stopSurvivor,
 } from './list/claude/survivor-runs.js';
+export { getLiveLimits, recordRateLimitEvent } from './services/usage-limits.store.js';
+
+// providerModelsService: used by Commands to list models and resolve the active session model.
+export { providerModelsService } from './services/provider-models.service.js';
+
+// sessionsService: модуль обновлений (updates) создаёт через него чат-разбор.
+export { sessionsService } from './services/sessions.service.js';
 
 export { initializeSessionsWatcher } from './services/sessions-watcher.service.js';
 export { closeSessionsWatcher } from './services/sessions-watcher.service.js';
@@ -33,6 +31,17 @@ export { startSessionActivitySync, stopSessionActivitySync } from './services/se
 
 // readCodexAccountLimits: used by the user module for the Codex account row and its limits.
 export { readCodexAccountLimits } from './services/codex-account-limits.service.js';
+// readDevinAccount: used by the user module for the Devin account row in the account menu.
+export { readDevinAccount, selectDevinSlot } from './services/devin-account.service.js';
+// Вход во второй аккаунт Devin из чата (кнопка «Добавить аккаунт»).
+export { startDevinLogin, submitDevinLoginCode, cancelDevinLogin } from './services/devin-login.service.js';
+// codexHome / resolveCodexBinary: handoff module writes a Codex-bound brief with Codex itself.
+export { codexHome, resolveCodexBinary } from './services/codex-account-limits.service.js';
 
-// readDevinAccountLimits: used by the user module for the Devin account row and its daily/weekly quota.
-export { readDevinAccountLimits } from './services/devin-account-limits.service.js';
+// Потребитель: `handoff` — «Продолжить в новом чате» выгружает беседу Devin
+// построчным файлом формата переписки Claude и скрывает служебные беседы
+// разового вызова `devin -p`. askDevinOnce — тот же разовый вызов для
+// выжимки переноса (имена чатов Devin им пишет сам синхронизатор).
+export { exportDevinTranscript } from './list/devin/devin-transcript.js';
+export { hideDevinSessionsInDirectory } from './list/devin/devin-chain.js';
+export { askDevinOnce } from './list/devin/devin-model.js';

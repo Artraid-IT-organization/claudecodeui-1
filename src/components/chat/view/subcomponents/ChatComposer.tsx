@@ -14,6 +14,7 @@ import { PaperclipIcon, Loader2, ArrowUpIcon, MessageSquareShare, Minimize2 } fr
 
 import { useVoiceInput } from '../../hooks/useVoiceInput';
 import { isTouchKeyboard } from '../../../../utils/touchKeyboard';
+import type { VoiceTarget } from '../../../../lib/voiceDelivery';
 import { useVoiceAvailable } from '../../hooks/useVoiceAvailable';
 import type { QueuedDraft } from '../../hooks/useChatComposerState';
 import type { SessionActivity } from '../../../../hooks/useSessionProtection';
@@ -116,6 +117,8 @@ interface ChatComposerProps {
   textareaRef: RefObject<HTMLTextAreaElement>;
   input: string;
   onVoiceTranscript?: (text: string, send?: boolean) => void;
+  /** Чат, которому принадлежит диктовка: с ним текст доедет, даже если человек ушёл в другой чат или закрыл сайт. */
+  voiceTarget?: VoiceTarget;
   onInputChange: (event: ChangeEvent<HTMLTextAreaElement>) => void;
   onTextareaClick: (event: MouseEvent<HTMLTextAreaElement>) => void;
   onTextareaKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
@@ -182,6 +185,7 @@ export default function ChatComposer({
   textareaRef,
   input,
   onVoiceTranscript,
+  voiceTarget,
   onInputChange,
   onTextareaClick,
   onTextareaKeyDown,
@@ -261,9 +265,10 @@ export default function ChatComposer({
     if (voiceErrorTimer.current) clearTimeout(voiceErrorTimer.current);
   }, []);
   const noopTranscript = useCallback(() => {}, []);
-  const { state: voiceState, toggle: voiceToggle, stop: voiceStop, requestSend: voiceRequestSend } = useVoiceInput(
+  const { state: voiceState, toggle: voiceToggle, stop: voiceStop, requestSend: voiceRequestSend, micPaused: voiceMicPaused } = useVoiceInput(
     onVoiceTranscript ?? noopTranscript,
     handleVoiceError,
+    voiceTarget,
   );
   const isRecording = voiceState === 'recording';
   const isTranscribing = voiceState === 'transcribing';
@@ -549,6 +554,7 @@ export default function ChatComposer({
             {onVoiceTranscript && voiceAvailable && (
               <VoiceInputButton
                 state={voiceState}
+                micPaused={voiceMicPaused}
                 onToggle={handleVoiceToggle}
                 onEnter={handleVoiceSendKey}
                 errorMsg={voiceError}
@@ -597,7 +603,7 @@ export default function ChatComposer({
                     {
                       key: 'compact',
                       label: 'Сжать в этом чате',
-                      description: 'Встроенное сжатие Claude: тот же чат, лучше сохраняет детали. 1–3 минуты',
+                      description: `Встроенное сжатие ${providerLabel}: тот же чат, лучше сохраняет детали. 1–3 минуты`,
                       icon: Minimize2,
                       onSelect: onCompactHere,
                     },

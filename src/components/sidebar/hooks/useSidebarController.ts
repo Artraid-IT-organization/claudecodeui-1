@@ -22,7 +22,8 @@ import {
   readProjectSortOrder,
   sortProjects,
 } from '../utils/utils';
-import { useServerScope } from './useServerScope';
+import { providerSpaceOf, useServerScope, type SessionListScope } from './useServerScope';
+import { useSelectedChatProvider } from '../../../hooks/useCodexAccount';
 
 type SnippetHighlight = {
   start: number;
@@ -109,7 +110,7 @@ type UseSidebarControllerArgs = {
   onProjectSelect: (project: Project) => void;
   onSessionSelect: (session: ProjectSession) => void;
   onSessionDelete?: (sessionId: string) => void;
-  onLoadMoreSessions?: (projectId: string) => Promise<void> | void;
+  onLoadMoreSessions?: (projectId: string, scope?: SessionListScope) => Promise<void> | void;
   // `projectId` is the DB-assigned identifier; callbacks use that post-migration.
   onProjectDelete?: (projectId: string) => void;
   setCurrentProject: (project: Project) => void;
@@ -137,6 +138,7 @@ export function useSidebarController({
   const paletteOps = usePaletteOps();
   // Открытый блок верхней панели: по нему делится и архив.
   const [serverScope] = useServerScope();
+  const providerSpace = providerSpaceOf(useSelectedChatProvider());
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set());
   const [editingProject, setEditingProject] = useState<string | null>(null);
   const [showNewProject, setShowNewProject] = useState(false);
@@ -328,7 +330,7 @@ export function useSidebarController({
 
     try {
       // Лента отбирается сервером по открытому блоку верхней панели.
-      const response = await api.recentConversations({ limit: 40, offset, serverScope });
+      const response = await api.recentConversations({ limit: 40, offset, serverScope, providerSpace });
       if (!response.ok) {
         throw new Error(`Failed to load recent conversations: ${response.status}`);
       }
@@ -367,7 +369,7 @@ export function useSidebarController({
         setIsLoadingMoreRecentConversations(false);
       }
     }
-  }, [serverScope]);
+  }, [serverScope, providerSpace]);
 
   const reloadRecentConversations = useCallback(() => {
     void fetchRecentConversationsPage(0, false);
@@ -601,7 +603,10 @@ export function useSidebarController({
     }
 
     try {
-      await onLoadMoreSessions(projectId);
+      // Панель показывает чаты одного помощника и одного блока — догружаем
+      // тот же срез, иначе страница приходит смешанной и в списке почти
+      // ничего не появляется (Егор 05.10: «кнопка не работает»).
+      await onLoadMoreSessions(projectId, { providerSpace, serverScope });
     } catch (error) {
       console.error('[Sidebar] Failed to load more sessions:', error);
       alert(t('messages.refreshError'));
@@ -651,8 +656,9 @@ export function useSidebarController({
   // второго сервера всплывали бы среди архива обычных «Проектов» — ровно то
   // перемешивание, ради которого блоки и разделяли.
   const scopedArchivedSessions = useMemo(
-    () => archivedSessions.filter((session) => (session.serverScope ?? 'main') === serverScope),
-    [archivedSessions, serverScope],
+    () => archivedSessions.filter((session) => (session.serverScope ?? 'main') === serverScope
+      && providerSpaceOf(session.provider) === providerSpace),
+    [archivedSessions, serverScope, providerSpace],
   );
 
   const scopedArchivedProjects = useMemo(

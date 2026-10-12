@@ -124,6 +124,15 @@ LOCK_HELD_START=$SECONDS
 # С 22.09 новые агенты живут в ccui-agents.slice (agent-rooms.js), но
 # пережившие перезапуск старые остаются в группе, пока не закончат.
 CG=/sys/fs/cgroup/system.slice/claudecodeui-shared.service
+# Продлить аренду ожидания (SIGUSR2, 2 мин) на шагах ПОСЛЕ wait_restart_safe_window:
+# ожидание памяти может длиться до 5 мин — без продления вход открылся бы
+# и Devin-ход стартовал бы прямо под перезапуск.
+renew_drain() {
+    local pid
+    pid="$(systemctl show claudecodeui-shared -p MainPID --value 2>/dev/null)"
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] && kill -USR2 "$pid" 2>/dev/null
+    return 0
+}
 wait_room_free() {
     local high cur waited=0
     high="$(cat "$CG/memory.high" 2>/dev/null)"
@@ -139,6 +148,7 @@ wait_room_free() {
             say "Группа сайта забита: $((cur/1048576)) из $((high/1048576)) МБ — жду до 5 мин, иначе новый сервер застрянет. Кто занял:"
             for p in $(cat "$CG/cgroup.procs"); do ps -o rss=,etime=,args= -p "$p" 2>/dev/null; done | sort -n -r | head -5 | cut -c1-120
         }
+        renew_drain
         sleep 15; waited=$((waited + 15))
     done
 }
@@ -158,6 +168,62 @@ wait_site_up() {
     return 0
 }
 
+# Codex, в отличие от Claude, не умеет переподключить уже идущий turn к
+# новому Node-процессу: рестарт записывает turn_aborted. Ждём, пока все
+# не-Claude ходы закончатся, и только тогда SIGUSR2 закрывает вход (их
+# сообщения остаются в серверной очереди). Без таймаута намеренно:
+# обновление сайта может подождать, работа человека — нет.
+# SIGUSR2 — аренда на 2 минуты, дальше её продлевает renew_drain: 04.10.26
+# скрипт оборвался вместе со своим чатом, а разовый сигнал оставил вход
+# закрытым на 33 минуты. Нет скрипта — нет продления — сайт открылся сам.
+wait_restart_safe_window() {
+    # Приём закрываем только когда окно УЖЕ пустое, а не на всё ожидание.
+    # 04.10.26 22:01: выкатка закрыла приём и ждала ответ Devin, шедший
+    # 58 мин, — всё это время любое сообщение в любой чат Devin висело
+    # «В очереди». Теперь ждём при открытом приёме; аренда сайта (2 мин)
+    # сама гаснет, если мы её не продлеваем.
+    local main_pid health blocking draining waited=0
+    while :; do
+        main_pid="$(systemctl show claudecodeui-shared -p MainPID --value 2>/dev/null)"
+        if [[ ! "$main_pid" =~ ^[1-9][0-9]*$ ]]; then
+            say "ОШИБКА: не удалось узнать PID живого Claude UI — безопасный перезапуск невозможен"
+            return 1
+        fi
+
+        health="$(curl -sS --max-time 5 http://127.0.0.1:3003/health 2>/dev/null || true)"
+        blocking="$(sed -n 's/.*"restartBlockingRuns":\([0-9][0-9]*\).*/\1/p' <<<"$health")"
+        draining="$(sed -n 's/.*"draining":\(true\|false\).*/\1/p' <<<"$health")"
+        if [ -z "$blocking" ] || [ -z "$draining" ]; then
+            say "ОШИБКА: живая версия ещё не умеет безопасно ждать Codex; автоматический перезапуск остановлен"
+            return 1
+        fi
+
+        if [ "$blocking" = 0 ]; then
+            # Окно пустое: закрываем приём и перепроверяем — между замером и
+            # сигналом мог начаться новый ход.
+            if ! kill -USR2 "$main_pid" 2>/dev/null; then
+                say "ОШИБКА: не удалось включить ожидание у PID $main_pid"
+                return 1
+            fi
+            health="$(curl -sS --max-time 5 http://127.0.0.1:3003/health 2>/dev/null || true)"
+            blocking="$(sed -n 's/.*"restartBlockingRuns":\([0-9][0-9]*\).*/\1/p' <<<"$health")"
+            draining="$(sed -n 's/.*"draining":\(true\|false\).*/\1/p' <<<"$health")"
+            if [ "$draining" = true ] && [ "$blocking" = 0 ]; then
+                [ "$waited" -gt 0 ] && say "Активные ходы закончились за $waited с — приём закрыт, перезапускаю"
+                return 0
+            fi
+            # Успел начаться ход: больше не продлеваем аренду — через 2 мин
+            # приём откроется сам, ждём дальше.
+        fi
+
+        if [ "$waited" -eq 0 ] || [ $((waited % 60)) -eq 0 ]; then
+            say "Перед перезапуском жду активные не-Claude ходы: $blocking (приём сообщений открыт)"
+        fi
+        sleep 5
+        waited=$((waited + 5))
+    done
+}
+
 swap() {
     cd "$SHARED" || return 1
     # Живой коммит обязан входить в собираемый. 16.09.26 два чата выкатили
@@ -170,6 +236,7 @@ swap() {
         SWAP_REFUSED=1
         return 1
     fi
+    wait_restart_safe_window || return 1
     git checkout -q "$COMMIT" || return 1
 
     # Предыдущая сборка не удаляется, а отодвигается в *.prev — это мгновенный
@@ -180,8 +247,10 @@ swap() {
         cp -a "$SELF/$d" "$d" || return 1
     done
 
+    renew_drain
     cp -a "$DB" "$BACKUP"
     wait_room_free
+    renew_drain
     sudo -n systemctl restart claudecodeui-shared
     wait_site_up
 }

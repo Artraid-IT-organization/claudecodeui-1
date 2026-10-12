@@ -2,9 +2,7 @@ import { Database } from 'better-sqlite3';
 
 import {
   APP_CONFIG_TABLE_SCHEMA_SQL,
-  DEVIN_CONNECTIONS_TABLE_SCHEMA_SQL,
   INVITE_TOKENS_TABLE_SCHEMA_SQL,
-  LOGIN_TOKEN_ALIASES_TABLE_SCHEMA_SQL,
   ACCOUNT_SCAN_STATE_TABLE_SCHEMA_SQL,
   LAST_SCANNED_AT_SQL,
   NOTIFICATION_CHANNEL_ENDPOINTS_TABLE_SCHEMA_SQL,
@@ -452,6 +450,13 @@ const addProviderSessionIdMapping = (db: Database): void => {
   const sessionsTableInfo = getTableInfo(db, 'sessions');
   const columnNames = sessionsTableInfo.map((column) => column.name);
 
+  // Заполнять — только в момент появления столбца. Потом NULL законен: так
+  // выглядит новый чат, чей провайдер ещё не назвал свой номер. 04.10.26
+  // запуск сайта вписал трём таким Devin-чатам их собственный номер, и Devin
+  // ответил «Session not found» на первое же сообщение из очереди.
+  if (columnNames.includes('provider_session_id')) {
+    return;
+  }
   addColumnToTableIfNotExists(db, 'sessions', columnNames, 'provider_session_id', 'TEXT');
   db.exec(`
     UPDATE sessions
@@ -595,21 +600,6 @@ const addSessionFlagColumn = (db: Database): void => {
 };
 
 /**
- * Атрибуция Devin-чатов (Connection Layer): кто из веб-пользователей
- * инициировал сессию и через какой корпоративный канал она идёт. Обе колонки
- * nullable — существующие строки авторства не знают, а привязка к каналу
- * появляется у devin-сессии при первом ходе через новый рантайм.
- */
-const addSessionAttributionColumns = (db: Database): void => {
-  if (!tableExists(db, 'sessions')) {
-    return;
-  }
-  const columnNames = getTableInfo(db, 'sessions').map((column) => column.name);
-  addColumnToTableIfNotExists(db, 'sessions', columnNames, 'initiated_by_user_id', 'INTEGER');
-  addColumnToTableIfNotExists(db, 'sessions', columnNames, 'devin_connection_id', 'INTEGER');
-};
-
-/**
  * Adds `account_dir` (which Claude account a transcript belongs to) and
  * `origin` (terminal / web / auto — see server/shared/session-scope.ts).
  *
@@ -717,16 +707,6 @@ export const runMigrations = (db: Database) => {
       ON provider_models(provider, sort_order, id)
     `);
 
-    db.exec(DEVIN_CONNECTIONS_TABLE_SCHEMA_SQL);
-    addColumnToTableIfNotExists(
-      db,
-      'devin_connections',
-      (db.prepare('PRAGMA table_info(devin_connections)').all() as { name: string }[]).map((column) => column.name),
-      'account_email',
-      'TEXT',
-    );
-    db.exec(LOGIN_TOKEN_ALIASES_TABLE_SCHEMA_SQL);
-
     db.exec(PROJECTS_TABLE_SCHEMA_SQL);
     rebuildProjectsTableWithPrimaryKeySchema(db);
 
@@ -741,7 +721,6 @@ export const runMigrations = (db: Database) => {
     addSessionAccountAndOriginColumns(db);
     addServerScopeColumns(db);
     addSessionFlagColumn(db);
-    addSessionAttributionColumns(db);
     ensureProjectsForSessionPaths(db);
 
     db.exec('CREATE INDEX IF NOT EXISTS idx_session_ids_lookup ON sessions(session_id)');
@@ -752,8 +731,6 @@ export const runMigrations = (db: Database) => {
     db.exec('CREATE INDEX IF NOT EXISTS idx_projects_is_starred ON projects(isStarred)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_projects_is_archived ON projects(isArchived)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_server_scope ON sessions(server_scope)');
-    db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_devin_connection ON sessions(devin_connection_id)');
-    db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_initiated_by ON sessions(initiated_by_user_id)');
 
     db.exec('DROP INDEX IF EXISTS idx_session_names_lookup');
     db.exec('DROP INDEX IF EXISTS idx_sessions_workspace_path');

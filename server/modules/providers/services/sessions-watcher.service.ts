@@ -11,7 +11,6 @@ import { sessionSynchronizerService } from '@/modules/providers/services/session
 import { broadcastRealtimeEvent, canReceiveProviderEvents, connectedClients, WS_OPEN_STATE } from '@/modules/websocket/index.js';
 import type { LLMProvider } from '@/shared/types.js';
 import { generateDisplayName } from '@/modules/projects/index.js';
-import { devinConnectionsDb } from '@/modules/database/index.js';
 import { getClaudeConfigDir, getDevinDataDir } from '@/shared/utils.js';
 
 type WatcherEventType = 'add' | 'change';
@@ -39,9 +38,8 @@ const PROVIDER_WATCH_PATHS: Array<{ provider: LLMProvider; rootPath: string }> =
   },
   {
     provider: 'devin',
-    // Devin keeps one sqlite database per corporate connection — watch the
-    // machine default here; every connection's <xdg>/devin/cli is appended at
-    // watch start (see initializeSessionsWatcher).
+    // Devin keeps one shared sqlite database — watch the data dir and let
+    // isWatcherTargetFile keep only sessions.db (and its WAL journal).
     rootPath: path.join(getDevinDataDir(), 'cli'),
   },
 ];
@@ -325,19 +323,7 @@ export async function initializeSessionsWatcher(): Promise<void> {
     failures: initialSync.failures,
   });
 
-  const watchPaths = [...PROVIDER_WATCH_PATHS];
-  try {
-    // Connection Layer: у каждого канала свой каталог и своя sessions.db —
-    // watcher должен слушать все, иначе чаты второго канала не появятся сами.
-    for (const conn of devinConnectionsDb.list()) {
-      if (conn.enabled) {
-        watchPaths.push({ provider: 'devin', rootPath: path.join(getDevinDataDir(conn.xdg_data_home), 'cli') });
-      }
-    }
-  } catch {
-    // Реестра может ещё не быть на старых базах — вотчер живёт без него.
-  }
-  for (const { provider, rootPath } of watchPaths) {
+  for (const { provider, rootPath } of PROVIDER_WATCH_PATHS) {
     try {
       await fsPromises.mkdir(rootPath, { recursive: true });
 

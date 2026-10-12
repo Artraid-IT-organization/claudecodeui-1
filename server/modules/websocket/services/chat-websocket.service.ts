@@ -8,10 +8,8 @@ import {
   getSurvivorProvider,
   isSurvivorRunning,
   providerModelsService,
-  resolveEffectiveProvider,
   stopSurvivor,
 } from '@/modules/providers/index.js';
-import { clampDevinModelForUser } from '@/modules/providers/services/devin-model-policy.js';
 import { chatRunRegistry, onChatRunCompleted } from '@/modules/websocket/services/chat-run-registry.service.js';
 import {
   broadcastChatQueue,
@@ -50,9 +48,10 @@ import type {
   RealtimeClientConnection,
 } from '@/shared/types.js';
 import type { ProviderAdoptedTurn, ProviderAdoptPayload, ProviderSteerPayload } from '@/shared/interfaces.js';
-import { isCodexAllowedForWebUser, isPlatformOwnerWebUser, OPEN_REGISTRATION, parseIncomingJsonObject, resolveScopedWorkingDirectory } from '@/shared/utils.js';
+import { isCodexAllowedForWebUser, isPlatformOwnerWebUser, OPEN_REGISTRATION, parseIncomingJsonObject } from '@/shared/utils.js';
 import {
   getImageAssetsDirForUser,
+  hasOwnClaudeAccess,
   readRequestUserId,
   resolveWebUserRuntimeContext,
 } from '@/shared/web-user-runtime.js';
@@ -238,36 +237,44 @@ async function handleChatSend(
     return;
   }
 
-  let provider = session.provider as LLMProvider;
+  const provider = session.provider as LLMProvider;
   if (!dependencies.runtime.hasRuntime(provider)) {
     sendProtocolError(ws, 'UNSUPPORTED_PROVIDER', `Provider "${provider}" is not available.`, sessionId, clientMessageId);
     return;
   }
 
-  // Доступа к Claude у человека общей площадки нет — чат мёртвого провайдера
-  // переводится на корпоративный Devin: старая переписка остаётся в
-  // jsonl_path (её доклеивает fetchHistory), новые ходы пишет Devin в своё
-  // хранилище. Владельца и вошедших своим ключом это не касается — проверка
-  // доступа внутри resolveEffectiveProvider.
-  const effectiveProvider = await resolveEffectiveProvider(provider, userId);
-  let providerMigrated = false;
-  if (effectiveProvider !== provider) {
-    if (dependencies.runtime.hasRuntime(effectiveProvider)) {
-      sessionsDb.retargetSessionProvider(sessionId, effectiveProvider);
-      provider = effectiveProvider;
-      providerMigrated = true;
-      session.provider_session_id = null;
-      console.log(`[Chat] чат ${sessionId} переведён с Claude на ${effectiveProvider} — у пользователя ${String(userId)} нет доступа к Claude`);
-    } else {
-      sendProtocolError(
-        ws,
-        'CLAUDE_LOGIN_REQUIRED',
-        CLAUDE_LOGIN_REQUIRED_MESSAGE,
-        sessionId,
-        clientMessageId,
-      );
-      return;
-    }
+  const openRegistrationContext = resolveWebUserRuntimeContext(userId);
+  const numericUserId = userId !== null ? Number(userId) : NaN;
+  // Devin credentials are machine-global — guests on OPEN_REGISTRATION never run it.
+  if (OPEN_REGISTRATION && provider === 'devin' && !isPlatformOwnerWebUser(numericUserId)) {
+    sendProtocolError(
+      ws,
+      'PROVIDER_NOT_ALLOWED',
+      'The Devin provider is only available to the platform owner.',
+      sessionId,
+      clientMessageId,
+    );
+    return;
+  }
+  // Owner bypass: when the owner's ~/.claude-webuser-<id> is symlinked to
+  // their real ~/.claude, the SDK authenticates via the existing OAuth session
+  // in that directory — no explicit API key is needed or stored.
+  // Остальным хватает любого СВОЕГО доступа: ключа API или входа подпиской в
+  // командной строке сайта (shared/web-user-runtime.ts, hasOwnClaudeAccess).
+  if (
+    OPEN_REGISTRATION &&
+    provider === 'claude' &&
+    !isPlatformOwnerWebUser(numericUserId) &&
+    !(await hasOwnClaudeAccess(openRegistrationContext))
+  ) {
+    sendProtocolError(
+      ws,
+      'CLAUDE_LOGIN_REQUIRED',
+      CLAUDE_LOGIN_REQUIRED_MESSAGE,
+      sessionId,
+      clientMessageId,
+    );
+    return;
   }
 
   // Вход в Codex на сервере один — хозяина (~/.codex). Гость общего
@@ -292,12 +299,6 @@ async function handleChatSend(
   }
 
   const clientOptions = (data.options ?? {}) as AnyRecord;
-  if (providerMigrated) {
-    // Клиент прислал выбор для старого провайдера (модель/усилие Claude) —
-    // Devin такие имена не знает, и ход упал бы на `--model claude-…`.
-    delete clientOptions.model;
-    delete clientOptions.effort;
-  }
   const command = typeof data.content === 'string' ? data.content : '';
 
   const run = chatRunRegistry.startRun({
@@ -421,15 +422,11 @@ async function steerIntoRunningTurn(input: {
   }
   const attachments = verifiedClientAttachments(clientOptions, userId);
   const session = sessionsDb.getSessionById(sessionId);
-  const runtimeContext = resolveWebUserRuntimeContext(userId);
   return dependencies.runtime.steer(run.provider, sessionId, {
     content,
     images: attachments.filter(isImageAttachmentDescriptor),
     files: attachments.filter((descriptor) => !isImageAttachmentDescriptor(descriptor)),
-    cwd: resolveScopedWorkingDirectory(
-      (typeof clientOptions.cwd === 'string' && clientOptions.cwd) || session?.project_path || undefined,
-      runtimeContext.workspaceRoot,
-    ),
+    cwd: (typeof clientOptions.cwd === 'string' && clientOptions.cwd) || session?.project_path || undefined,
   });
 }
 
@@ -456,10 +453,6 @@ async function runProviderTurn(input: {
 }): Promise<void> {
   const { run, sessionId, provider, userId, projectPath, content, clientOptions, dependencies } = input;
   const runtimeContext = resolveWebUserRuntimeContext(userId);
-  // Персональные белые списки (devin-model-policy): недопустимая для этого
-  // аккаунта модель приводится к разрешённой до записи на сессию и до
-  // передачи ходу провайдера — устаревший выбор или прямой вызов не сработают.
-  clientOptions.model = clampDevinModelForUser(provider, userId, clientOptions.model);
   // Record what this turn runs with so reopening the session later restores the
   // same model and reasoning effort, and so the resume path has a
   // session-scoped model answer to use.
@@ -499,18 +492,8 @@ async function runProviderTurn(input: {
     images: uniqueAttachments.filter(isImageAttachmentDescriptor),
     files: uniqueAttachments.filter((descriptor) => !isImageAttachmentDescriptor(descriptor)),
     sessionId,
-    // Рабочая зона не-владельца — его workspace; путь за её пределами
-    // (устаревший, удалённый или чужой) приводится к корню зоны, чтобы
-    // процесс ни при каких клиентских данных не стартовал в каталоге хоста.
-    cwd: resolveScopedWorkingDirectory(
-      (typeof clientOptions.cwd === 'string' && clientOptions.cwd.trim() ? clientOptions.cwd : undefined)
-        ?? projectPath ?? undefined,
-      runtimeContext.workspaceRoot,
-    ),
-    projectPath: resolveScopedWorkingDirectory(
-      projectPath ?? (typeof clientOptions.projectPath === 'string' ? clientOptions.projectPath : undefined),
-      runtimeContext.workspaceRoot,
-    ),
+    cwd: clientOptions.cwd ?? projectPath ?? undefined,
+    projectPath: projectPath ?? clientOptions.projectPath,
     // Per-user Claude SDK env override (claude-runtime.provider.js). Both are
     // null outside OPEN_REGISTRATION, so the runtime falls back to
     // process.env exactly as it always has for Account 1/2.
@@ -577,10 +560,9 @@ function broadcastJson(payload: unknown): void {
 }
 
 /**
- * Devin-чат — собственность инициировавшего пользователя (как и любой чат):
- * чужой сокет не должен наблюдать его поток, отвечать на его permission-
- * запросы, останавливать его или править очередь. Наследие без автора —
- * только владельцу площадки. Нет строки — гейтить нечего.
+ * Devin sessions may only exist for the platform owner — a guest's socket must
+ * not observe, subscribe to, abort, or queue-edit one. The check keys off the
+ * stored session row: no row → nothing to gate (handlers fail their own way).
  */
 function isDevinSessionForbiddenForUser(
   sessionId: string | null | undefined,
@@ -594,12 +576,7 @@ function isDevinSessionForbiddenForUser(
     return false;
   }
   const numericUserId = userId === null || userId === undefined ? NaN : Number(userId);
-  if (Number.isFinite(numericUserId) && isPlatformOwnerWebUser(numericUserId)) {
-    return false;
-  }
-  return !Number.isFinite(numericUserId)
-    || session.initiated_by_user_id == null
-    || Number(session.initiated_by_user_id) !== numericUserId;
+  return !Number.isFinite(numericUserId) || !isPlatformOwnerWebUser(numericUserId);
 }
 
 /**
@@ -622,27 +599,28 @@ async function runQueuedChatMessage(
     return true;
   }
 
-  let provider = session.provider as LLMProvider;
+  const provider = session.provider as LLMProvider;
   if (!dependencies.runtime.hasRuntime(provider)) {
     console.warn(`[Очередь чата] провайдер "${provider}" недоступен — сообщение ${message.id} отброшено`);
     return true;
   }
 
   const userId = message.userId;
-  // Та же миграция, что в handleChatSend: стоявшее в очереди сообщение чата
-  // мёртвого провайдера уходит через корпоративный Devin, а не отбрасывается.
-  const effectiveProvider = await resolveEffectiveProvider(provider, userId);
-  let providerMigrated = false;
-  if (effectiveProvider !== provider) {
-    if (dependencies.runtime.hasRuntime(effectiveProvider)) {
-      sessionsDb.retargetSessionProvider(sessionId, effectiveProvider);
-      provider = effectiveProvider;
-      providerMigrated = true;
-      session.provider_session_id = null;
-    } else {
-      console.warn(`[Очередь чата] пользователь ${String(userId)} не вошёл в Claude и не добавил ключ — сообщение ${message.id} отброшено`);
-      return true;
-    }
+  const runtimeContext = resolveWebUserRuntimeContext(userId);
+  const numericUserId = userId !== null ? Number(userId) : NaN;
+  // Devin — только владелец площадки; очередь не должна быть обходом гейта.
+  if (OPEN_REGISTRATION && provider === 'devin' && !isPlatformOwnerWebUser(numericUserId)) {
+    console.warn(`[Очередь чата] devin для не-владельца ${String(userId)} — сообщение ${message.id} отброшено`);
+    return true;
+  }
+  if (
+    OPEN_REGISTRATION
+    && provider === 'claude'
+    && !isPlatformOwnerWebUser(numericUserId)
+    && !(await hasOwnClaudeAccess(runtimeContext))
+  ) {
+    console.warn(`[Очередь чата] пользователь ${String(userId)} не вошёл в Claude и не добавил ключ — сообщение ${message.id} отброшено`);
+    return true;
   }
 
   if (provider === 'codex' && !isCodexAllowedForWebUser(userId)) {
@@ -668,11 +646,6 @@ async function runQueuedChatMessage(
   }
 
   const clientOptions = (message.options ?? {}) as AnyRecord;
-  if (providerMigrated) {
-    // Модель/усилие в сообщении выбраны под старый провайдер — Devin их не знает.
-    delete clientOptions.model;
-    delete clientOptions.effort;
-  }
   console.log(`[Очередь чата] отправляю сообщение ${message.id} (чат ${sessionId})`);
 
   // Плашка «работает» во всех вкладках: ход начался не по нажатию человека,
@@ -742,9 +715,9 @@ export function initChatQueueDispatch(dependencies: ChatWebSocketDependencies): 
   onChatRunCompleted(() => {
     dispatchChatQueues();
   });
-  // Перезапуск сайта (выкатка, перезагрузка) не должен задерживать очередь:
-  // ход, за которым она стояла, к этому моменту уже оборван.
-  dispatchChatQueues();
+  // Первый обход делает server/index.ts после adoptSurvivors(). Иначе
+  // очередь могла запустить второй ход за миг до того, как новый
+  // сайт увидит живой Claude/Codex worker прошлого поколения.
   startChatQueueHeartbeat();
 }
 
@@ -774,7 +747,7 @@ async function handleChatAbort(
   // Агент пережил перезапуск сайта: канала к нему у сервера нет, остановить
   // можно только сигналом процессу.
   if ((!run || run.status !== 'running') && isSurvivorRunning(sessionId)) {
-    const survivorProvider = getSurvivorProvider(sessionId);
+    const survivorProvider = getSurvivorProvider(sessionId) || 'claude';
     stopSurvivor(sessionId);
     // «Работа завершена» с отметкой отмены: «чат свободен» вкладка может
     // отбросить как устаревший (см. onGone в server/index.ts).

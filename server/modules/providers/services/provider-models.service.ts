@@ -1,6 +1,5 @@
 import { providerModelsDb, sessionsDb } from '@/modules/database/index.js';
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
-import { clampDevinModelForUser } from '@/modules/providers/services/devin-model-policy.js';
 import type { IProvider } from '@/shared/interfaces.js';
 import type {
   CustomProviderModelInput,
@@ -15,7 +14,7 @@ import { AppError } from '@/shared/utils.js';
 
 /** Session-row access the service needs, narrowed so tests can stub it. */
 type ProviderModelsSessionStore = {
-  getSessionById(sessionId: string): { model: string | null; effort: string | null; initiated_by_user_id?: number | null } | null;
+  getSessionById(sessionId: string): { model: string | null; effort: string | null } | null;
   setSessionModel(sessionId: string, model: string): void;
   setSessionEffort(sessionId: string, effort: string): void;
 };
@@ -214,7 +213,7 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
 
   const readRecordedSessionSelection = (
     sessionId: string,
-  ): { model: string | null; effort: string | null; initiatedByUserId: number | null } | null => {
+  ): { model: string | null; effort: string | null } | null => {
     const session = sessions.getSessionById(sessionId);
     if (!session) {
       return null;
@@ -223,7 +222,6 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
     return {
       model: session.model?.trim() || null,
       effort: session.effort?.trim() || null,
-      initiatedByUserId: session.initiated_by_user_id ?? null,
     };
   };
 
@@ -252,15 +250,11 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
       return null;
     }
 
-    // Персональные белые списки (devin-model-policy): на строку сессии
-    // записывается только разрешённая владельцу модель.
-    const allowedModel = clampDevinModelForUser(provider, recordedSelection.initiatedByUserId, normalizedModel)
-      ?? normalizedModel;
-    sessions.setSessionModel(normalizedSessionId, allowedModel);
+    sessions.setSessionModel(normalizedSessionId, normalizedModel);
     return {
       provider,
       sessionId: normalizedSessionId,
-      model: allowedModel,
+      model: normalizedModel,
       effort: recordedSelection.effort,
       source: 'session',
     };
@@ -298,6 +292,19 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
   };
 
   /**
+   * Codex only: the model a run may actually use. A ChatGPT login answers 400
+   * to models outside its `model/list` (29.09.26: chats recorded with
+   * `gpt-5.4` failed on every message), and the catalog is already narrowed to
+   * that list - so the first candidate in it wins, else the catalog default.
+   * Other providers keep their ids as recorded (aliases, custom models).
+   */
+  const pickCodexUsableModel = async (candidates: Array<string | null | undefined>): Promise<string> => {
+    const catalog = await getProviderModels('codex');
+    const usable = candidates.find((candidate) => candidate && catalog.OPTIONS.some((option) => option.value === candidate));
+    return usable || catalog.DEFAULT;
+  };
+
+  /**
    * Answers "which model is this session using?" for every display surface.
    *
    * Precedence, highest first:
@@ -308,7 +315,7 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
    */
   const resolveSessionModel = async (
     provider: LLMProvider,
-    options: { sessionId?: string | null; requestedModel?: string | null; userId?: number | string | null } = {},
+    options: { sessionId?: string | null; requestedModel?: string | null } = {},
   ): Promise<ProviderSessionModel> => {
     const normalizedSessionId = typeof options.sessionId === 'string' ? options.sessionId.trim() : '';
     const normalizedRequestedModel = typeof options.requestedModel === 'string'
@@ -317,12 +324,13 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
 
     if (normalizedSessionId) {
       const recordedSelection = readRecordedSessionSelection(normalizedSessionId);
-      const policyUserId = recordedSelection?.initiatedByUserId ?? options.userId;
       if (recordedSelection?.model) {
         return {
           provider,
           sessionId: normalizedSessionId,
-          model: clampDevinModelForUser(provider, policyUserId, recordedSelection.model) ?? recordedSelection.model,
+          model: provider === 'codex'
+            ? await pickCodexUsableModel([recordedSelection.model, normalizedRequestedModel])
+            : recordedSelection.model,
           effort: recordedSelection.effort,
           source: 'session',
         };
@@ -335,17 +343,16 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
         return {
           provider,
           sessionId: normalizedSessionId,
-          model: clampDevinModelForUser(provider, policyUserId, resolvedProviderModel) ?? resolvedProviderModel,
+          model: resolvedProviderModel,
           effort: recordedSelection?.effort ?? null,
           source: 'provider',
         };
       }
 
-      const fallbackModel = normalizedRequestedModel || providerCatalog.DEFAULT;
       return {
         provider,
         sessionId: normalizedSessionId,
-        model: clampDevinModelForUser(provider, policyUserId, fallbackModel) ?? fallbackModel,
+        model: normalizedRequestedModel || providerCatalog.DEFAULT,
         effort: recordedSelection?.effort ?? null,
         source: normalizedRequestedModel ? 'session' : 'default',
       };
@@ -355,7 +362,7 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
       return {
         provider,
         sessionId: null,
-        model: clampDevinModelForUser(provider, options.userId, normalizedRequestedModel) ?? normalizedRequestedModel,
+        model: normalizedRequestedModel,
         effort: null,
         source: 'session',
       };
@@ -365,7 +372,7 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
     return {
       provider,
       sessionId: null,
-      model: clampDevinModelForUser(provider, options.userId, providerCatalog.DEFAULT) ?? providerCatalog.DEFAULT,
+      model: providerCatalog.DEFAULT,
       effort: null,
       source: 'default',
     };
@@ -384,17 +391,16 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
   ): Promise<string | undefined> => {
     const normalizedRequestedModel = typeof requestedModel === 'string' ? requestedModel.trim() : '';
     const normalizedSessionId = sessionId?.trim();
+    if (provider === 'codex') {
+      const recorded = normalizedSessionId ? readRecordedSessionSelection(normalizedSessionId)?.model : null;
+      return pickCodexUsableModel([recorded, normalizedRequestedModel]);
+    }
     if (!normalizedSessionId) {
       return normalizedRequestedModel || undefined;
     }
 
-    const recordedSelection = readRecordedSessionSelection(normalizedSessionId);
-    const resolvedModel = recordedSelection?.model || normalizedRequestedModel || undefined;
-    // Белый список владельца чата: возобновление не должно поднимать модель,
-    // которую пользователю уже убрали из доступа.
-    return resolvedModel === undefined
-      ? undefined
-      : clampDevinModelForUser(provider, recordedSelection?.initiatedByUserId, resolvedModel) ?? resolvedModel;
+    const recordedModel = readRecordedSessionSelection(normalizedSessionId)?.model;
+    return recordedModel || normalizedRequestedModel || undefined;
   };
 
   return {

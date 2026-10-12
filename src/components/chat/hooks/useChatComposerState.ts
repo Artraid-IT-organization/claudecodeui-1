@@ -11,9 +11,9 @@ import type {
 } from 'react';
 import { useDropzone } from 'react-dropzone';
 
+import { CONTINUE_IN_PROVIDER_EVENT } from '../../../hooks/useCodexAccount';
 import { authenticatedFetch } from '../../../utils/api';
 import type { MarkSessionProcessing, SessionActivityMap } from '../../../hooks/useSessionProtection';
-import { readSelectedDevinConnectionId } from '../../../hooks/useDevinConnectionPicker';
 import { grantClaudeToolPermission } from '../utils/chatPermissions';
 import { useSessionMessageQueue } from './useSessionMessageQueue';
 import {
@@ -59,7 +59,7 @@ let handoffPolling = false;
 const preparedHandoffSteps = new Map<string, number>();
 
 /** Начатая задача переноса — в браузере, чтобы пережить выгрузку вкладки. */
-type HandoffJobRecord = { sessionId: string; projectId: string; startedAt: number; goal?: string };
+type HandoffJobRecord = { sessionId: string; projectId: string; startedAt: number; goal?: string; target?: 'codex' };
 const HANDOFF_JOB_KEY = 'handoff_job';
 /** Сервер хранит задачу 30 минут после конца; дольше ждать нечего. */
 const HANDOFF_JOB_MAX_AGE_MS = 30 * 60 * 1000;
@@ -848,8 +848,6 @@ export function useChatComposerState({
     const toolsSettings = getToolsSettings();
 
     return {
-      // Подписка Devin из пикера аккаунтов: платит за этот ход (новый или открытый чат), если годна.
-      ...(provider === 'devin' ? { devinConnectionId: readSelectedDevinConnectionId() } : {}),
       model: currentProviderModel,
       effort: currentProviderEffort,
       permissionMode: resolvePermissionModeForProvider(provider, permissionMode),
@@ -1412,18 +1410,18 @@ export function useChatComposerState({
   const [handoffStatus, setHandoffStatus] = useState<'idle' | 'running'>('idle');
   const handoffTickRef = useRef(0);
   const [handoffTick, setHandoffTick] = useState(0);
-  const canHandoff = Boolean(sessionKey && selectedProject && onStartNewChat && provider === 'claude');
+  const canHandoff = Boolean(sessionKey && selectedProject && onStartNewChat && (provider === 'claude' || provider === 'devin'));
 
   /**
    * Опрос задачи до готовности. `resumeSessionId` — продолжить уже начатую
    * (вкладку выгрузили, пока модель писала): тогда без нового POST.
    */
-  const runHandoff = useCallback(async (sourceProject: Project, sourceSessionId: string, resume: boolean, goal = '') => {
+  const runHandoff = useCallback(async (sourceProject: Project, sourceSessionId: string, resume: boolean, goal = '', target?: 'codex') => {
     if (!onStartNewChat || handoffPolling) return;
     handoffPolling = true;
     setHandoffStatus('running');
     if (!resume) {
-      writeHandoffJob({ sessionId: sourceSessionId, projectId: sourceProject.projectId, startedAt: Date.now(), goal: goal || undefined });
+      writeHandoffJob({ sessionId: sourceSessionId, projectId: sourceProject.projectId, startedAt: Date.now(), goal: goal || undefined, target });
     }
     const fail = (message: string) => {
       clearHandoffJob();
@@ -1441,7 +1439,7 @@ export function useChatComposerState({
       let response = await authenticatedFetch(url, resume ? undefined : {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ goal: goal || undefined }),
+        body: JSON.stringify({ goal: goal || undefined, target }),
       });
       let body = await response.json().catch(() => ({}));
       if (!response.ok) return fail(body?.error || `ошибка ${response.status}`);
@@ -1488,6 +1486,26 @@ export function useChatComposerState({
     }
     void runHandoff(selectedProject, sourceSessionId, false, goal);
   }, [handoffStatus, runHandoff, selectedProject]);
+
+  /*
+   * Выбор помощника в меню аккаунтов при открытом чате чужого помощника —
+   * новый пустой чат выбранного, как вход во второй блок. Переписку НЕ
+   * переносим (Егор 29.09.26: перенос «перезаписывает чаты странно» — каждое
+   * переключение рождало «↪ Продолжение чата» с простынёй выжимки). Старый
+   * чат остаётся в своём списке. Новый чат берёт помощника из выбора меню.
+   */
+  const providerRef = useRef(provider);
+  providerRef.current = provider;
+  useEffect(() => {
+    const onContinue = (event: Event) => {
+      const target = (event as CustomEvent).detail;
+      const sourceSessionId = sessionKeyRef.current;
+      if (!sourceSessionId || !selectedProject || !onStartNewChat || target === providerRef.current) return;
+      onStartNewChat(selectedProject);
+    };
+    window.addEventListener(CONTINUE_IN_PROVIDER_EVENT, onContinue);
+    return () => window.removeEventListener(CONTINUE_IN_PROVIDER_EVENT, onContinue);
+  }, [onStartNewChat, selectedProject]);
 
   /*
    * «Сжать в этом чате» (Егор 27.09.26, вариант 1 после сравнения со встроенным
@@ -1547,7 +1565,7 @@ export function useChatComposerState({
       const job = readHandoffJob();
       if (!job || !selectedProject || selectedProject.projectId !== job.projectId) return;
       // Задача из поля хранится вместе с записью — при сбое вернётся в поле.
-      void runHandoff(selectedProject, job.sessionId, true, job.goal ?? '');
+      void runHandoff(selectedProject, job.sessionId, true, job.goal ?? '', job.target);
     };
     resume();
     document.addEventListener('visibilitychange', resume);

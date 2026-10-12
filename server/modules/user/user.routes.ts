@@ -104,6 +104,24 @@ export function createUserRouter(service: ReturnType<typeof createUserService>):
     res.json({ ok: true });
   });
 
+  // Итог каждой диктовки с телефона — только в журнал службы (`[voice-probe]`).
+  // 10.10.26: Егор надиктовал сообщение, а в Telegram и в поле пришла «последняя
+  // секунда» — запись молча выбросилась как «короткая». Было видно только её
+  // рассказ: сколько кусков отдал MediaRecorder, сколько записи iPhone
+  // приглушил в фоне — никто не мерил. Теперь клиент шлёт длительность, число
+  // кусков, байты и суммарную паузу захвата по каждой записи, удачной и нет.
+  router.post('/voice-probe', (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const fields: Record<string, number | boolean | string> = {};
+    for (const [key, value] of Object.entries(body).slice(0, 20)) {
+      if (typeof value === 'number' && Number.isFinite(value)) fields[key] = Math.round(value);
+      else if (typeof value === 'boolean') fields[key] = value;
+      else if (typeof value === 'string') fields[key] = value.slice(0, 80);
+    }
+    console.log(`[voice-probe] user=${readUserId(req)} ${JSON.stringify(fields)}`);
+    res.json({ ok: true });
+  });
+
   router.get('/usage-limits', async (req, res, next) => {
     try {
       res.json(await service.getUsageLimits(readUserId(req)));
@@ -121,10 +139,43 @@ export function createUserRouter(service: ReturnType<typeof createUserService>):
     }
   });
 
-  // Devin subscription of the platform owner: email, plan, daily / weekly quota.
+  // Devin subscription of the platform owner: account name and "signed in" flag.
   router.get('/devin-account', async (req, res, next) => {
     try {
       res.json(await service.getDevinAccount(readUserId(req)));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // Devin: выбрать активный аккаунт и войти во второй (кнопка «Добавить аккаунт»).
+  router.post('/devin-account/slot', async (req, res, next) => {
+    try {
+      res.json(await service.selectDevinAccountSlot(readUserId(req), (req.body as { slot?: unknown } | undefined)?.slot));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/devin-account/login/start', async (req, res, next) => {
+    try {
+      res.json(await service.startDevinAccountLogin(readUserId(req)));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/devin-account/login/code', async (req, res, next) => {
+    try {
+      res.json(await service.submitDevinAccountLoginCode(readUserId(req), (req.body as { code?: unknown } | undefined)?.code));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/devin-account/login/cancel', async (req, res, next) => {
+    try {
+      res.json(service.cancelDevinAccountLogin(readUserId(req)));
     } catch (error) {
       next(error);
     }

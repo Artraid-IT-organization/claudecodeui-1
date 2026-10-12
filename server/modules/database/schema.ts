@@ -149,12 +149,6 @@ CREATE TABLE IF NOT EXISTS sessions (
     -- Ярлык-флажок на чате (меню «…» → «Повесить ярлык»). Только метка:
     -- порядок чатов от него не меняется.
     is_flagged INTEGER NOT NULL DEFAULT 0,
-    -- Атрибуция: какой веб-пользователь инициировал чат (nullable —
-    -- наследие и строки, найденные наблюдателем на диске, автора не знают).
-    initiated_by_user_id INTEGER,
-    -- Через какой корпоративный канал Devin идёт чат (devin_connections.id).
-    -- NULL — всё, что не devin, и devin-чаты до появления Connection Layer.
-    devin_connection_id INTEGER,
     isArchived BOOLEAN DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -199,6 +193,36 @@ CREATE TABLE IF NOT EXISTS app_config (
 `;
 
 /**
+ * Server-side copy of voice transcripts awaiting delivery to a chat.
+ *
+ * The phone keeps recordings in an IndexedDB outbox until the server answers,
+ * but that only protects the AUDIO: a transcript returned while the tab was
+ * closed, or after the user switched chats, used to be dropped on the floor
+ * (12.10.26 - a 6-minute dictation was transcribed, archived and sent to
+ * Telegram twice, yet never appeared in the chat). Rows are written when the
+ * upload arrives (`text` stays NULL until transcription succeeds) and are
+ * deleted from the pending list only after the client reports the transcript
+ * reached its draft or send queue. `rec_id` also dedupes outbox retries: a
+ * repeat upload of an already-transcribed recording returns the stored text
+ * instead of re-archiving and re-transcribing.
+ */
+export const VOICE_TRANSCRIPTS_TABLE_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS voice_transcripts (
+    rec_id TEXT NOT NULL,
+    user_id INTEGER NOT NULL DEFAULT 0,
+    session_id TEXT,
+    scope TEXT,
+    send INTEGER NOT NULL DEFAULT 0,
+    text TEXT,
+    created_at INTEGER NOT NULL,
+    delivered_at INTEGER,
+    PRIMARY KEY (rec_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_voice_transcripts_pending
+ON voice_transcripts(user_id, delivered_at);
+`;
+
+/**
  * Persistent custom-model library used by the Providers module.
  *
  * Only user-created models are stored here. Predefined models remain source-
@@ -240,62 +264,6 @@ CREATE TABLE IF NOT EXISTS invite_tokens (
     used_by_user_id INTEGER,
     FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (used_by_user_id) REFERENCES users(id) ON DELETE SET NULL
-);
-`;
-
-/**
- * Корпоративные подключения Devin (Connection Layer).
- *
- * Одна строка = один серверный канал к Devin: каталог `xdg_data_home` — это
- * XDG_DATA_HOME процесса `devin acp`, то есть у каждого подключения своё
- * `credentials.toml`, своя `cli/sessions.db` и свои транскрипты. Сама креда в
- * таблице НЕ хранится — только путь к каталогу и метаданные; файл кредов
- * лежит на диске с правами 0600 в каталоге 0700.
- *
- * Выбор на запуск: `enabled=1`, вне cooldown, минимальный `priority`.
- * `health_status`: 'ok' | 'auth_failed' | 'rate_limited' | 'error' | 'unknown';
- * 'auth_failed' снимается только заменой креды, остальные — временем/успехом.
- */
-export const DEVIN_CONNECTIONS_TABLE_SCHEMA_SQL = `
-CREATE TABLE IF NOT EXISTS devin_connections (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    description TEXT NOT NULL DEFAULT '',
-    enabled INTEGER NOT NULL DEFAULT 1,
-    priority INTEGER NOT NULL DEFAULT 0,
-    xdg_data_home TEXT NOT NULL UNIQUE,
-    health_status TEXT NOT NULL DEFAULT 'unknown',
-    cooldown_until DATETIME,
-    last_error TEXT,
-    last_health_check_at DATETIME,
-    account_email TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-`;
-
-/**
- * Дополнительные действующие токены входа `/enter/<token>` поверх
- * `users.login_token`.
- *
- * Одна строка = одна ещё работающая ссылка человека. Заведена под перенос
- * комнат team-access в общий инстанс (03–04.10.26): у людей остались
- * закладки и иконки домашнего экрана со старыми ссылками их контейнеров —
- * после переезда домена на cc2 те давали 401 и вечную перезагрузку
- * «введите ссылку». Алиасы возвращают старым ссылкам жизнь, не трогая
- * основной `login_token`.
- *
- * Семантика регенерации сохранена: `setLoginToken` удаляет и алиасы
- * пользователя — «перевыпустить ссылку» обязан гасить ВСЕ ранее
- * действовавшие ссылки, иначе это была бы видимость отзыва.
- */
-export const LOGIN_TOKEN_ALIASES_TABLE_SCHEMA_SQL = `
-CREATE TABLE IF NOT EXISTS login_token_aliases (
-    token TEXT PRIMARY KEY NOT NULL,
-    user_id INTEGER NOT NULL,
-    label TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 `;
 
@@ -346,11 +314,9 @@ ${LAST_SCANNED_AT_SQL}
 
 ${APP_CONFIG_TABLE_SCHEMA_SQL}
 
+${VOICE_TRANSCRIPTS_TABLE_SCHEMA_SQL}
+
 ${PROVIDER_MODELS_TABLE_SCHEMA_SQL}
 CREATE INDEX IF NOT EXISTS idx_provider_models_provider_order
 ON provider_models(provider, sort_order, id);
-
-${DEVIN_CONNECTIONS_TABLE_SCHEMA_SQL}
-
-${LOGIN_TOKEN_ALIASES_TABLE_SCHEMA_SQL}
 `;

@@ -2,8 +2,7 @@ import fsSync from 'node:fs';
 
 import Database from 'better-sqlite3';
 
-import { devinConnectionsDb, sessionsDb } from '@/modules/database/index.js';
-
+import { parseFilesInputTag, parseImagesInputTag } from '@/shared/image-attachments.js';
 import type { IProviderSessions } from '@/shared/interfaces.js';
 import type {
   AnyRecord,
@@ -21,6 +20,8 @@ import {
   readOptionalString,
   sliceTailPage,
 } from '@/shared/utils.js';
+
+import { fullDevinConversation } from './devin-chain.js';
 
 const PROVIDER = 'devin' as const;
 
@@ -83,6 +84,71 @@ function readToolName(update: DevinAcpUpdate): string {
   return readOptionalString(meta?.['cognition.ai/inferenceToolName'])
     ?? readOptionalString(update.title)
     ?? 'Tool';
+}
+
+/** Вложения одной реплики человека после снятия служебной разметки. */
+type DevinUserContent = {
+  text: string;
+  images: Array<{ path?: string; name?: string; data?: string }>;
+  files: Array<{ path?: string; name?: string }>;
+};
+
+/**
+ * Реплика человека в Devin-хранилище — строка или массив ACP-блоков.
+ *
+ * Строка: веб-композитор подвешивает вложения блоками `<images_input>` /
+ * `<files_input>` в конце текста — снимаем их обратно в поля сообщения, как у
+ * остальных провайдеров, чтобы тег не висел голым текстом в ленте.
+ *
+ * Массив: типизированный ввод может нести блоки-картинки `{type:'image',
+ * data, mimeType}` — они приходят base64 и уходят в ленту data-URL'ами, как у
+ * Claude. Блок `{type:'content', content:{…}}` разворачиваем на один уровень —
+ * та же форма, что у блоков результата действия.
+ */
+function readUserMessageContent(content: unknown): DevinUserContent {
+  if (typeof content === 'string') {
+    const filesParsed = parseFilesInputTag(content);
+    const imagesParsed = parseImagesInputTag(filesParsed.text);
+    return {
+      text: imagesParsed.text.trim(),
+      images: imagesParsed.attachments.map((attachment) => ({ ...attachment })),
+      files: filesParsed.attachments.map((attachment) => ({ ...attachment })),
+    };
+  }
+  if (!Array.isArray(content)) {
+    return { text: '', images: [], files: [] };
+  }
+  const text: string[] = [];
+  const images: DevinUserContent['images'] = [];
+  const files: DevinUserContent['files'] = [];
+  for (const block of content) {
+    const record = readObjectRecord(block);
+    if (!record) {
+      continue;
+    }
+    const inner = readObjectRecord(record.content) ?? record;
+    const outerType = readOptionalString(record.type);
+    // `{type:'content', content:{…}}` разворачиваем на уровень — та же форма,
+    // что у блоков результата действия; тип берём изнутри.
+    const blockType = outerType === 'content' || !outerType
+      ? readOptionalString(inner.type)
+      : outerType;
+    if (blockType === 'text' && typeof inner.text === 'string') {
+      // Текст внутри типизированного ввода может нести те же блоки вложений.
+      const filesParsed = parseFilesInputTag(inner.text);
+      const imagesParsed = parseImagesInputTag(filesParsed.text);
+      text.push(imagesParsed.text);
+      images.push(...imagesParsed.attachments.map((attachment) => ({ ...attachment })));
+      files.push(...filesParsed.attachments.map((attachment) => ({ ...attachment })));
+    } else if (blockType === 'image') {
+      const data = readOptionalString(inner.data);
+      if (data) {
+        const mimeType = readOptionalString(inner.mimeType) ?? 'image/png';
+        images.push({ data: `data:${mimeType};base64,${data}` });
+      }
+    }
+  }
+  return { text: text.join('\n').trim(), images, files };
 }
 
 function readToolCallContent(update: DevinAcpUpdate): string {
@@ -157,15 +223,32 @@ export class DevinSessionsProvider implements IProviderSessions {
     }
 
     if (updateType === 'tool_call') {
-      return [createNormalizedMessage({
-        id: readOptionalString(update.toolCallId) ?? generateMessageId('devin-tool'),
-        sessionId: eventSessionId,
-        provider: PROVIDER,
-        kind: 'tool_use',
-        toolName: readToolName(update),
-        toolId: readOptionalString(update.toolCallId) ?? undefined,
-        toolInput: update.rawInput ?? {},
-      })];
+      // ACP шлёт текст сплошным потоком `agent_message_chunk` без границ
+      // блоков (нет аналога Claude'овского content_block_stop, на котором
+      // клиент закрывает живую строку). Вызов инструмента — единственная
+      // жёсткая граница: накопленный перед ним текст — законченный блок.
+      // Без stream_end клиент склеивал весь ход в одну живую строку:
+      // статусная реплика слипалась с финальным ответом, ни с одним узлом на
+      // диске такая строка не совпадала — и ответ вставал в ленту второй раз
+      // под «Ходом работы» (04.10.26, снимок Егора). Лишний stream_end подряд
+      // безопасен: аккумулятор пуст, финализировать нечего.
+      const toolId = readOptionalString(update.toolCallId) ?? generateMessageId('devin-tool');
+      return [
+        createNormalizedMessage({
+          sessionId: eventSessionId,
+          provider: PROVIDER,
+          kind: 'stream_end',
+        }),
+        createNormalizedMessage({
+          id: toolId,
+          sessionId: eventSessionId,
+          provider: PROVIDER,
+          kind: 'tool_use',
+          toolName: readToolName(update),
+          toolId,
+          toolInput: update.rawInput ?? {},
+        }),
+      ];
     }
 
     if (updateType === 'tool_call_update') {
@@ -197,7 +280,9 @@ export class DevinSessionsProvider implements IProviderSessions {
     if (updateType === 'usage_update') {
       const used = typeof update.used === 'number' ? update.used : null;
       const size = typeof update.size === 'number' ? update.size : null;
-      if (used === null && size === null) {
+      // Неполное событие (только одно поле) затирало бы верный счётчик
+      // нулём — отвечать можно только на пару used+size.
+      if (used === null || size === null) {
         return [];
       }
       return [createNormalizedMessage({
@@ -206,8 +291,8 @@ export class DevinSessionsProvider implements IProviderSessions {
         kind: 'status',
         text: 'token_budget',
         tokenBudget: {
-          used: used ?? 0,
-          total: size ?? 0,
+          used,
+          total: size,
         },
       })];
     }
@@ -221,10 +306,10 @@ export class DevinSessionsProvider implements IProviderSessions {
   /**
    * Loads Devin history from the shared SQLite `sessions.db`.
    *
-   * Devin stores every turn as a node in a parent-linked tree (`main_chain_id`
-   * points at the current tip; abandoned branches stay in the table), so
-   * history is reconstructed by walking parent links from the tip rather than
-   * by ordering the whole table.
+   * `main_chain_id` points at the current context window, not the whole
+   * conversation — turns that fell out of the window stay in the table as
+   * detached branches. `fullDevinConversation` rebuilds the complete accepted
+   * history across all context snapshots (see devin-chain.ts).
    */
   async fetchHistory(
     sessionId: string,
@@ -232,13 +317,7 @@ export class DevinSessionsProvider implements IProviderSessions {
   ): Promise<FetchHistoryResult> {
     const { limit = null, offset = 0 } = options;
     const providerSessionId = options.providerSessionId ?? sessionId;
-    // История живёт в sessions.db канала чата (Connection Layer), наследие —
-    // в машинной базе по умолчанию.
-    const sessionRow = sessionsDb.getSessionById(sessionId)
-      ?? sessionsDb.getSessionByProviderSessionId(providerSessionId);
-    const bound = sessionRow?.devin_connection_id;
-    const connXdg = bound != null ? devinConnectionsDb.getById(bound)?.xdg_data_home : null;
-    const db = openDevinDatabase(getDevinDatabasePath(connXdg ?? null));
+    const db = openDevinDatabase();
     if (!db) {
       return { messages: [], total: 0, hasMore: false, offset: 0, limit: null };
     }
@@ -251,30 +330,13 @@ export class DevinSessionsProvider implements IProviderSessions {
         return { messages: [], total: 0, hasMore: false, offset: 0, limit: null };
       }
 
-      const rows = db
-        .prepare('SELECT node_id, parent_node_id, chat_message, created_at FROM message_nodes WHERE session_id = ?')
-        .all(providerSessionId) as DevinMessageNodeRow[];
-
-      const byId = new Map<number, DevinMessageNodeRow>();
-      for (const row of rows) {
-        byId.set(row.node_id, row);
-      }
-
-      // Walk the live chain tip-to-root; if the chain pointer is missing (or
-      // dangling), fall back to the newest node so history still opens.
-      let tip = sessionRow.main_chain_id != null && byId.has(sessionRow.main_chain_id)
-        ? sessionRow.main_chain_id
-        : rows.reduce<number | null>((acc, row) => (acc === null || row.node_id > acc ? row.node_id : acc), null);
-
-      const chain: DevinMessageNodeRow[] = [];
-      const seen = new Set<number>();
-      while (tip !== null && byId.has(tip) && !seen.has(tip)) {
-        seen.add(tip);
-        const row = byId.get(tip)!;
-        chain.push(row);
-        tip = row.parent_node_id;
-      }
-      chain.reverse();
+      const chain: DevinMessageNodeRow[] = fullDevinConversation(db, providerSessionId)
+        .map((row) => ({
+          node_id: row.nodeId,
+          parent_node_id: row.parentId,
+          chat_message: row.chatMessage,
+          created_at: row.createdAt,
+        }));
 
       const normalized = this.normalizeHistoryChain(chain, sessionId);
 
@@ -317,8 +379,8 @@ export class DevinSessionsProvider implements IProviderSessions {
       const timestamp = normalizeProviderTimestamp(metadata?.created_at ?? row.created_at ?? null);
 
       if (role === 'user' && metadata?.is_user_input) {
-        const content = readOptionalString(message.content);
-        if (content?.trim()) {
+        const { text, images, files } = readUserMessageContent(message.content);
+        if (text || images.length > 0 || files.length > 0) {
           normalized.push(createNormalizedMessage({
             id: `devin_${row.node_id}`,
             sessionId,
@@ -326,7 +388,9 @@ export class DevinSessionsProvider implements IProviderSessions {
             provider: PROVIDER,
             kind: 'text',
             role: 'user',
-            content,
+            content: text,
+            images: images.length > 0 ? images : undefined,
+            files: files.length > 0 ? files : undefined,
           }));
         }
         continue;

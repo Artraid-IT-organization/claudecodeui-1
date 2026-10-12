@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { SELECT_PROVIDER_EVENT } from '../../../hooks/useCodexAccount';
 import { authenticatedFetch } from '../../../utils/api';
-import { DEFAULT_PROVIDER } from '../../../utils/defaultProvider';
 import type { PendingPermissionRequest, PermissionMode } from '../types/types';
 import type {
   ProjectSession,
@@ -22,7 +21,7 @@ import {
 const FALLBACK_DEFAULT_MODEL: Record<LLMProvider, string> = {
   claude: 'default',
   cursor: 'gpt-5.3-codex',
-  codex: 'gpt-5.4',
+  codex: 'gpt-5.6-sol',
   devin: 'swe-2-high',
   opencode: 'anthropic/claude-sonnet-4-5',
 };
@@ -33,7 +32,7 @@ const readStoredProvider = (): LLMProvider => {
   const storedProvider = localStorage.getItem('selected-provider');
   return PROVIDERS.includes(storedProvider as LLMProvider)
     ? storedProvider as LLMProvider
-    : DEFAULT_PROVIDER;
+    : 'claude';
 };
 
 /**

@@ -68,8 +68,12 @@ export interface ChatMessage {
   isLocalCommand?: boolean;
   isLocalCommandStdout?: boolean;
   isCompactSummary?: boolean;
+  /** Provider-authored progress note: show verbatim as a work stage. */
+  isCommentary?: boolean;
   /** Шаг помощника: id вызова Agent/Task в главном чате (приходит только живьём). */
   parentToolUseId?: string;
+  /** Пометка локальной служебной строки ('connection-lost') — снимается через sessionStore.removeRealtimeWhere. */
+  clientNotice?: string;
   isSubagentContainer?: boolean;
   subagentState?: {
     childTools: SubagentChildTool[];

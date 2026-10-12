@@ -229,3 +229,70 @@ test('Codex history preserves wrapped exec tool calls and results', { concurrenc
     await rm(tempRoot, { recursive: true, force: true });
   }
 });
+
+test('Codex live reasoning is normalized as thinking, not assistant text', () => {
+  // Форма из transformCodexEvent: роль assistant, флаг — внутри message.
+  const [message] = new CodexSessionsProvider().normalizeMessage({
+    type: 'item',
+    itemType: 'reasoning',
+    message: { role: 'assistant', content: '**Checking primes**', isReasoning: true },
+  }, 'session-1');
+  assert.equal(message?.kind, 'thinking');
+  assert.equal(message?.content, '**Checking primes**');
+});
+
+test('Codex commentary is normalized as work text while final answers stay replies', () => {
+  const provider = new CodexSessionsProvider();
+  const [commentary] = provider.normalizeMessage({
+    type: 'item',
+    itemType: 'agent_message',
+    phase: 'commentary',
+    message: { role: 'assistant', content: 'Проверяю живой сайт после сборки.' },
+  }, 'session-1');
+  const [finalAnswer] = provider.normalizeMessage({
+    type: 'item',
+    itemType: 'agent_message',
+    phase: 'final_answer',
+    message: { role: 'assistant', content: 'Готово.' },
+  }, 'session-1');
+
+  assert.equal(commentary?.kind, 'thinking');
+  assert.equal(commentary?.content, 'Проверяю живой сайт после сборки.');
+  assert.equal(commentary?.isCommentary, true);
+  assert.equal(finalAnswer?.kind, 'text');
+  assert.equal(finalAnswer?.role, 'assistant');
+});
+
+test('Codex live command output is emitted as a tool result', () => {
+  const messages = new CodexSessionsProvider().normalizeMessage({
+    type: 'item',
+    itemType: 'command_execution',
+    command: 'npm test',
+    output: '12 tests passed',
+    exitCode: 0,
+    status: 'completed',
+  }, 'session-1');
+
+  assert.equal(messages.length, 2);
+  assert.equal(messages[0]?.kind, 'tool_use');
+  assert.equal(messages[0]?.toolName, 'Bash');
+  assert.equal(messages[1]?.kind, 'tool_result');
+  assert.equal(messages[1]?.toolId, messages[0]?.toolId);
+  assert.equal(messages[1]?.content, '12 tests passed');
+  assert.equal(messages[1]?.isError, false);
+});
+
+test('Codex live command failure is visible as an error result', () => {
+  const messages = new CodexSessionsProvider().normalizeMessage({
+    type: 'item',
+    itemType: 'command_execution',
+    command: 'npm test',
+    output: 'test failed',
+    exitCode: 1,
+    status: 'failed',
+  }, 'session-1');
+
+  assert.equal(messages[1]?.kind, 'tool_result');
+  assert.equal(messages[1]?.content, 'test failed');
+  assert.equal(messages[1]?.isError, true);
+});

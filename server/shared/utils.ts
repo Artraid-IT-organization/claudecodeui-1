@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 
+import { getActiveDevinSlot, getDevinSlotEnv, type DevinSlot } from '@/shared/devin-slots.js';
 import { parseFrontMatter } from '@/shared/frontmatter.js';
 import { getRequestRuntimeContext } from '@/shared/request-context.js';
 import type { ServerScope } from '@/shared/types.js';
@@ -93,6 +94,15 @@ export function isCodexAllowedForWebUser(userId: number | string | null | undefi
   }
   const numericUserId = userId === null || userId === undefined ? Number.NaN : Number(userId);
   return Number.isFinite(numericUserId) && isPlatformOwnerWebUser(numericUserId);
+}
+
+/**
+ * Whether this web user may use the host's Devin login (~/.local/share/devin).
+ * Same boundary as Codex: one login per machine, so on a multi-tenant instance
+ * only the platform owner may chat on it (and spend its quota).
+ */
+export function isDevinAllowedForWebUser(userId: number | string | null | undefined): boolean {
+  return isCodexAllowedForWebUser(userId);
 }
 
 /**
@@ -338,62 +348,6 @@ export function normalizeProjectPath(inputPath: string): string {
 }
 
 /**
- * Приводит запрошенный рабочий каталог к зоне пользователя.
- *
- * Единственный расчёт «где может стартовать процесс не-владельца» — общий
- * для создания сессии (sessions.service) и обоих путей запуска хода
- * (chat-websocket: runProviderTurn и steerIntoRunningTurn). Потребители берут
- * корень зоны из `resolveWebUserRuntimeContext(userId).workspaceRoot`
- * (WS-путь) или из request runtime context (HTTP-путь).
- *
- * Семантика — та же, что у `projectsDb.isProjectPathInScope`: корень зоны
- * приводится через realpath, кандидат — лексически. Это позволяет путям ВНУТРИ
- * зоны оставаться симлинками наружу (комнаты team-access смонтированы как
- * `workspace/work -> people/<имя>/home/work`): по букве пути каталог в зоне,
- * по разрешённому — снаружи, и это задумано.
- *
- * - `scopeRootDir` пуст (владелец площадки, OPEN_REGISTRATION выключен,
- *   пользователь не опознан) — запрошенный путь возвращается как был:
- *   ограничения нет, поведение прежнее.
- * - Запрошенный путь лежит внутри зоны И существует — возвращается он.
- * - Иначе — корень зоны. Не ошибка: клиент мог прислать устаревший или
- *   чужой путь (так чат, привязанный к исчезнувшему `/tmp/...`, не умирает
- *   `spawn ENOENT`, а приземляется в зоне). Корень при этом гарантированно
- *   создаётся — зона обязана работать у всех.
- */
-export function resolveScopedWorkingDirectory(
-  requestedPath: string | null | undefined,
-  scopeRootDir: string | null | undefined,
-): string | undefined {
-  if (!scopeRootDir) {
-    return typeof requestedPath === 'string' && requestedPath.trim()
-      ? requestedPath.trim()
-      : undefined;
-  }
-
-  let normalizedRoot: string;
-  try {
-    normalizedRoot = normalizeProjectPath(fs.realpathSync(scopeRootDir));
-  } catch {
-    normalizedRoot = normalizeProjectPath(scopeRootDir);
-  }
-  const requested = typeof requestedPath === 'string'
-    ? normalizeProjectPath(requestedPath)
-    : '';
-
-  if (
-    requested
-    && (requested === normalizedRoot || requested.startsWith(`${normalizedRoot}${path.sep}`))
-    && fs.existsSync(requested)
-  ) {
-    return requested;
-  }
-
-  fs.mkdirSync(scopeRootDir, { recursive: true });
-  return scopeRootDir;
-}
-
-/**
  * Validates that a user-supplied workspace path is safe to use.
  *
  * Call this before any filesystem mutation that creates or registers projects.
@@ -572,6 +526,61 @@ export function createCompleteMessage(opts: {
     success: exitCode === 0 && !aborted,
     aborted,
   });
+}
+
+// ---------------------------
+//----------------- CODEX TOKEN USAGE UTILITIES ------------
+/**
+ * Reads the current Codex context snapshot from a `token_count` info payload.
+ *
+ * Codex exposes both `last_token_usage` (the tokens occupying the most recent
+ * model request) and `total_token_usage` (cumulative spend for the whole
+ * session). The chat footer and context warnings need the former; showing the
+ * cumulative value can exceed the model context window after several turns.
+ * Older Codex transcripts may omit `last_token_usage`, so the cumulative field
+ * remains a compatibility fallback instead of making their counter disappear.
+ *
+ * Consumed by the live Codex runtime, persisted Codex history, and the provider
+ * token-usage service so every UI entry point reports the same value.
+ */
+export function readCodexContextTokenUsage(info: unknown): {
+  used: number;
+  total: number;
+  inputTokens: number;
+  outputTokens: number;
+  breakdown: { input: number; output: number };
+} | null {
+  const tokenInfo = readObjectRecord(info);
+  if (!tokenInfo) {
+    return null;
+  }
+
+  const usage = readObjectRecord(tokenInfo.last_token_usage)
+    ?? readObjectRecord(tokenInfo.total_token_usage);
+  if (!usage) {
+    return null;
+  }
+
+  const inputTokens = Number(usage.input_tokens);
+  const outputTokens = Number(usage.output_tokens);
+  const totalTokens = Number(usage.total_tokens);
+  const normalizedInput = Number.isFinite(inputTokens) ? inputTokens : 0;
+  const normalizedOutput = Number.isFinite(outputTokens) ? outputTokens : 0;
+  const normalizedTotal = Number.isFinite(totalTokens) && totalTokens > 0
+    ? totalTokens
+    : normalizedInput + normalizedOutput;
+  const contextWindow = Number(tokenInfo.model_context_window);
+
+  return {
+    used: normalizedTotal,
+    total: Number.isFinite(contextWindow) && contextWindow > 0 ? contextWindow : 200_000,
+    inputTokens: normalizedInput,
+    outputTokens: normalizedOutput,
+    breakdown: {
+      input: normalizedInput,
+      output: normalizedOutput,
+    },
+  };
 }
 
 // ---------------------------
@@ -1081,13 +1090,9 @@ export function unwrapJsonStringLiteral(value: string): string {
  * `~/.local/share/devin`). Devin keeps a single shared `sessions.db` plus
  * `transcripts/` under `cli/` inside it — provider readers use this root and
  * must never hand it out as a deletable per-session transcript path.
- *
- * `xdgDataHomeOverride` — Devin Connection Layer: у корпоративного канала
- * (devin_connections.xdg_data_home) свой XDG_DATA_HOME, значит свои креды и
- * своя sessions.db. Без параметра — машинный дефолт (legacy-канал).
  */
-export function getDevinDataDir(xdgDataHomeOverride?: string | null): string {
-  const xdgDataHome = xdgDataHomeOverride?.trim() || process.env.XDG_DATA_HOME?.trim();
+export function getDevinDataDir(): string {
+  const xdgDataHome = process.env.XDG_DATA_HOME?.trim();
   return path.join(xdgDataHome || path.join(os.homedir(), '.local', 'share'), 'devin');
 }
 
@@ -1096,20 +1101,8 @@ export function getDevinDataDir(xdgDataHomeOverride?: string | null): string {
  * Like OpenCode's `opencode.db`, it is shared across every Devin session on
  * this account — read-only access only.
  */
-export function getDevinDatabasePath(xdgDataHomeOverride?: string | null): string {
-  return path.join(getDevinDataDir(xdgDataHomeOverride), 'cli', 'sessions.db');
-}
-
-/**
- * Корень каталогов корпоративных Devin-каналов. Каждый канал живёт в
- * `<root>/<id>` как самостоятельный XDG_DATA_HOME: `<root>/<id>/devin/
- * credentials.toml` (0600, каталоги 0700), `<root>/<id>/devin/cli/sessions.db`.
- * Legacy-канал (машинный `~/.local/share`) здесь не создаётся — он указывает
- * на общий домашний каталог.
- */
-export function getDevinConnectionsRoot(): string {
-  const configured = process.env.DEVIN_CONNECTIONS_ROOT?.trim();
-  return configured || path.join(os.homedir(), '.cloudcli-shared', 'devin-connections');
+export function getDevinDatabasePath(): string {
+  return path.join(getDevinDataDir(), 'cli', 'sessions.db');
 }
 
 /**
@@ -1140,24 +1133,46 @@ export function resolveDevinCliCommand(): string {
 }
 
 /**
+ * Devin models the owner allows (Egor, 03.10.26: "only SWE-2, the rest are not allowed").
+ * One rule for the picker (devin-models.provider.ts) and for the run itself
+ * (devin-runtime.provider.js): anything else would spend the shared Devin quota
+ * on models the owner has not approved. Matches swe-2, swe-2-high, swe-2-medium, swe-2-max.
+ */
+export function isAllowedDevinModel(model: unknown): boolean {
+  return typeof model === 'string' && /^swe-2(-(high|medium|max|low))?$/i.test(model.trim());
+}
+
+export const DEVIN_DEFAULT_MODEL = 'swe-2-high';
+
+/**
+ * Whether a Devin CLI binary exists on this host. The site is published to
+ * other people's servers (selfhost update from GitHub main), where Devin is
+ * usually not installed — there the Devin tab must stay hidden instead of
+ * offering a provider that can only fail.
+ */
+export function isDevinCliInstalled(): boolean {
+  const resolved = resolveDevinCliCommand();
+  if (resolved !== 'devin') {
+    return fs.existsSync(resolved);
+  }
+  return (process.env.PATH || '')
+    .split(path.delimiter)
+    .some((dir) => dir && fs.existsSync(path.join(dir, 'devin')));
+}
+
+/**
  * Spawns a helper that makes child `devin` processes resolvable even under a
  * minimal PATH: the child's PATH gains the well-known user bin dirs so tools
  * Devin itself shells out to (and Devin's own subprocess lookups) still work.
- *
- * `xdgDataHome` — Devin Connection Layer: выбранный корпоративный канал
- * получает свой XDG_DATA_HOME (свои креды и sessions.db). NULL/undefined
- * оставляет машинный дефолт — поведение до Connection Layer.
  */
-export function buildDevinChildEnv(xdgDataHome?: string | null): Record<string, string | undefined> {
+export function buildDevinChildEnv(slot: DevinSlot = getActiveDevinSlot()): Record<string, string | undefined> {
   const home = os.homedir();
   const extraPath = [path.join(home, '.local', 'bin'), path.join(home, 'bin')];
   const currentPath = process.env.PATH || '';
   const augmentedPath = [...extraPath, currentPath].join(path.delimiter);
-  const env: Record<string, string | undefined> = { ...process.env, PATH: augmentedPath };
-  if (xdgDataHome) {
-    env.XDG_DATA_HOME = xdgDataHome;
-  }
-  return env;
+  // Слот Devin: второй аккаунт = другой XDG_DATA_HOME (см. devin-slots.ts).
+  // Без слота берётся активный; явный слот нужен проверке входа конкретного аккаунта.
+  return { ...process.env, PATH: augmentedPath, ...getDevinSlotEnv(slot) };
 }
 
 // ---------------------------
@@ -1207,24 +1222,12 @@ export function sanitizeLeafDirectoryName(inputName: string, label = 'directory 
  * forever, since birthtime never changes after creation. The sidebar showed
  * a long-running chat as stuck "1d ago" indefinitely even while it was being
  * actively used, because the synchronizer stopped ever re-visiting it.
- *
- * `knownPaths` (optional) is the set of transcript paths already present in
- * the sessions DB. When provided, a file that is NOT in the set is collected
- * regardless of mtime: a transcript can land in the tree with an mtime older
- * than the scan cursor (copied with preserved timestamps, appended during a
- * scan between cursor read and tree walk), and mtime filtering alone would
- * skip it forever — the file existed on disk but stayed invisible in the UI
- * (audit 10.10.26: two Vince transcripts, one 50 MB, invisible for days).
- * Corollary: a transcript whose DB row was deleted while the file was kept
- * (`deletedFromDisk=false`) will be re-indexed — the file on disk is the
- * source of truth.
  */
 export async function findFilesRecursivelyCreatedAfter(
   rootDir: string,
   extension: string,
   lastScanAt: Date | null,
-  fileList: string[] = [],
-  knownPaths?: ReadonlySet<string>
+  fileList: string[] = []
 ): Promise<string[]> {
   try {
     const entries = await readdir(rootDir, { withFileTypes: true });
@@ -1232,7 +1235,7 @@ export async function findFilesRecursivelyCreatedAfter(
       const fullPath = path.join(rootDir, entry.name);
 
       if (entry.isDirectory()) {
-        await findFilesRecursivelyCreatedAfter(fullPath, extension, lastScanAt, fileList, knownPaths);
+        await findFilesRecursivelyCreatedAfter(fullPath, extension, lastScanAt, fileList);
         continue;
       }
 
@@ -1246,7 +1249,7 @@ export async function findFilesRecursivelyCreatedAfter(
       }
 
       const fileStat = await stat(fullPath);
-      if (fileStat.mtime > lastScanAt || (knownPaths && !knownPaths.has(fullPath))) {
+      if (fileStat.mtime > lastScanAt) {
         fileList.push(fullPath);
       }
     }

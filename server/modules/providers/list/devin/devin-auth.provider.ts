@@ -1,22 +1,22 @@
+import os from 'node:os';
 import path from 'node:path';
 import fsSync from 'node:fs';
 
 import spawn from 'cross-spawn';
 
-import { devinConnectionsDb } from '@/modules/database/index.js';
+import { DEVIN_SLOT2_DATA_HOME } from '@/shared/devin-slots.js';
 import type { IProviderAuth } from '@/shared/interfaces.js';
 import type { ProviderAuthStatus } from '@/shared/types.js';
 import { getDevinDataDir, resolveDevinCliCommand } from '@/shared/utils.js';
 
 /**
- * Auth facet for Devin CLI — теперь поверх Connection Layer.
+ * Auth facet for Devin CLI.
  *
- * Креды живут по одному credentials.toml на канал
- * (`<devin_connections.xdg_data_home>/devin/credentials.toml`); legacy-канал
- * «default» указывает на машинный `~/.local/share` и покрывает старую
- * установку. Провайдер аутентифицирован, когда у ХОТЯ БЫ ОДНОГО годного канала
- * есть непустая креда; текст — имя канала, по которому работает провайдер.
- * Содержимое кред никогда не читается и не возвращается.
+ * Devin keeps a single machine-wide credential at
+ * `~/.local/share/devin/credentials.toml`, installed by `devin auth login`.
+ * There is no per-web-user Devin account — the provider is gated to the
+ * platform owner, so this status only ever describes the owner's machine
+ * login. Credentials are never read beyond existence, and never returned.
  */
 export class DevinProviderAuth implements IProviderAuth {
   private checkInstalled(): boolean {
@@ -33,27 +33,19 @@ export class DevinProviderAuth implements IProviderAuth {
 
   async getStatus(): Promise<ProviderAuthStatus> {
     const installed = this.checkInstalled();
-
-    // Годные каналы: enabled, без auth_failed, без живого cooldown. Статус —
-    // о том, есть ли у них креда вообще; живая проба — у админки каналов.
-    const usable = devinConnectionsDb.list().filter(
-      (conn) => conn.enabled
-        && conn.health_status !== 'auth_failed'
-        && this.checkCredentialsFile(path.join(conn.xdg_data_home, 'devin', 'credentials.toml')),
-    );
-    const legacyPath = path.join(getDevinDataDir(), 'credentials.toml');
-    const hasLegacy = this.checkCredentialsFile(legacyPath);
-    const hasCredentials = usable.length > 0 || hasLegacy;
+    const hasCredentials = [getDevinDataDir(), path.join(DEVIN_SLOT2_DATA_HOME, 'devin')]
+      .some((dir) => this.checkCredentialsFile(path.join(dir, 'credentials.toml')));
+    const orgId = this.readOrgId();
 
     return {
       installed,
       provider: 'devin',
       authenticated: hasCredentials,
-      email: usable[0]?.name ?? (hasLegacy ? 'default (machine credential)' : null),
+      email: orgId,
       method: hasCredentials ? 'devin_cli' : null,
       error: hasCredentials
         ? undefined
-        : installed ? 'Devin CLI not authenticated (no usable corporate connection)' : 'Devin CLI not installed',
+        : installed ? 'Devin CLI not authenticated (run "devin auth login")' : 'Devin CLI not installed',
     };
   }
 
@@ -64,6 +56,18 @@ export class DevinProviderAuth implements IProviderAuth {
       return stat.isFile() && stat.size > 0;
     } catch {
       return false;
+    }
+  }
+
+  /** The configured Devin org id from `~/.config/devin/config.json` — a label, not a secret. */
+  private readOrgId(): string | null {
+    try {
+      const configPath = path.join(os.homedir(), '.config', 'devin', 'config.json');
+      const config = JSON.parse(fsSync.readFileSync(configPath, 'utf8'));
+      const orgId = config?.devin?.org_id;
+      return typeof orgId === 'string' && orgId ? orgId : null;
+    } catch {
+      return null;
     }
   }
 }

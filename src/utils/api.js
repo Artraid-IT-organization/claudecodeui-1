@@ -1,5 +1,7 @@
 import { IS_PLATFORM } from "../shared/utils";
 
+import { doorFetch, getDoorBase } from "./doors";
+
 export const AUTH_TOKEN_REFRESHED_EVENT = 'auth-token-refreshed';
 export const AUTH_SESSION_EXPIRED_EVENT = 'auth-session-expired';
 
@@ -111,12 +113,12 @@ const isShareableRead = (options) => {
  * @param {RequestInit} [options]
  * @returns {Promise<Response>}
  */
-export const authenticatedFetch = (url, options = {}) => {
+export const authenticatedFetch = (url, options = {}, doorOptions = {}) => {
   if (isShareableRead(options)) {
     const key = `${getStoredAuthToken() || ''} ${url}`;
     let shared = inFlightReads.get(key);
     if (!shared) {
-      shared = sendAuthenticatedFetch(url, options).finally(() => {
+      shared = sendAuthenticatedFetch(url, options, doorOptions).finally(() => {
         inFlightReads.delete(key);
       });
       inFlightReads.set(key, shared);
@@ -124,7 +126,7 @@ export const authenticatedFetch = (url, options = {}) => {
     // Исходный ответ не читается никем, каждый получает свою копию.
     return shared.then((response) => response.clone());
   }
-  return sendAuthenticatedFetch(url, options);
+  return sendAuthenticatedFetch(url, options, doorOptions);
 };
 
 /**
@@ -132,7 +134,7 @@ export const authenticatedFetch = (url, options = {}) => {
  * @param {RequestInit} [options]
  * @returns {Promise<Response>}
  */
-const sendAuthenticatedFetch = (url, options = {}) => {
+const sendAuthenticatedFetch = (url, options = {}, doorOptions = {}) => {
   const token = getStoredAuthToken();
 
   const defaultHeaders = {};
@@ -146,13 +148,13 @@ const sendAuthenticatedFetch = (url, options = {}) => {
     defaultHeaders['Authorization'] = `Bearer ${token}`;
   }
 
-  return fetch(url, {
+  return doorFetch(url, {
     ...options,
     headers: {
       ...defaultHeaders,
       ...options.headers,
     },
-  }).then((response) => {
+  }, doorOptions).then((response) => {
     const refreshedToken = response.headers.get('X-Refreshed-Token');
     if (refreshedToken) {
       storeAuthToken(refreshedToken);
@@ -173,13 +175,13 @@ const sendAuthenticatedFetch = (url, options = {}) => {
 export const api = {
   // Auth endpoints (no token required)
   auth: {
-    status: () => fetch('/api/auth/status'),
-    login: (username, password) => fetch('/api/auth/login', {
+    status: () => doorFetch('/api/auth/status', {}, { gate: true }),
+    login: (username, password) => doorFetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password }),
     }),
-    register: (username, password) => fetch('/api/auth/register', {
+    register: (username, password) => doorFetch('/api/auth/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password }),
@@ -187,20 +189,20 @@ export const api = {
     // OPEN_REGISTRATION-only: passwordless account creation, gated by a
     // single-use invite token (see /invite/<token>). 403s with
     // OPEN_REGISTRATION_DISABLED on every other instance.
-    registerOpen: (username, inviteToken) => fetch('/api/auth/register-open', {
+    registerOpen: (username, inviteToken) => doorFetch('/api/auth/register-open', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, inviteToken }),
     }),
     // Instant login via a persistent login-link token (the `/enter/<token>` URL).
-    enter: (token) => fetch('/api/auth/enter', {
+    enter: (token) => doorFetch('/api/auth/enter', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token }),
     }),
     // Public: checks whether an invite token (the `/invite/<token>` URL) is
     // still valid before showing the registration form.
-    inviteStatus: (token) => fetch(`/api/auth/invite-status/${encodeURIComponent(token)}`),
+    inviteStatus: (token) => doorFetch(`/api/auth/invite-status/${encodeURIComponent(token)}`),
     createInvite: (label) => authenticatedFetch('/api/auth/invites', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -210,7 +212,7 @@ export const api = {
     getLoginLink: () => authenticatedFetch('/api/auth/login-link'),
     regenerateLoginLink: () => authenticatedFetch('/api/auth/regenerate-login-link', { method: 'POST' }),
     refresh: () => authenticatedFetch('/api/auth/refresh', { method: 'POST' }),
-    user: () => authenticatedFetch('/api/auth/user'),
+    user: () => authenticatedFetch('/api/auth/user', {}, { gate: true }),
     logout: () => authenticatedFetch('/api/auth/logout', { method: 'POST' }),
   },
 
@@ -218,12 +220,24 @@ export const api = {
   // config endpoint removed - no longer needed (frontend uses window.location)
   // After the projectName → projectId migration the path/query identifier is
   // the DB-assigned `projectId`; parameter names reflect that for clarity.
-  projects: () => authenticatedFetch('/api/projects'),
+  // gate: список проектов держит заставку «Настройка рабочего пространства» —
+  // заморозка провайдера (см. doors.js) на этом запросе оставляла приложение
+  // в вечной загрузке. Запрос лёгкий (~0,5 с), поэтому безопасно резать его
+  // по времени и пробовать запасной вход, как проверку входа.
+  projects: () => authenticatedFetch('/api/projects', {}, { gate: true }),
   archivedProjects: () => authenticatedFetch('/api/projects/archived'),
-  projectSessions: (projectId, { limit = 20, offset = 0 } = {}) => {
+  /**
+   * @param {string} projectId
+   * @param {{ limit?: number, offset?: number, space?: string, serverScope?: string }} [options]
+   */
+  projectSessions: (projectId, { limit = 20, offset = 0, space, serverScope } = {}) => {
     const params = new URLSearchParams();
     params.set('limit', String(limit));
     params.set('offset', String(offset));
+    // Панель показывает чаты одного помощника и одного блока — догружать
+    // надо тот же срез, иначе страница приходит со всеми помощниками сразу.
+    if (space) params.set('space', space);
+    if (serverScope) params.set('serverScope', serverScope);
     return authenticatedFetch(`/api/projects/${encodeURIComponent(projectId)}/sessions?${params.toString()}`);
   },
   projectTaskmaster: (projectId) =>
@@ -276,15 +290,16 @@ export const api = {
   // делает сервер: страница берётся по 40 чатов, и отбор после выдачи
   // оставлял бы второй блок почти пустым.
   /**
-   * @param {{ limit?: number, offset?: number, serverScope?: 'main' | 'second' }} [options]
+   * @param {{ limit?: number, offset?: number, serverScope?: 'main' | 'second', providerSpace?: 'codex' | 'devin' | 'claude' }} [options]
    */
   recentConversations: (options = {}) => {
-    const { limit = 40, offset = 0, serverScope } = options;
+    const { limit = 40, offset = 0, serverScope, providerSpace } = options;
     const params = new URLSearchParams({
       limit: String(limit),
       offset: String(offset),
     });
     if (serverScope) params.set('serverScope', serverScope);
+    if (providerSpace) params.set('space', providerSpace);
     return authenticatedFetch(`/api/providers/sessions/recent?${params.toString()}`);
   },
   providerSessionId: (sessionId) =>
@@ -313,7 +328,7 @@ export const api = {
     if (scope.projectId) params.set('projectId', scope.projectId);
     if (scope.serverScope) params.set('serverScope', scope.serverScope);
     if (token) params.set('token', token);
-    return `/api/providers/search/sessions?${params.toString()}`;
+    return `${getDoorBase()}/api/providers/search/sessions?${params.toString()}`;
   },
   createProject: (projectData) =>
     authenticatedFetch('/api/projects/create-project', {
@@ -465,11 +480,15 @@ export const api = {
     }),
 
   // Открытые вкладки чатов — общие для всех устройств пользователя.
+  // gate: зависший запрос держал бы sync.fetching навечно — синхронизация
+  // вкладок молча умирала на этой загрузке страницы. Ответ лёгкий, режем смело.
   openTabs: {
-    get: (since) => authenticatedFetch(`/api/open-tabs${Number.isInteger(since) ? `?since=${since}` : ''}`),
+    get: (since) => authenticatedFetch(`/api/open-tabs${Number.isInteger(since) ? `?since=${since}` : ''}`, {}, { gate: true }),
     // keepalive — запрос доходит, даже если страница закрывается или перезагружается.
-    put: (tabs, keepalive = false, merge = false) =>
-      authenticatedFetch('/api/open-tabs', { method: 'PUT', body: JSON.stringify({ tabs, merge }), keepalive }),
+    // remove — явно закрытые здесь вкладки; его присутствие включает на сервере
+    // объединение вместо затирания: устаревший снимок не роняет чужие вкладки.
+    put: (tabs, keepalive = false, merge = false, remove = []) =>
+      authenticatedFetch('/api/open-tabs', { method: 'PUT', body: JSON.stringify({ tabs, merge, remove }), keepalive }),
   },
 
   // User endpoints
@@ -477,6 +496,20 @@ export const api = {
     usageLimits: () => authenticatedFetch('/api/user/usage-limits'),
     codexAccount: () => authenticatedFetch('/api/user/codex-account'),
     devinAccount: () => authenticatedFetch('/api/user/devin-account'),
+    devinSelectSlot: (slot) =>
+      authenticatedFetch('/api/user/devin-account/slot', {
+        method: 'POST',
+        body: JSON.stringify({ slot }),
+      }),
+    devinLoginStart: () =>
+      authenticatedFetch('/api/user/devin-account/login/start', { method: 'POST', body: JSON.stringify({}) }),
+    devinLoginCode: (code) =>
+      authenticatedFetch('/api/user/devin-account/login/code', {
+        method: 'POST',
+        body: JSON.stringify({ code }),
+      }),
+    devinLoginCancel: () =>
+      authenticatedFetch('/api/user/devin-account/login/cancel', { method: 'POST', body: JSON.stringify({}) }),
     thoughtDigest: (texts) =>
       authenticatedFetch('/api/user/thought-digest', {
         method: 'POST',
@@ -488,7 +521,7 @@ export const api = {
         method: 'POST',
         body: JSON.stringify({ gitName, gitEmail }),
       }),
-    onboardingStatus: () => authenticatedFetch('/api/user/onboarding-status'),
+    onboardingStatus: () => authenticatedFetch('/api/user/onboarding-status', {}, { gate: true }),
     completeOnboarding: () =>
       authenticatedFetch('/api/user/complete-onboarding', {
         method: 'POST',

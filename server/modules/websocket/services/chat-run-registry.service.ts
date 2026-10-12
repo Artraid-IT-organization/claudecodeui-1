@@ -63,6 +63,47 @@ const MAX_BUFFERED_EVENTS_PER_RUN = 5000;
  */
 const runs = new Map<string, ChatRun>();
 
+/**
+ * A deliberate server restart first closes this gate. Claude, Codex and Devin
+ * own survivable processes and continue across the restart; any provider
+ * without that capability is allowed to finish before the web process exits.
+ */
+let acceptingNewRuns = true;
+
+/**
+ * Ожидание перед выкладкой (SIGUSR2 от deploy/build-shared.sh) — аренда, а не
+ * выключатель. 04.10.26 скрипт выкладки оборвался вместе со своим чатом через
+ * 5 минут ожидания, а вход остался закрытым: 33 минуты все сообщения Егора во
+ * всех чатах молча ложились в очередь, пока сайт не перезапустили руками.
+ * Теперь скрипт продлевает аренду на каждом шаге ожидания; перестал — через
+ * PRE_RESTART_LEASE_MS вход открывается сам, очередь уходит обходом раз в минуту.
+ *
+ * И закрывает она только неживучих провайдеров: Claude, Codex и Devin
+ * переживают перезапуск сами, держать их чаты ради чужого неживучего незачем.
+ */
+const PRE_RESTART_LEASE_MS = 120_000;
+let preRestartDrainUntil = 0;
+
+function isRestartSafeProvider(provider: string): boolean {
+  // У Devin ход переживает перезапуск так же, как у Codex: ACP-процесс держит
+  // devin-acp-supervisor, а после рестарта рантайм переподключается к сокету
+  // (survivor-runs знает devin отдельно). Иначе выкладка ждала бы каждый ход
+  // Devin до конца — а они длятся десятки минут.
+  return provider === 'claude' || provider === 'codex' || provider === 'devin';
+}
+
+function isPreRestartDrainActive(): boolean {
+  if (preRestartDrainUntil === 0) {
+    return false;
+  }
+  if (Date.now() < preRestartDrainUntil) {
+    return true;
+  }
+  preRestartDrainUntil = 0;
+  console.log('[shutdown-drain] выкладка перестала продлевать ожидание — вход новым ходам снова открыт');
+  return false;
+}
+
 async function broadcastCanonicalSessionUpsert(appSessionId: string): Promise<void> {
   let row = sessionsDb.getSessionById(appSessionId);
   if (!row || row.isArchived) {
@@ -259,6 +300,12 @@ export const chatRunRegistry = {
     connection: RealtimeClientConnection;
     userId: string | number | null;
   }): ChatRun | null {
+    if (!acceptingNewRuns) {
+      return null;
+    }
+    if (!isRestartSafeProvider(input.provider) && isPreRestartDrainActive()) {
+      return null;
+    }
     const existing = runs.get(input.appSessionId);
     if (existing && existing.status === 'running') {
       return null;
@@ -321,6 +368,35 @@ export const chatRunRegistry = {
     const liveIds = new Set(live.map((run) => run.sessionId));
     return [...live, ...listSurvivors().filter((run) => !liveIds.has(run.sessionId))] as typeof live;
   },
+
+  /**
+   * Stops new provider runs before a graceful server restart. The websocket
+   * handler interprets a rejected start as "queue this message", so nothing
+   * typed while the deployment is draining is lost.
+   *
+   * Consumed by the server entrypoint's SIGTERM/SIGINT shutdown path.
+   */
+  beginShutdownDrain(): void {
+    acceptingNewRuns = false;
+  },
+
+  /**
+   * SIGUSR2 от выкладки: закрыть вход неживучим провайдерам на
+   * PRE_RESTART_LEASE_MS. Скрипт повторяет сигнал на каждом шаге ожидания.
+   * `true` — ожидание только что началось (для одной строки в журнале).
+   */
+  beginPreRestartDrain(): boolean {
+    const started = !isPreRestartDrainActive();
+    preRestartDrainUntil = Date.now() + PRE_RESTART_LEASE_MS;
+    return started;
+  },
+
+  /** Used by health reporting and shutdown diagnostics. */
+  isShutdownDraining(): boolean {
+    return !acceptingNewRuns || isPreRestartDrainActive();
+  },
+
+  isRestartSafeProvider,
 
   /**
    * Counts this user's own currently-running runs, across every session.
@@ -410,5 +486,7 @@ export const chatRunRegistry = {
    */
   clearAll(): void {
     runs.clear();
+    acceptingNewRuns = true;
+    preRestartDrainUntil = 0;
   },
 };

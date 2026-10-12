@@ -129,80 +129,131 @@ test('recent sessions are globally ordered, paginated, and limited to visible co
       secondPage.sessions.map((session) => session.session_id),
       ['session-middle', 'session-oldest'],
     );
-  });
-});
 
-/**
- * project_path app-строки (origin='web') синхронизатор не перетирает.
- *
- * Devin записывает в свою sessions.db `working_directory` в realpath-
- * написании, а чат, созданный из веба, хранит лексический путь, который
- * выбрал человек (у гостей team-access `workspace/work` — симлинк). До
- * исправления следующий проход синхронизатора переписывал project_path
- * realpath'ом — и чат уезжал в одноимённый проект-двойник («не все чаты в
- * списке», аудит 10.10.26). Строкам без веб-выбора (terminal/auto) cwd
- * провайдера по-прежнему правда: чат мог физически переехать.
- */
-test('createSession keeps the web-chosen project_path on provider upserts', async () => {
-  await withIsolatedDatabase(() => {
-    sessionsDb.createAppSession('app-bound', 'devin', '/home/guest/workspace/work', 'Веб-чат');
-    sessionsDb.assignProviderSessionId('app-bound', 'provider-xyz');
-
-    sessionsDb.createSession('provider-xyz', 'devin', '/home/guest/team-access/home/work', 'Веб-чат');
-
-    const row = sessionsDb.getSessionById('app-bound');
-    assert.equal(row?.provider_session_id, 'provider-xyz');
-    assert.equal(row?.project_path, '/home/guest/workspace/work');
-    assert.equal(sessionsDb.getSessionByProviderSessionId('provider-xyz')?.session_id, 'app-bound');
-  });
-});
-
-test('createSession still applies provider cwd for non-web rows', async () => {
-  await withIsolatedDatabase(() => {
-    sessionsDb.createSession(
-      'cli-chat', 'claude', '/old/place', 'CLI chat',
-      undefined, undefined, null, undefined,
-      { accountDir: null, origin: 'terminal' },
-    );
-
-    sessionsDb.createSession(
-      'cli-chat', 'claude', '/new/place', 'CLI chat',
-      undefined, undefined, null, undefined,
-      { accountDir: null, origin: 'terminal' },
-    );
-
-    assert.equal(sessionsDb.getSessionById('cli-chat')?.project_path, '/new/place');
-  });
-});
-
-/**
- * Архивный вид проекта — тоже скоуплен по аккаунту: один и тот же
- * project_path у разных webuser-корней (симлинк/realpath даёт одинаковое
- * написание) не должен показывать чужие сессии даже в архиве.
- */
-test('getSessionsByProjectPathIncludingArchived filters other accounts rows', async () => {
-  await withIsolatedDatabase(() => {
-    const myDir = getActiveAccountDir();
-    sessionsDb.createSession('mine-archived', 'claude', '/shared/path', 'Mine', undefined, undefined, null, undefined, {
-      accountDir: myDir,
-      origin: 'web',
-    });
-    sessionsDb.createSession('foreign-archived', 'claude', '/shared/path', 'Foreign', undefined, undefined, null, undefined, {
-      accountDir: '/home/other/.claude-webuser-999',
-      origin: 'web',
-    });
-    sessionsDb.createSession('legacy-null-dir', 'claude', '/shared/path', 'Legacy', undefined, undefined, null, undefined, {
-      accountDir: null,
-      origin: 'terminal',
-    });
-    for (const id of ['mine-archived', 'foreign-archived', 'legacy-null-dir']) {
-      sessionsDb.updateSessionIsArchived(id, true);
-    }
-
-    const rows = sessionsDb.getSessionsByProjectPathIncludingArchived('/shared/path');
+    // Codex — свой список: лента по помощнику не смешивает чаты.
+    const codexPage = sessionsDb.getRecentSessionsPage(10, 0, undefined, 'codex');
+    assert.equal(codexPage.total, 1);
+    assert.deepEqual(codexPage.sessions.map((session) => session.session_id), ['session-newest']);
+    const claudePage = sessionsDb.getRecentSessionsPage(10, 0, undefined, 'claude');
+    assert.equal(claudePage.total, 3);
     assert.deepEqual(
-      rows.map((session) => session.session_id).sort(),
-      ['legacy-null-dir', 'mine-archived'],
+      claudePage.sessions.map((session) => session.session_id),
+      ['session-same-second', 'session-middle', 'session-oldest'],
+    );
+  });
+});
+
+test('Devin has its own list: owner sees it across Claude accounts, Claude and Codex lists do not, guests never', async () => {
+  await withIsolatedDatabase(() => {
+    const projectPath = '/workspace/devin-space-project';
+    const currentAccount = getActiveAccountDir();
+    const otherAccount = `${currentAccount}-other`;
+    const make = (id: string, provider: string, at: string, accountDir: string) => sessionsDb.createSession(
+      id, provider, projectPath, id, at, at, null, undefined, { accountDir },
+    );
+    make('devin-current', 'devin', '2026-10-03T10:00:00.000Z', currentAccount);
+    make('devin-other', 'devin', '2026-10-03T11:00:00.000Z', otherAccount);
+    make('claude-current', 'claude', '2026-10-03T12:00:00.000Z', currentAccount);
+    make('codex-current', 'codex', '2026-10-03T13:00:00.000Z', currentAccount);
+
+    const ids = (page: ReturnType<typeof sessionsDb.getRecentSessionsPage>) => page.sessions.map((session) => session.session_id);
+
+    // Owner: the Devin list is Devin only, and shared across both Claude accounts.
+    assert.deepEqual(ids(sessionsDb.getRecentSessionsPage(10, 0, undefined, 'devin', 'shared-codex')), ['devin-other', 'devin-current']);
+    // The other lists never contain Devin chats.
+    assert.deepEqual(ids(sessionsDb.getRecentSessionsPage(10, 0, undefined, 'claude', 'shared-codex')), ['claude-current']);
+    assert.deepEqual(ids(sessionsDb.getRecentSessionsPage(10, 0, undefined, 'codex', 'shared-codex')), ['codex-current']);
+    // Guest: no Devin (and no Codex) rows at all, even in the unfiltered feed.
+    assert.deepEqual(ids(sessionsDb.getRecentSessionsPage(10, 0, undefined, undefined, 'hide-codex')), ['claude-current']);
+  });
+});
+
+test('owner lists share Codex across Claude accounts without sharing Claude chats', async () => {
+  await withIsolatedDatabase(() => {
+    const projectPath = '/workspace/shared-codex-project';
+    const currentAccount = getActiveAccountDir();
+    const otherAccount = `${currentAccount}-other`;
+
+    sessionsDb.createSession(
+      'codex-current',
+      'codex',
+      projectPath,
+      'Codex current account',
+      '2026-10-03T10:00:00.000Z',
+      '2026-10-03T10:00:00.000Z',
+      null,
+      undefined,
+      { accountDir: currentAccount },
+    );
+    sessionsDb.createSession(
+      'codex-other',
+      'codex',
+      projectPath,
+      'Codex other Claude account',
+      '2026-10-03T11:00:00.000Z',
+      '2026-10-03T11:00:00.000Z',
+      null,
+      undefined,
+      { accountDir: otherAccount },
+    );
+    sessionsDb.createSession(
+      'claude-other',
+      'claude',
+      projectPath,
+      'Claude other account',
+      '2026-10-03T12:00:00.000Z',
+      '2026-10-03T12:00:00.000Z',
+      null,
+      undefined,
+      { accountDir: otherAccount },
+    );
+
+    const currentOnly = sessionsDb.getRecentSessionsPage(10, 0, undefined, 'codex');
+    assert.deepEqual(currentOnly.sessions.map((session) => session.session_id), ['codex-current']);
+
+    const sharedCodex = sessionsDb.getRecentSessionsPage(
+      10,
+      0,
+      undefined,
+      'codex',
+      'shared-codex',
+    );
+    assert.deepEqual(
+      sharedCodex.sessions.map((session) => session.session_id),
+      ['codex-other', 'codex-current'],
+    );
+
+    const projectSessions = sessionsDb.getSessionsByProjectPathPage(
+      projectPath,
+      10,
+      0,
+      'shared-codex',
+    );
+    assert.deepEqual(
+      projectSessions.map((session) => session.session_id),
+      ['codex-other', 'codex-current'],
+    );
+    assert.equal(sessionsDb.countSessionsByProjectPath(projectPath, 'shared-codex'), 2);
+
+    const archivedProjectRows = sessionsDb.getSessionsByProjectPathIncludingArchived(
+      projectPath,
+      'shared-codex',
+    );
+    assert.deepEqual(
+      archivedProjectRows.map((session) => session.session_id).sort(),
+      ['codex-current', 'codex-other'],
+    );
+
+    const hiddenCodex = sessionsDb.getSessionsByProjectPathPage(
+      projectPath,
+      10,
+      0,
+      'hide-codex',
+    );
+    assert.deepEqual(hiddenCodex, []);
+    assert.deepEqual(
+      sessionsDb.getSessionsByProjectPathIncludingArchived(projectPath, 'hide-codex'),
+      [],
     );
   });
 });

@@ -25,7 +25,7 @@ import { credentialsDb, userDb } from '@/modules/database/index.js';
 import { getGlobalImageAssetsDir } from '@/shared/image-attachments.js';
 import type { AuthenticatedWebSocketRequest } from '@/shared/types.js';
 import { isPlatformOwnerWebUser, OPEN_REGISTRATION } from '@/shared/utils.js';
-import { getWebUserClaudeConfigDir, getWebUserWorkspaceRoot } from '@/shared/web-user-paths.js';
+import { getWebUserClaudeConfigDir } from '@/shared/web-user-paths.js';
 
 // Проверки доступа живут без базы данных, чтобы их можно было испытать отдельно.
 export { hasOwnClaudeAccess, withoutInheritedClaudeAuth } from '@/shared/claude-login.js';
@@ -41,22 +41,12 @@ export type WebUserRuntimeContext = {
    * гость, вошедший своей подпиской, молча работал бы на ключе владельца.
    */
   isolateInheritedClaudeAuth: boolean;
-  /**
-   * Рабочая зона пользователя на запускаемые процессы: корень его
-   * `~/.claude-webuser-<id>/workspace`. Запрошенные чатом `cwd`/`projectPath`
-   * вне зоны приводятся к ней (resolveScopedWorkingDirectory) — зона одна,
-   * и процесс не должен получать каталог хоста, каким бы путём его ни прислал
-   * клиент. NULL у владельца площадки и вне OPEN_REGISTRATION: там зоны нет,
-   * поведение прежнее.
-   */
-  workspaceRoot: string | null;
 };
 
 const EMPTY_CONTEXT: WebUserRuntimeContext = {
   claudeConfigDir: null,
   anthropicApiKey: null,
   isolateInheritedClaudeAuth: false,
-  workspaceRoot: null,
 };
 
 
@@ -117,7 +107,6 @@ export function resolveWebUserRuntimeContext(
       ANTHROPIC_API_KEY_CREDENTIAL_TYPE,
     ),
     isolateInheritedClaudeAuth: !isOwner,
-    workspaceRoot: isOwner ? null : getWebUserWorkspaceRoot(numericUserId),
   };
 }
 

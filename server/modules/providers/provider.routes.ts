@@ -1,23 +1,16 @@
 import express, { type Request, type Response } from 'express';
 
 import { sessionsDb } from '@/modules/database/index.js';
-import { devinConnectionsService } from '@/modules/providers/services/devin-connections.service.js';
 import { providerAuthService } from '@/modules/providers/services/provider-auth.service.js';
 import { providerCapabilitiesService } from '@/modules/providers/services/provider-capabilities.service.js';
 import { providerMcpService } from '@/modules/providers/services/mcp.service.js';
 import { providerModelsService } from '@/modules/providers/services/provider-models.service.js';
-import {
-  applyDevinModelAllowlistToCatalog,
-  assertDevinModelCatalogWritable,
-  clampDevinModelForUser,
-} from '@/modules/providers/services/devin-model-policy.js';
 import { providerTokenUsageService } from '@/modules/providers/services/provider-token-usage.service.js';
 import { providerSkillsService } from '@/modules/providers/services/skills.service.js';
 import { sessionConversationsSearchService } from '@/modules/providers/services/session-conversations-search.service.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
 import { sessionRewindService } from '@/modules/providers/services/session-rewind.service.js';
 import { getRequestRuntimeContext } from '@/shared/request-context.js';
-import { getActiveAccountDir } from '@/shared/session-scope.js';
 import type {
   CustomProviderModelInput,
   LLMProvider,
@@ -31,6 +24,7 @@ import {
   AppError,
   asyncHandler,
   createApiSuccessResponse,
+  isDevinCliInstalled,
   isPlatformOwnerWebUser,
   normalizeServerScope,
   OPEN_REGISTRATION,
@@ -316,18 +310,18 @@ const parseProvider = (value: unknown): LLMProvider => {
 };
 
 /**
- * Devin работает через корпоративный Connection Layer: использовать провайдер
- * может любой авторизованный пользователь, а управление каналами
- * (/devin/connections) — только владелец площадки.
+ * Devin's credentials live once per host (`~/.local/share/devin/credentials.toml`);
+ * on a multi-tenant instance every /devin/* endpoint is owner-only. Centralised
+ * here so a future devin route cannot accidentally skip the check.
  */
-const assertDevinAdminAccess = (): void => {
+const assertDevinProviderAccess = (): void => {
   if (!OPEN_REGISTRATION) {
     return;
   }
   const userId = getRequestRuntimeContext()?.userId;
   const numericUserId = userId === undefined || userId === null ? NaN : Number(userId);
   if (!Number.isFinite(numericUserId) || !isPlatformOwnerWebUser(numericUserId)) {
-    throw new AppError('Devin connections are managed by the platform owner.', {
+    throw new AppError('The Devin provider is only available to the platform owner.', {
       code: 'PROVIDER_NOT_ALLOWED',
       statusCode: 403,
     });
@@ -335,164 +329,45 @@ const assertDevinAdminAccess = (): void => {
 };
 
 /**
- * Любая session-строка имеет владельца: `account_dir` аккаунта и/или
- * `initiated_by_user_id` автора. Гость может трогать только свои строки.
- * Строки без владельца (наследие до атрибуции, машинные записи) — только
- * владельцу площадки.
- *
- * Проверка общая для ВСЕХ провайдеров: раньше она стояла только на
- * devin-строках, и чужой claude-чат открывался по прямой ссылке — история,
- * rewind, переименование, удаление (IDOR, аудит 10.10.26).
+ * Same boundary applied to the generic /sessions/:sessionId routes: a guest
+ * who learns a Devin session id must not rename/delete/move it via the
+ * unauthenticated-by-provider paths.
  */
-const assertSessionRowAllowed = (sessionId: string): void => {
+const assertDevinSessionRowAllowed = (sessionId: string): void => {
   if (!OPEN_REGISTRATION) {
     return;
   }
   const row = sessionsDb.getSessionById(sessionId);
-  if (!row) {
-    return;
-  }
-  const userId = getRequestRuntimeContext()?.userId;
-  const numericUserId = userId === undefined || userId === null ? NaN : Number(userId);
-  const isOwner = Number.isFinite(numericUserId) && isPlatformOwnerWebUser(numericUserId);
-  if (isOwner) {
-    return;
-  }
-  if (row.initiated_by_user_id != null && Number(row.initiated_by_user_id) === numericUserId) {
-    return;
-  }
-  const activeDir = getActiveAccountDir();
-  if (row.account_dir == null || row.account_dir !== activeDir) {
-    throw new AppError('This session belongs to another user.', {
-      code: 'PROVIDER_NOT_ALLOWED',
-      statusCode: 403,
-    });
+  if (row?.provider === 'devin') {
+    assertDevinProviderAccess();
   }
 };
 
-/**
- * Своя ли devin-строка для ленты активности: по account_dir или по автору.
- * Чужие devin-чаты в общем списке «выполняется сейчас» не светятся.
- */
-const isDevinSessionRowVisible = (row: { account_dir?: string | null; initiated_by_user_id?: number | null } | null | undefined): boolean => {
+const isDevinAccessAllowed = (): boolean => {
   if (!OPEN_REGISTRATION) {
     return true;
   }
   const userId = getRequestRuntimeContext()?.userId;
   const numericUserId = userId === undefined || userId === null ? NaN : Number(userId);
-  if (Number.isFinite(numericUserId) && isPlatformOwnerWebUser(numericUserId)) {
-    return true;
-  }
-  if (!row) {
-    return false;
-  }
-  if (row.initiated_by_user_id != null && Number(row.initiated_by_user_id) === numericUserId) {
-    return true;
-  }
-  return row.account_dir != null && row.account_dir === getActiveAccountDir();
+  return Number.isFinite(numericUserId) && isPlatformOwnerWebUser(numericUserId);
 };
 
-// Админка каналов — строго владельцу; идёт первой, чтобы /devin/connections
-// не перехватывался общим правилом ниже.
-router.use('/devin/connections', (_req: Request, _res: Response, next: express.NextFunction) => {
+router.use('/devin', (req: Request, _res: Response, next: express.NextFunction) => {
   try {
-    assertDevinAdminAccess();
+    assertDevinProviderAccess();
+    // No Devin on this host (a selfhost copy) — no model catalog, so the
+    // picker hides the Devin tab exactly as it does for guests.
+    if (req.path === '/models' && !isDevinCliInstalled()) {
+      throw new AppError('Devin CLI is not installed on this server.', {
+        code: 'PROVIDER_NOT_INSTALLED',
+        statusCode: 404,
+      });
+    }
     next();
   } catch (error) {
     next(error);
   }
 });
-
-// ----------------- Devin connections (admin, owner-only) -----------------
-
-const parseConnectionId = (value: unknown): number => {
-  const id = Number(readPathParam(value, 'connectionId'));
-  if (!Number.isInteger(id) || id <= 0) {
-    throw new AppError('Invalid connectionId.', { code: 'INVALID_PATH_PARAMETER', statusCode: 400 });
-  }
-  return id;
-};
-
-/** Список каналов: метаданные и здоровье, без секретов. */
-router.get(
-  '/devin/connections',
-  asyncHandler(async (_req: Request, res: Response) => {
-    res.json(createApiSuccessResponse({ connections: devinConnectionsService.listConnections() }));
-  }),
-);
-
-/** Новый канал: каталог под креды создаётся сразу, сама креда — /credential. */
-router.post(
-  '/devin/connections',
-  asyncHandler(async (req: Request, res: Response) => {
-    const body = (req.body ?? {}) as Record<string, unknown>;
-    const connection = devinConnectionsService.createConnection({
-      name: typeof body.name === 'string' ? body.name : '',
-      description: typeof body.description === 'string' ? body.description : undefined,
-      priority: typeof body.priority === 'number' ? body.priority : undefined,
-    });
-    res.status(201).json(createApiSuccessResponse({ connection }));
-  }),
-);
-
-router.patch(
-  '/devin/connections/:connectionId',
-  asyncHandler(async (req: Request, res: Response) => {
-    const id = parseConnectionId(req.params.connectionId);
-    const body = (req.body ?? {}) as Record<string, unknown>;
-    const connection = devinConnectionsService.updateConnection(id, {
-      name: typeof body.name === 'string' ? body.name : undefined,
-      description: typeof body.description === 'string' ? body.description : undefined,
-      enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
-      priority: typeof body.priority === 'number' ? body.priority : undefined,
-      accountEmail: typeof body.accountEmail === 'string' ? body.accountEmail : (body.accountEmail === null ? null : undefined),
-    });
-    res.json(createApiSuccessResponse({ connection }));
-  }),
-);
-
-router.delete(
-  '/devin/connections/:connectionId',
-  asyncHandler(async (req: Request, res: Response) => {
-    const id = parseConnectionId(req.params.connectionId);
-    devinConnectionsService.deleteConnection(id);
-    res.json(createApiSuccessResponse({ deleted: true }));
-  }),
-);
-
-/**
- * Замена креды канала: тело — содержимое credentials.toml целиком
- * (`credentialsToml`). Хранится файлом 0600, после записи — живая проба.
- */
-router.post(
-  '/devin/connections/:connectionId/credential',
-  asyncHandler(async (req: Request, res: Response) => {
-    const id = parseConnectionId(req.params.connectionId);
-    const body = (req.body ?? {}) as Record<string, unknown>;
-    const credentialsToml = typeof body.credentialsToml === 'string' ? body.credentialsToml : '';
-    const connection = await devinConnectionsService.installCredential(id, credentialsToml);
-    res.json(createApiSuccessResponse({ connection }));
-  }),
-);
-
-/** Живая проба `devin auth status` с XDG_DATA_HOME канала. */
-router.post(
-  '/devin/connections/:connectionId/health',
-  asyncHandler(async (req: Request, res: Response) => {
-    const id = parseConnectionId(req.params.connectionId);
-    const connection = await devinConnectionsService.checkHealth(id);
-    res.json(createApiSuccessResponse({ connection }));
-  }),
-);
-
-/** Чаты, прибитые к каналу: кто инициировал, когда, статус архива. */
-router.get(
-  '/devin/connections/:connectionId/tasks',
-  asyncHandler(async (req: Request, res: Response) => {
-    const id = parseConnectionId(req.params.connectionId);
-    res.json(createApiSuccessResponse({ tasks: devinConnectionsService.listTasks(id) }));
-  }),
-);
 
 const parseSessionRenameSummary = (payload: unknown): string => {
   if (!payload || typeof payload !== 'object') {
@@ -692,12 +567,7 @@ router.get(
   '/:provider/models',
   asyncHandler(async (req: Request, res: Response) => {
     const provider = parseProvider(req.params.provider);
-    // Персональные белые списки: ограниченный аккаунт видит только свои модели.
-    const models = applyDevinModelAllowlistToCatalog(
-      provider,
-      getRequestRuntimeContext()?.userId,
-      await providerModelsService.getProviderModels(provider),
-    );
+    const models = await providerModelsService.getProviderModels(provider);
     res.json(createApiSuccessResponse({ provider, models }));
   }),
 );
@@ -706,7 +576,6 @@ router.post(
   '/:provider/models',
   asyncHandler(async (req: Request, res: Response) => {
     const provider = parseProvider(req.params.provider);
-    assertDevinModelCatalogWritable(provider, getRequestRuntimeContext()?.userId);
     const input = parseCustomProviderModelPayload(req.body);
     const result = await providerModelsService.createCustomModel(provider, input);
     res.status(201).json(createApiSuccessResponse({ provider, ...result }));
@@ -717,7 +586,6 @@ router.patch(
   '/:provider/models/:recordId',
   asyncHandler(async (req: Request, res: Response) => {
     const provider = parseProvider(req.params.provider);
-    assertDevinModelCatalogWritable(provider, getRequestRuntimeContext()?.userId);
     const recordId = parseModelRecordId(req.params.recordId);
     const input = parseCustomProviderModelPayload(req.body);
     const result = await providerModelsService.updateCustomModel(provider, recordId, input);
@@ -729,7 +597,6 @@ router.delete(
   '/:provider/models/:recordId',
   asyncHandler(async (req: Request, res: Response) => {
     const provider = parseProvider(req.params.provider);
-    assertDevinModelCatalogWritable(provider, getRequestRuntimeContext()?.userId);
     const recordId = parseModelRecordId(req.params.recordId);
     const result = await providerModelsService.deleteCustomModel(provider, recordId);
     res.json(createApiSuccessResponse({ provider, ...result }));
@@ -750,7 +617,6 @@ router.get(
     const result = await providerModelsService.resolveSessionModel(provider, {
       sessionId,
       requestedModel,
-      userId: getRequestRuntimeContext()?.userId,
     });
     res.json(createApiSuccessResponse(result));
   }),
@@ -761,8 +627,7 @@ router.post(
   asyncHandler(async (req: Request, res: Response) => {
     const provider = parseProvider(req.params.provider);
     const sessionId = parseSessionId(req.params.sessionId);
-    const requestedModel = parseSessionModelPayload(req.body);
-    const model = clampDevinModelForUser(provider, getRequestRuntimeContext()?.userId, requestedModel) ?? requestedModel;
+    const model = parseSessionModelPayload(req.body);
     const stored = providerModelsService.setSessionModel(provider, sessionId, model);
     // A session row only exists once the gateway has allocated one. Report the
     // selection back either way so the client can hold it until the first send.
@@ -914,9 +779,13 @@ router.post(
   asyncHandler(async (req: Request, res: Response) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const provider = parseProvider(body.provider);
+    if (provider === 'devin') {
+      // Body-carried provider does not pass through the /devin router prefix.
+      assertDevinProviderAccess();
+    }
     const projectPath = typeof body.projectPath === 'string' ? body.projectPath : '';
     const initialMessage = typeof body.initialMessage === 'string' ? body.initialMessage : '';
-    const result = await sessionsService.createAppSession(provider, projectPath, initialMessage, getRequestRuntimeContext()?.userId);
+    const result = sessionsService.createAppSession(provider, projectPath, initialMessage);
     res.status(201).json(createApiSuccessResponse(result));
   }),
 );
@@ -925,11 +794,11 @@ router.get(
   '/sessions/running',
   asyncHandler(async (_req: Request, res: Response) => {
     let sessions = sessionsService.listRunningSessions();
-    // Devin-строки в общей ленте — только свои: чужой sessionId не должен
-    // подсвечиваться гостю (по нему можно было бы подписаться на поток).
-    sessions = sessions.filter((session) =>
-      session.provider !== 'devin'
-      || isDevinSessionRowVisible(sessionsDb.getSessionById(session.sessionId)));
+    // Devin ids are owner-only even in the activity feed — a guest must not
+    // learn a live Devin sessionId and attach to its stream over websocket.
+    if (!isDevinAccessAllowed()) {
+      sessions = sessions.filter((session) => session.provider !== 'devin');
+    }
     res.json(createApiSuccessResponse({ sessions }));
   }),
 );
@@ -944,7 +813,11 @@ router.get(
     const serverScope = typeof req.query.serverScope === 'string'
       ? normalizeServerScope(req.query.serverScope)
       : undefined;
-    const page = sessionsService.listRecentSessions(limit, offset, serverScope);
+    // `space` — чаты Codex, чаты Devin или все остальные (у каждого помощника свой список).
+    const providerSpace = req.query.space === 'codex' || req.query.space === 'devin' || req.query.space === 'claude'
+      ? req.query.space
+      : undefined;
+    const page = sessionsService.listRecentSessions(limit, offset, serverScope, providerSpace);
     res.json(createApiSuccessResponse(page));
   }),
 );
@@ -975,7 +848,7 @@ router.post(
   '/sessions/:sessionId/server-scope',
   asyncHandler(async (req: Request, res: Response) => {
     const sessionId = parseSessionId(req.params.sessionId);
-    assertSessionRowAllowed(sessionId);
+    assertDevinSessionRowAllowed(sessionId);
     // null — «как у папки»; строка — явный блок верхней панели.
     const raw = (req.body ?? {}).serverScope;
     const serverScope = raw === null ? null : normalizeServerScope(raw);
@@ -988,7 +861,6 @@ router.post(
   '/sessions/:sessionId/flag',
   asyncHandler(async (req: Request, res: Response) => {
     const sessionId = parseSessionId(req.params.sessionId);
-    assertSessionRowAllowed(sessionId);
     const flagged = (req.body ?? {}).flagged;
     if (typeof flagged !== 'boolean') {
       throw new AppError('flagged must be a boolean.', { code: 'INVALID_FLAGGED', statusCode: 400 });
@@ -1007,7 +879,6 @@ router.get(
   '/sessions/:sessionId/provider-id',
   asyncHandler(async (req: Request, res: Response) => {
     const sessionId = parseSessionId(req.params.sessionId);
-    assertSessionRowAllowed(sessionId);
     const providerSessionId = sessionsService.getProviderSessionId(sessionId);
     res.json(createApiSuccessResponse({ sessionId: providerSessionId }));
   }),
@@ -1022,7 +893,6 @@ router.post(
   '/sessions/:sessionId/rewind',
   asyncHandler(async (req: Request, res: Response) => {
     const sessionId = parseSessionId(req.params.sessionId);
-    assertSessionRowAllowed(sessionId);
     const body = (req.body ?? {}) as Record<string, unknown>;
     const messageId = typeof body.messageId === 'string' && body.messageId.trim() ? body.messageId.trim() : null;
     const text = typeof body.text === 'string' && body.text.trim() ? body.text : null;
@@ -1041,7 +911,6 @@ router.get(
   '/sessions/:sessionId/token-usage',
   asyncHandler(async (req: Request, res: Response) => {
     const sessionId = parseSessionId(req.params.sessionId);
-    assertSessionRowAllowed(sessionId);
     const result = await providerTokenUsageService.getSessionTokenUsage(sessionId);
     res.json(createApiSuccessResponse(result));
   }),
@@ -1053,7 +922,6 @@ router.get(
   '/sessions/:sessionId',
   asyncHandler(async (req: Request, res: Response) => {
     const sessionId = parseSessionId(req.params.sessionId);
-    assertSessionRowAllowed(sessionId);
     const result = sessionsService.getSessionDetailsById(sessionId);
     res.json(createApiSuccessResponse(result));
   }),
@@ -1063,7 +931,7 @@ router.delete(
   '/sessions/:sessionId',
   asyncHandler(async (req: Request, res: Response) => {
     const sessionId = parseSessionId(req.params.sessionId);
-    assertSessionRowAllowed(sessionId);
+    assertDevinSessionRowAllowed(sessionId);
     const force = parseOptionalBooleanQuery(req.query.force, 'force') ?? false;
     const deletedFromDisk = parseOptionalBooleanQuery(req.query.deletedFromDisk, 'deletedFromDisk') ?? force;
     const result = await sessionsService.deleteOrArchiveSessionById(sessionId, {
@@ -1078,7 +946,7 @@ router.post(
   '/sessions/:sessionId/restore',
   asyncHandler(async (req: Request, res: Response) => {
     const sessionId = parseSessionId(req.params.sessionId);
-    assertSessionRowAllowed(sessionId);
+    assertDevinSessionRowAllowed(sessionId);
     const result = sessionsService.restoreSessionById(sessionId);
     res.json(createApiSuccessResponse(result));
   }),
@@ -1088,7 +956,7 @@ router.put(
   '/sessions/:sessionId',
   asyncHandler(async (req: Request, res: Response) => {
     const sessionId = parseSessionId(req.params.sessionId);
-    assertSessionRowAllowed(sessionId);
+    assertDevinSessionRowAllowed(sessionId);
     const summary = parseSessionRenameSummary(req.body);
     const result = sessionsService.renameSessionById(sessionId, summary);
     res.json(createApiSuccessResponse(result));
@@ -1099,7 +967,6 @@ router.get(
   '/sessions/:sessionId/messages',
   asyncHandler(async (req: Request, res: Response) => {
     const sessionId = parseSessionId(req.params.sessionId);
-    assertSessionRowAllowed(sessionId);
     const limit = parseBoundedIntegerQuery(req.query.limit, 'limit', null, 0);
     const offset = parseBoundedIntegerQuery(req.query.offset, 'offset', 0, 0);
 

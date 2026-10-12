@@ -13,3 +13,6 @@ export { dispatchChatQueues } from './services/chat-queue.service.js';
 // listChatQueue / clearChatQueue: возврат к сообщению (providers/session-rewind.service)
 // снимает очередь чата, чтобы конец остановленного хода не отправил её поверх обрезки.
 export { clearChatQueue, listChatQueue } from './services/chat-queue.service.js';
+// queueChatMessage: модуль обновлений (updates) отправляет бриф в чат-разбор
+// серверной очередью — ход начинается без открытой вкладки.
+export { queueChatMessage } from './services/chat-queue.service.js';

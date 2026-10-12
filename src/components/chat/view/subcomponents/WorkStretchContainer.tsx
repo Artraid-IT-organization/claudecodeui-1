@@ -3,6 +3,7 @@ import { ChevronRight } from 'lucide-react';
 
 import type { ChatMessage, ClaudePermissionSuggestion, PermissionGrantResult, Provider } from '../../types/types';
 import type { Project } from '../../../../types/app';
+import { useSelectedChatProvider } from '../../../../hooks/useCodexAccount';
 import { api } from '../../../../utils/api';
 import { isToolGroupItem } from '../../utils/toolGrouping';
 import {
@@ -13,6 +14,7 @@ import {
   type WorkStretchItem,
 } from '../../utils/workStretch';
 import { Markdown } from './Markdown';
+import { peekRowHeight } from '../../utils/rowHeightCache';
 
 import MessageComponent from './MessageComponent';
 import ToolGroupContainer from './ToolGroupContainer';
@@ -85,7 +87,10 @@ async function requestDigestPage(page: string[]): Promise<void> {
  * ничего не пропадает.
  */
 function useThoughtDigest(thoughts: ChatMessage[], enabled: boolean) {
-  const texts = thoughts.map((message) => String(message.content ?? ''));
+  // Codex commentary is already concise, user-facing progress narration. It
+  // must appear immediately and verbatim; only raw reasoning needs the digest.
+  const digestThoughts = thoughts.filter((message) => !message.isCommentary);
+  const texts = digestThoughts.map((message) => String(message.content ?? ''));
   // Ключ по тексту, а не по массиву: массив новый на каждый пересбор ленты.
   const textsKey = texts.join('\u0000');
   const [state, setState] = useState<DigestState>('idle');
@@ -123,9 +128,9 @@ function useThoughtDigest(thoughts: ChatMessage[], enabled: boolean) {
     };
   }, [enabled, textsKey]);
 
-  const known = thoughts.every((message) => digestByText.has(String(message.content ?? '')));
-  const shown = new Set<ChatMessage>();
-  for (const message of thoughts) {
+  const known = digestThoughts.every((message) => digestByText.has(String(message.content ?? '')));
+  const shown = new Set<ChatMessage>(thoughts.filter((message) => message.isCommentary));
+  for (const message of digestThoughts) {
     const digest = digestByText.get(String(message.content ?? ''));
     if (digest ? digest.keep : state === 'failed') shown.add(message);
   }
@@ -135,11 +140,13 @@ function useThoughtDigest(thoughts: ChatMessage[], enabled: boolean) {
     shown,
     stageCount: known ? shown.size : undefined,
     textFor: (message: ChatMessage): string => {
+      if (message.isCommentary) return String(message.content ?? '');
       const digest = digestByText.get(String(message.content ?? ''));
       return digest?.keep && digest.ru ? digest.ru : String(message.content ?? '');
     },
     /** Русский текст мысли, только если она — важный этап и уже разобрана. */
     stageText: (message: ChatMessage): string | null => {
+      if (message.isCommentary) return String(message.content ?? '') || null;
       const digest = digestByText.get(String(message.content ?? ''));
       return digest?.keep && digest.ru ? digest.ru : null;
     },
@@ -169,10 +176,13 @@ export default function WorkStretchContainer({
   isLive = false,
 }: WorkStretchContainerProps) {
   const [isExpanded, setIsExpanded] = useState(false);
-  const digest = useThoughtDigest(stretch.thoughts, isExpanded);
+  // В режиме «Devin» перевод мыслей не запрашивается: он идёт через Claude (Haiku),
+  // а там должны тратиться только токены Devin (Егор 03.10.26).
+  const claudeFree = provider === 'devin' || useSelectedChatProvider() === 'devin';
+  const digest = useThoughtDigest(stretch.thoughts, isExpanded && !claudeFree);
   const showLiveTail = isLive && !isExpanded;
   const liveThoughts = useMemo(() => stretch.thoughts.slice(-LIVE_THOUGHTS), [stretch.thoughts]);
-  const liveDigest = useThoughtDigest(liveThoughts, showLiveTail);
+  const liveDigest = useThoughtDigest(liveThoughts, showLiveTail && !claudeFree);
   const liveTail = showLiveTail ? workStretchLiveTail(stretch, liveDigest.stageText) : [];
   const label = describeWorkStretch({
     actionCount: stretch.actionCount,
@@ -185,8 +195,19 @@ export default function WorkStretchContainer({
   const hasThoughts = stretch.thoughts.length > 0;
   const currentStep = lastStepDescription(stretch.messages);
 
+  // Высота свёрнутой строки с прошлого открытия — оценкой до первой разметки
+  // (rowHeightCache.ts). Ключ снимается при раскрытии и на живом хвосте: их
+  // высота плавает, и записывать её как «свёрнутую» нельзя.
+  const stretchKey = !isExpanded && !isLive ? `stretch-${getMessageKey(stretch.messages[0])}` : null;
+  const rememberedHeight = isExpanded ? undefined : peekRowHeight(stretchKey);
+
   return (
-    <div className="chat-message tool px-3 sm:px-0" data-message-timestamp={stretch.timestamp || undefined}>
+    <div
+      className="chat-message tool px-3 sm:px-0"
+      data-message-timestamp={stretch.timestamp || undefined}
+      data-mid={stretchKey ?? undefined}
+      style={rememberedHeight ? { containIntrinsicSize: `auto ${rememberedHeight}px` } : undefined}
+    >
       <button
         type="button"
         className="group flex w-full items-center gap-2 overflow-hidden rounded-md px-2 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"

@@ -224,17 +224,6 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
   }
 
   /**
-   * Стенограмма чата, переведённого на другого провайдера (Claude → Devin при
-   * мёртвом доступе к Claude): файл остался у той же строки для показа
-   * истории, а индексировать его заново нельзя — появилась бы вторая строка
-   * того же разговора под провайдером 'claude', чат-призрак в списке.
-   */
-  private isMigratedTranscript(filePath: string): boolean {
-    const owner = sessionsDb.getSessionByTranscriptPath(filePath);
-    return owner !== null && owner.provider !== this.provider;
-  }
-
-  /**
    * Scans ~/.claude/projects and upserts discovered sessions into DB.
    */
   async synchronize(since?: Date): Promise<number> {
@@ -244,24 +233,15 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
     // offers". Doubles as the title source below.
     const nameMap = await buildLookupMap(path.join(claudeHome, 'history.jsonl'), 'sessionId', 'display');
     const terminalSessionIds = new Set(nameMap.keys());
-    // Инкрементальный скан ловит и «осиротевшие» транскрипты: путь без строки
-    // в sessions берётся независимо от mtime, иначе файл, прибывший со старым
-    // временем (копия с сохранением mtime, гонка с границей скана), оставался
-    // невидимым навсегда.
     const files = await findFilesRecursivelyCreatedAfter(
       path.join(claudeHome, 'projects'),
       '.jsonl',
-      since ?? null,
-      [],
-      since ? new Set(sessionsDb.listTranscriptPaths()) : undefined
+      since ?? null
     );
 
     let processed = 0;
     for (const filePath of files) {
       if (this.isSubagentTranscript(filePath)) {
-        continue;
-      }
-      if (this.isMigratedTranscript(filePath)) {
         continue;
       }
 
@@ -299,9 +279,6 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
       return null;
     }
     if (this.isSubagentTranscript(filePath)) {
-      return null;
-    }
-    if (this.isMigratedTranscript(filePath)) {
       return null;
     }
 
@@ -350,29 +327,29 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
     filePath: string,
     nameMap: Map<string, string>
   ): Promise<ParsedSession | null> {
-    // sessionId и cwd не обязаны жить в одной строке: служебные записи в
-    // начале файла несут sessionId без cwd, а экстрактор останавливался на
-    // первой строке, где есть оба поля разом. Такой файл уходил в null и
-    // чат был невидим — берём первый sessionId и первый cwd независимо.
-    let foundSessionId: string | undefined;
     const parsed = await extractFirstValidJsonlData(filePath, (rawData) => {
       const data = rawData as Record<string, unknown>;
-      foundSessionId ??= typeof data.sessionId === 'string' ? data.sessionId : undefined;
+      const sessionId = typeof data.sessionId === 'string' ? data.sessionId : undefined;
       const projectPath = typeof data.cwd === 'string' ? data.cwd : undefined;
-      return foundSessionId && projectPath ? { sessionId: foundSessionId, projectPath } : null;
+
+      if (!sessionId || !projectPath) {
+        return null;
+      }
+
+      return {
+        sessionId,
+        projectPath,
+      };
     });
 
-    const sessionId = parsed?.sessionId ?? foundSessionId;
-    const projectPath = parsed?.projectPath ?? this.projectPathFromTranscriptDir(filePath);
-    if (!sessionId || !projectPath) {
+    if (!parsed) {
       return null;
     }
-    const meta = { sessionId, projectPath };
 
     // A real title (explicit rename, or the CLI's own generated summary) always
     // wins over raw prompt text, no matter which of them the CLI happened to
     // append last.
-    const candidates = await this.extractSessionTitleCandidates(filePath, meta.sessionId);
+    const candidates = await this.extractSessionTitleCandidates(filePath, parsed.sessionId);
 
     const derived: { name: string; source: SessionTitleSource } | undefined =
       candidates.customTitle
@@ -385,7 +362,7 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
       const strippedName = stripPastePlaceholders(derived.name);
       if (strippedName) {
         return {
-          ...meta,
+          ...parsed,
           sessionName: normalizeSessionName(strippedName, 'Untitled Claude Session'),
           titleSource: derived.source,
         };
@@ -403,7 +380,7 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
     //     machine is the case for most older chats.
     //  3. `last-prompt` - the *latest* message, as likely to be "продолжай" as
     //     anything descriptive, so it is the last resort rather than the first.
-    let sessionName = nameMap.get(meta.sessionId)
+    let sessionName = nameMap.get(parsed.sessionId)
       ?? candidates.firstUserText
       ?? candidates.lastPrompt;
     if (sessionName) {
@@ -411,24 +388,10 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
     }
 
     return {
-      ...meta,
+      ...parsed,
       sessionName: normalizeSessionName(sessionName, 'Untitled Claude Session'),
       titleSource: 'naive',
     };
-  }
-
-  /**
-   * Проект транскрипта, в котором нет ни одной строки с cwd, — из имени его
-   * каталога: `<account>/projects/<encoded>/<id>.jsonl`. Декодирование то же,
-   * что у `generateDisplayName` ('-' → '/'), и оно заведомо теряет дефисы в
-   * именах папок — поэтому только запасной путь, когда живого cwd нет вовсе.
-   */
-  private projectPathFromTranscriptDir(filePath: string): string | null {
-    const encoded = path.basename(path.dirname(filePath));
-    if (!encoded.startsWith('-')) {
-      return null;
-    }
-    return encoded.replace(/-/g, '/');
   }
 
   /**

@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 
 import { IS_PLATFORM } from '../../../shared/utils';
+import { AUTH_ERROR_MESSAGES } from '../constants';
 import { useAuth } from '../context/AuthContext';
 import Onboarding from '../../onboarding/view/Onboarding';
 
@@ -27,9 +28,20 @@ export default function ProtectedRoute({ children }: ProtectedRouteProps) {
     pendingLoginLink,
     inviteToken,
     inviteStatus,
+    error,
+    statusCheckFailedAt,
   } = useAuth();
 
   if (isLoading) {
+    return <AuthLoadingScreen />;
+  }
+
+  // Проверка входа упала по связи и идёт повтор (см. AuthContext): какой экран
+  // нужен — ещё неизвестно, а форма логина при недоступном сервере всё равно
+  // не сработает. Держим честный экран «проверяю / сервер не отвечает» вместо
+  // парольной формы (11.10.26: на общем сервере с входом по ссылке при сбое
+  // проверки всплывало старое окно «Добро пожаловать»).
+  if (!user && statusCheckFailedAt !== null) {
     return <AuthLoadingScreen />;
   }
 
@@ -71,7 +83,7 @@ export default function ProtectedRoute({ children }: ProtectedRouteProps) {
         return <InvalidInviteScreen />;
       }
 
-      return <NoInvitationScreen />;
+      return <NoInvitationScreen loginLinkRejected={error === AUTH_ERROR_MESSAGES.loginLinkInvalid} />;
     }
 
     // Skip the Git Configuration / Connect Agents onboarding flow entirely

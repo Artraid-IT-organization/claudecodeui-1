@@ -13,9 +13,9 @@ import { reportCatchupProbe } from '../utils/catchupProbe';
 import { createCachedDiffCalculator, type DiffCalculator } from '../utils/messageTransforms';
 
 import { normalizedToChatMessages } from './useChatMessages';
-import { DEFAULT_PROVIDER } from '../../../utils/defaultProvider';
 import { useScrollAnchor } from './useScrollAnchor';
 import { useRowPrewarm } from './useRowPrewarm';
+import { useRowHeightRecorder } from './useRowHeightRecorder';
 import { knownRunStartedAt } from '../utils/liveRunCursor';
 
 /**
@@ -68,7 +68,7 @@ function topPreloadMargin(container: HTMLElement): number {
 /*  Helper: Convert a ChatMessage to a NormalizedMessage for the store */
 /* ------------------------------------------------------------------ */
 
-function chatMessageToNormalized(
+export function chatMessageToNormalized(
   msg: ChatMessage,
   sessionId: string,
   provider: LLMProvider,
@@ -105,7 +105,12 @@ function chatMessageToNormalized(
     } as NormalizedMessage;
   }
   if (msg.type === 'error') {
-    return { ...base, kind: 'error', content: msg.content || '' } as NormalizedMessage;
+    return {
+      ...base,
+      kind: 'error',
+      content: msg.content || '',
+      clientNotice: typeof msg.clientNotice === 'string' ? msg.clientNotice : undefined,
+    } as NormalizedMessage;
   }
   return {
     ...base,
@@ -159,7 +164,6 @@ export function useChatSessionState({
   // Запрос истории упал (обрыв связи, перезапуск сайта). Без этого признака
   // лента рисовала «Продолжить разговор», будто чат пуст (Егор, 15.09.26).
   const [historyLoadError, setHistoryLoadError] = useState(false);
-  const [historyLoadErrorKind, setHistoryLoadErrorKind] = useState<string | null>(null);
   const [historyRetryTick, setHistoryRetryTick] = useState(0);
   const historyRetryAttemptsRef = useRef(0);
   // Переписка чата не сохранилась (первый ход оборвался перезапуском сайта):
@@ -433,7 +437,7 @@ export function useChatSessionState({
       return;
     }
 
-    const prov = (localStorage.getItem('selected-provider') as LLMProvider) || DEFAULT_PROVIDER;
+    const prov = (localStorage.getItem('selected-provider') as LLMProvider) || 'claude';
     const normalized = chatMessageToNormalized(pendingUserMessage, activeSessionId, prov);
     if (normalized) {
       sessionStore.appendRealtime(activeSessionId, normalized);
@@ -472,7 +476,7 @@ export function useChatSessionState({
       setPendingUserMessage(msg);
       return;
     }
-    const prov = (localStorage.getItem('selected-provider') as LLMProvider) || DEFAULT_PROVIDER;
+    const prov = (localStorage.getItem('selected-provider') as LLMProvider) || 'claude';
     const normalized = chatMessageToNormalized(msg, activeSessionId, prov);
     if (normalized) {
       sessionStore.appendRealtime(activeSessionId, normalized);
@@ -529,6 +533,10 @@ export function useChatSessionState({
 
   // Строки над экраном размечаются в паузах, а не во время листания.
   useRowPrewarm({ scrollContainerRef, enabled: isActive, contentKey: chatMessages.length });
+
+  // Реальная высота каждой размеченной строки — в кэш: при следующем открытии
+  // чата строки встают сразу точной высотой, лента не пересчитывается на глазах.
+  useRowHeightRecorder({ scrollContainerRef, enabled: isActive });
 
   const scrollToBottom = useCallback(() => {
     const container = scrollContainerRef.current;
@@ -1015,11 +1023,9 @@ export function useChatSessionState({
       if (activeSessionIdRef.current === selectedSessionId) {
         if (slot?.status === 'error') {
           setHistoryLoadError(true);
-          setHistoryLoadErrorKind(slot.errorKind ?? null);
         } else if (slot) {
           historyRetryAttemptsRef.current = 0;
           setHistoryLoadError(false);
-          setHistoryLoadErrorKind(null);
           setTranscriptMissing(slot.transcriptMissing);
         }
       }
@@ -1389,7 +1395,6 @@ export function useChatSessionState({
     requestLatestMessages,
     loadOlderMessagesNow,
     historyLoadError,
-    historyLoadErrorKind,
     retryHistoryLoad,
     transcriptMissing,
     setTopSentinel,

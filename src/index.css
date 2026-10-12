@@ -932,6 +932,19 @@
     padding-top: var(--header-base-padding);
   }
 
+  /*
+    Телефон (06.10.26): жалоба Егора «строка шапки прижата к верхней линии»
+    оказалась про приложение с экрана «Домой» (pwa-mode), где сброс ниже
+    обнулял отступ совсем — в браузере 8 px стоят и без правки (их даёт
+    утилита py-2; слой utilities идёт после components и перебивает обычное
+    правило .pwa-header-safe). Перебор +6 px (сверху больше, чем снизу)
+    отменён: в приложении ставим те же 8 px, что в браузере — зазоры
+    равные и строка по центру. Полоса вкладок под строкой состояния
+    (--shell-top, «впритык» от 09.09) не затронута — это внутренний
+    отступ шапки. !important обязателен: иначе отступ проиграет и py-2,
+    и сбросу выше.
+  */
+
   /* When PWA mode is detected by JavaScript */
   body.pwa-mode .pwa-header-safe {
     /* Reset padding since #root already handles safe area */
@@ -941,6 +954,9 @@
   /* For mobile PWA, add bottom padding for better spacing */
   @media screen and (max-width: 768px) {
     body.pwa-mode .pwa-header-safe {
+      /* тот же верхний зазор, что у браузера (см. комментарий выше):
+         перебивает сброс от 0 px */
+      padding-top: var(--header-base-padding) !important;
       padding-bottom: 8px;
     }
   }

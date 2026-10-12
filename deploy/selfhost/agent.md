@@ -31,3 +31,15 @@
 Без root: `~/.cache/ccui-selfhost-test.sh` на сервере Егора (клон ветки → `update.sh --first`
 → владелец, ссылка, вход, 403 постороннему). Части с nginx/certbot/systemd здесь не проверить —
 только чтением и на чистом сервере.
+
+## Плашка «Обновить» (check-updates.sh, 12.10.26)
+- `check-updates.sh` — сторож: fetch REMOTE → pending.json в `CCUI_UPDATE_STATE_DIR`
+  (коммиты пула + конфликт). Не ставит ничего: ставит человек кнопкой — applyCmd
+  из `config.json`/env того же каталога. Крон ~30 мин, не непрерывно (просил Егор).
+- Конфликт считается до клика: PATCH_DIR → `git apply --check/-R` каждого патча
+  на целевом дереве; без PATCH_DIR → сухой merge (пустой итог = эхо, плашки нет).
+- stdout `git merge` глушить целиком — служебные строки протекают в JSON и ломали
+  запись pending.json (баг первого прогона).
+- Связка на cc2: remote=egor/main, PATCH_DIR=~/cc2/local-patches, apply=`cc2-update.sh --now`.
+  У Егора: remote=woezix/woezix-live (снапшоты их живого релиза), merge-режим,
+  apply=`~/scripts/ccui-accept-remote.sh`.

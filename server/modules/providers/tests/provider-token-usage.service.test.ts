@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
 import Database from 'better-sqlite3';
 
+import { readDevinTokenUsage, resetDevinTokenUsageScans } from '@/modules/providers/list/devin/devin-usage.js';
 import { createProviderTokenUsageService } from '@/modules/providers/services/provider-token-usage.service.js';
-import { AppError } from '@/shared/utils.js';
+import { AppError, readCodexContextTokenUsage } from '@/shared/utils.js';
 
 function createSessionRow(overrides: Record<string, unknown> = {}) {
   return {
@@ -25,9 +26,6 @@ function createSessionRow(overrides: Record<string, unknown> = {}) {
     isArchived: 0,
     server_scope: 'main' as const,
     is_flagged: 0,
-    account_dir: null,
-    initiated_by_user_id: null,
-    devin_connection_id: null,
     created_at: '2026-01-01T00:00:00.000Z',
     updated_at: '2026-01-01T00:00:00.000Z',
     ...overrides,
@@ -88,7 +86,7 @@ test('token usage lookup requires only the app-facing session id for Claude', as
   }
 });
 
-test('Codex token usage uses the latest token_count snapshot', async () => {
+test('Codex token usage uses the current context instead of cumulative session spend', async () => {
   const tempDirectory = await mkdtemp(path.join(tmpdir(), 'provider-token-usage-codex-'));
   const sessionFilePath = path.join(tempDirectory, 'rollout-provider-session.jsonl');
 
@@ -100,6 +98,7 @@ test('Codex token usage uses the latest token_count snapshot', async () => {
           type: 'token_count',
           info: {
             total_token_usage: { input_tokens: 10, output_tokens: 4, total_tokens: 14 },
+            last_token_usage: { input_tokens: 8, output_tokens: 2, total_tokens: 10 },
             model_context_window: 100_000,
           },
         },
@@ -109,7 +108,8 @@ test('Codex token usage uses the latest token_count snapshot', async () => {
         payload: {
           type: 'token_count',
           info: {
-            total_token_usage: { input_tokens: 40, output_tokens: 9, total_tokens: 49 },
+            total_token_usage: { input_tokens: 2_000_000, output_tokens: 90_000, total_tokens: 2_090_000 },
+            last_token_usage: { input_tokens: 40, output_tokens: 9, total_tokens: 49 },
             model_context_window: 250_000,
           },
         },
@@ -133,6 +133,19 @@ test('Codex token usage uses the latest token_count snapshot', async () => {
   } finally {
     await rm(tempDirectory, { recursive: true, force: true });
   }
+});
+
+test('Codex token usage keeps older transcripts working when no current-context field exists', () => {
+  assert.deepEqual(readCodexContextTokenUsage({
+    total_token_usage: { input_tokens: 30, output_tokens: 5, total_tokens: 35 },
+    model_context_window: 200_000,
+  }), {
+    used: 35,
+    total: 200_000,
+    inputTokens: 30,
+    outputTokens: 5,
+    breakdown: { input: 30, output: 5 },
+  });
 });
 
 test('OpenCode token usage resolves its provider-native id from the session row', async () => {
@@ -197,7 +210,6 @@ test('Cursor returns an explicit unsupported token usage result', async () => {
 test('token usage reports SESSION_NOT_FOUND for an unknown app session id', async () => {
   const service = createProviderTokenUsageService({
     getSessionById: () => null,
-    // Иначе подмешивается реальный sessionsDb — тест зависел бы от БД хоста.
     getSessionByProviderSessionId: () => null,
   });
 
@@ -313,6 +325,154 @@ test('Claude: после сжатия разговора заполненнос�
     assert.equal(next.session?.requests, 2);
     assert.equal(next.session?.outputTokens, 13);
   } finally {
+    await rm(tempDirectory, { recursive: true, force: true });
+  }
+});
+
+test('Devin: сервис отдаёт снимок из базы Devin, model уходит подсказкой', async () => {
+  const snapshot = {
+    used: 250,
+    total: 262_000,
+    inputTokens: 250,
+    outputTokens: 40,
+    cacheReadTokens: 50,
+    cacheCreationTokens: 0,
+    cacheTokens: 50,
+    breakdown: { input: 250, output: 40 },
+    contextTokens: 250,
+    contextWindow: 262_000,
+    contextPercent: 0.1,
+    model: 'swe-2-max',
+    session: {
+      inputTokens: 1374,
+      outputTokens: 79,
+      freshInputTokens: 1299,
+      cacheReadTokens: 70,
+      cacheCreationTokens: 5,
+      totalTokens: 1453,
+      requests: 3,
+    },
+  };
+  const seen: Array<{ id: string; modelHint?: string | null }> = [];
+  const service = createProviderTokenUsageService({
+    getSessionById: () => createSessionRow({ provider: 'devin', model: 'swe-2-max' }),
+    readDevinTokenUsage: (id: string, options?: { modelHint?: string | null }) => {
+      seen.push({ id, modelHint: options?.modelHint });
+      return snapshot;
+    },
+  });
+
+  assert.deepEqual(await service.getSessionTokenUsage('app-session'), snapshot);
+  assert.deepEqual(seen, [{ id: 'provider-session', modelHint: 'swe-2-max' }]);
+});
+
+test('Devin: заполненность — последний ответ живой цепи, расход — все ответы с дедупом по request_id', async () => {
+  const tempDirectory = await mkdtemp(path.join(tmpdir(), 'devin-usage-'));
+  const previousXdg = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = tempDirectory;
+  resetDevinTokenUsageScans();
+
+  const databaseDir = path.join(tempDirectory, 'devin', 'cli');
+  await mkdir(databaseDir, { recursive: true });
+  const database = new Database(path.join(databaseDir, 'sessions.db'));
+
+  const assistant = (metrics: Record<string, unknown>) => JSON.stringify({
+    role: 'assistant',
+    content: 'text',
+    metadata: { metrics },
+  });
+
+  try {
+    database.exec(`
+      CREATE TABLE sessions (id TEXT PRIMARY KEY, model TEXT, main_chain_id INTEGER);
+      CREATE TABLE message_nodes (
+        row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        node_id INTEGER NOT NULL,
+        parent_node_id INTEGER,
+        chat_message TEXT NOT NULL,
+        created_at INTEGER
+      );
+      INSERT INTO sessions (id, model, main_chain_id) VALUES ('devin-chat', 'swe-2-max', 5);
+    `);
+    const insert = database.prepare(
+      'INSERT INTO message_nodes (session_id, node_id, parent_node_id, chat_message) VALUES (?, ?, ?, ?)',
+    );
+    const run = (nodeId: number, parentId: number | null, message: string) =>
+      insert.run('devin-chat', nodeId, parentId, message);
+
+    run(1, null, JSON.stringify({ role: 'user', content: 'hi' }));
+    // Один ответ — двумя узлами с одним request_id (как в живой базе).
+    run(2, 1, assistant({ input_tokens: 100, output_tokens: 30, cache_read_tokens: 20, cache_creation_tokens: 5, request_id: 'r1' }));
+    run(3, 2, assistant({ input_tokens: 100, output_tokens: 30, cache_read_tokens: 20, cache_creation_tokens: 5, request_id: 'r1' }));
+    run(4, 3, JSON.stringify({ role: 'user', content: 'next' }));
+    run(5, 4, assistant({ input_tokens: 200, output_tokens: 40, cache_read_tokens: 50, cache_creation_tokens: 0, request_id: 'r2' }));
+    // Заброшенная ветка: в расход входит, в заполненность — нет.
+    run(6, 1, assistant({ input_tokens: 999, output_tokens: 9, cache_read_tokens: 0, cache_creation_tokens: 0, request_id: 'rX' }));
+  } finally {
+    database.close();
+  }
+
+  try {
+    const usage = readDevinTokenUsage('devin-chat');
+    assert.ok(usage);
+    assert.equal(usage.used, 250);
+    assert.equal(usage.contextTokens, 250);
+    assert.equal(usage.contextWindow, 262_000);
+    assert.equal(usage.model, 'swe-2-max');
+    assert.deepEqual(usage.session, {
+      inputTokens: 100 + 20 + 5 + 200 + 50 + 999,
+      outputTokens: 30 + 40 + 9,
+      freshInputTokens: 100 + 200 + 999,
+      cacheReadTokens: 70,
+      cacheCreationTokens: 5,
+      totalTokens: 100 + 20 + 5 + 200 + 50 + 999 + 79,
+      requests: 3,
+    });
+
+    // Новые строки дочитываются без повторного разбора старых.
+    const database2 = new Database(path.join(databaseDir, 'sessions.db'));
+    database2.prepare(
+      'INSERT INTO message_nodes (session_id, node_id, parent_node_id, chat_message) VALUES (?, ?, ?, ?)',
+    ).run('devin-chat', 7, 5, assistant({ input_tokens: 10, output_tokens: 4, cache_read_tokens: 300, cache_creation_tokens: 0, request_id: 'r3' }));
+    database2.prepare('UPDATE sessions SET main_chain_id = 7 WHERE id = ?').run('devin-chat');
+    database2.close();
+
+    const next = readDevinTokenUsage('devin-chat');
+    assert.equal(next?.contextTokens, 310);
+    assert.equal(next?.session?.requests, 4);
+  } finally {
+    if (previousXdg === undefined) {
+      delete process.env.XDG_DATA_HOME;
+    } else {
+      process.env.XDG_DATA_HOME = previousXdg;
+    }
+    resetDevinTokenUsageScans();
+    await rm(tempDirectory, { recursive: true, force: true });
+  }
+});
+
+test('Devin: беседы нет в базе — null, не ноль с враньём', async () => {
+  const tempDirectory = await mkdtemp(path.join(tmpdir(), 'devin-usage-missing-'));
+  const previousXdg = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = tempDirectory;
+  resetDevinTokenUsageScans();
+
+  const databaseDir = path.join(tempDirectory, 'devin', 'cli');
+  await mkdir(databaseDir, { recursive: true });
+  const database = new Database(path.join(databaseDir, 'sessions.db'));
+  database.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, model TEXT, main_chain_id INTEGER)');
+  database.close();
+
+  try {
+    assert.equal(readDevinTokenUsage('missing'), null);
+  } finally {
+    if (previousXdg === undefined) {
+      delete process.env.XDG_DATA_HOME;
+    } else {
+      process.env.XDG_DATA_HOME = previousXdg;
+    }
+    resetDevinTokenUsageScans();
     await rm(tempDirectory, { recursive: true, force: true });
   }
 });

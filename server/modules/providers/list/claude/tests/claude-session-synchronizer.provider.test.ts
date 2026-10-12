@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { appendFile, mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -377,86 +377,3 @@ test(
   },
 );
 
-
-test(
-  'транскрипт без ни одной строки с cwd индексируется по имени каталога',
-  { concurrency: false },
-  async () => {
-    await withIsolatedClaudeHome(async (claudeHome) => {
-      const sessionId = 'sess-no-cwd-anywhere';
-      // Служебные записи без cwd: так выглядят транскрипты, у которых все
-      // строки — мета-типы (queue-operation, file-history), а cwd несут
-      // только user/assistant-записи. Раньше файл уходил в null навсегда.
-      const projectsDir = path.join(claudeHome, 'projects', '-tmp-project');
-      await mkdir(projectsDir, { recursive: true });
-      const filePath = path.join(projectsDir, `${sessionId}.jsonl`);
-      await writeFile(
-        filePath,
-        [
-          JSON.stringify({ type: 'queue-operation', sessionId, operation: 'enqueue' }),
-          JSON.stringify({ type: 'user', sessionId, message: { role: 'user', content: 'привет' } }),
-        ].join('\n') + '\n',
-        'utf8',
-      );
-
-      const upsertedId = await new ClaudeSessionSynchronizer().synchronizeFile(filePath);
-
-      assert.equal(upsertedId, sessionId);
-      const row = sessionsDb.getSessionById(sessionId);
-      assert.equal(row?.project_path, '/tmp/project');
-    });
-  },
-);
-
-test(
-  'cwd с более поздней строки побеждает над именем каталога',
-  { concurrency: false },
-  async () => {
-    await withIsolatedClaudeHome(async (claudeHome) => {
-      const sessionId = 'sess-late-cwd';
-      const projectsDir = path.join(claudeHome, 'projects', '-tmp-project');
-      await mkdir(projectsDir, { recursive: true });
-      const filePath = path.join(projectsDir, `${sessionId}.jsonl`);
-      await writeFile(
-        filePath,
-        [
-          JSON.stringify({ type: 'queue-operation', sessionId, operation: 'enqueue' }),
-          JSON.stringify({ type: 'user', sessionId, cwd: '/real/work', message: { role: 'user', content: 'привет' } }),
-        ].join('\n') + '\n',
-        'utf8',
-      );
-
-      await new ClaudeSessionSynchronizer().synchronizeFile(filePath);
-
-      assert.equal(sessionsDb.getSessionById(sessionId)?.project_path, '/real/work');
-    });
-  },
-);
-
-test(
-  'инкрементальный скан подбирает файл без строки в базе независимо от mtime',
-  { concurrency: false },
-  async () => {
-    await withIsolatedClaudeHome(async (claudeHome) => {
-      // Файл прибыл в дерево со старым mtime (копия с сохранением времени):
-      // фильтр `mtime > lastScanAt` пропускал его навсегда — транскрипт был
-      // на диске и невидим в интерфейсе (аудит 10.10.26, чаты Винса).
-      const orphanedId = 'sess-orphaned-old-mtime';
-      const orphanPath = await writeSessionTranscript(claudeHome, orphanedId);
-      const oldTime = new Date('2020-01-01T00:00:00Z');
-      await utimes(orphanPath, oldTime, oldTime);
-
-      // А ещё в дереве есть уже проиндексированный файл с таким же старым
-      // mtime — его скан обязан пропустить (строка есть, путь в knownPaths).
-      const indexedId = 'sess-indexed-old-mtime';
-      const indexedPath = await writeSessionTranscript(claudeHome, indexedId);
-      await utimes(indexedPath, oldTime, oldTime);
-      sessionsDb.createSession(indexedId, 'claude', '/tmp/project', 'Indexed', undefined, undefined, indexedPath);
-
-      const processed = await new ClaudeSessionSynchronizer().synchronize(new Date('2021-01-01T00:00:00Z'));
-
-      assert.equal(processed, 1, 'только сирота, уже известный путь повторно не обрабатываем');
-      assert.ok(sessionsDb.getSessionById(orphanedId), 'сирота проиндексирована');
-    });
-  },
-);

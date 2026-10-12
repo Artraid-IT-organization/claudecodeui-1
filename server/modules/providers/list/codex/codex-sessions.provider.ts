@@ -5,7 +5,13 @@ import { sessionsDb } from '@/modules/database/index.js';
 import { parseFilesInputTag, toImageAttachments } from '@/shared/image-attachments.js';
 import type { IProviderSessions } from '@/shared/interfaces.js';
 import type { AnyRecord, FetchHistoryOptions, FetchHistoryResult, NormalizedMessage } from '@/shared/types.js';
-import { createNormalizedMessage, generateMessageId, readObjectRecord, sliceTailPage } from '@/shared/utils.js';
+import {
+  createNormalizedMessage,
+  generateMessageId,
+  readCodexContextTokenUsage,
+  readObjectRecord,
+  sliceTailPage,
+} from '@/shared/utils.js';
 
 const PROVIDER = 'codex';
 
@@ -268,14 +274,7 @@ async function getCodexSessionMessages(
       try {
         const entry = JSON.parse(line) as AnyRecord;
         if (entry.type === 'event_msg' && entry.payload?.type === 'token_count' && entry.payload?.info) {
-          const info = entry.payload.info as AnyRecord;
-          if (info.total_token_usage) {
-            const usage = info.total_token_usage as AnyRecord;
-            tokenUsage = {
-              used: usage.total_tokens || 0,
-              total: info.model_context_window || 200000,
-            };
-          }
+          tokenUsage = readCodexContextTokenUsage(entry.payload.info) ?? tokenUsage;
         }
 
         if (
@@ -312,7 +311,11 @@ async function getCodexSessionMessages(
           const textContent = extractCodexTextContent(entry.payload.content);
           if (textContent.trim()) {
             messages.push({
-              type: 'assistant',
+              // Codex uses commentary for the same progress narration Claude
+              // exposes as work/thinking. It must not split the work stretch
+              // into a sequence of apparent final answers.
+              type: entry.payload.phase === 'commentary' ? 'thinking' : 'assistant',
+              isCommentary: entry.payload.phase === 'commentary',
               timestamp: entry.timestamp,
               message: {
                 role: 'assistant',
@@ -629,7 +632,16 @@ export class CodexSessionsProvider implements IProviderSessions {
     const ts = raw.timestamp || new Date().toISOString();
     const baseId = raw.uuid || generateMessageId('codex');
 
-    if (raw.type === 'thinking' || raw.isReasoning) {
+    // Живое размышление приходит из transformCodexEvent с ролью assistant и
+    // флагом в message.isReasoning — без этой проверки оно уходило обычным
+    // текстом (Егор 29.09.26: размышления крупными заголовками посреди ответа,
+    // блоком «Ход работы · размышления» — только после перезагрузки).
+    if (
+      raw.type === 'thinking'
+      || raw.phase === 'commentary'
+      || raw.isReasoning
+      || raw.message?.isReasoning
+    ) {
       const thinkingContent = typeof raw.message?.content === 'string'
         ? raw.message.content
         : '';
@@ -643,6 +655,7 @@ export class CodexSessionsProvider implements IProviderSessions {
         provider: PROVIDER,
         kind: 'thinking',
         content: thinkingContent,
+        isCommentary: Boolean(raw.isCommentary || raw.phase === 'commentary'),
       })];
     }
 
@@ -745,6 +758,17 @@ export class CodexSessionsProvider implements IProviderSessions {
     if (raw.type === 'item') {
       switch (raw.itemType) {
         case 'agent_message':
+          if (raw.phase === 'commentary') {
+            return [createNormalizedMessage({
+              id: baseId,
+              sessionId,
+              timestamp: ts,
+              provider: PROVIDER,
+              kind: 'thinking',
+              content: raw.message?.content || '',
+              isCommentary: true,
+            })];
+          }
           return [createNormalizedMessage({
             id: baseId,
             sessionId,
@@ -764,46 +788,80 @@ export class CodexSessionsProvider implements IProviderSessions {
             content: raw.message?.content || '',
           })];
         case 'command_execution':
-          return [createNormalizedMessage({
-            id: baseId,
-            sessionId,
-            timestamp: ts,
-            provider: PROVIDER,
-            kind: 'tool_use',
-            toolName: 'Bash',
-            toolInput: { command: raw.command },
-            toolId: baseId,
-            output: raw.output,
-            exitCode: raw.exitCode,
-            status: raw.status,
-          })];
+          return [
+            createNormalizedMessage({
+              id: baseId,
+              sessionId,
+              timestamp: ts,
+              provider: PROVIDER,
+              kind: 'tool_use',
+              toolName: 'Bash',
+              toolInput: { command: raw.command },
+              toolId: baseId,
+            }),
+            // The chat UI attaches output only from a separate tool_result.
+            // Keeping it as an extra field on tool_use made live Codex commands
+            // look permanently running and hid their output until history reload.
+            createNormalizedMessage({
+              id: `${baseId}_result`,
+              sessionId,
+              timestamp: ts,
+              provider: PROVIDER,
+              kind: 'tool_result',
+              toolId: baseId,
+              content: typeof raw.output === 'string' ? raw.output : '',
+              isError: raw.status === 'failed'
+                || (typeof raw.exitCode === 'number' && raw.exitCode !== 0),
+            }),
+          ];
         case 'file_change':
-          return [createNormalizedMessage({
-            id: baseId,
-            sessionId,
-            timestamp: ts,
-            provider: PROVIDER,
-            kind: 'tool_use',
-            toolName: 'FileChanges',
-            toolInput: raw.changes,
-            toolId: baseId,
-            status: raw.status,
-          })];
+          return [
+            createNormalizedMessage({
+              id: baseId,
+              sessionId,
+              timestamp: ts,
+              provider: PROVIDER,
+              kind: 'tool_use',
+              toolName: 'FileChanges',
+              toolInput: raw.changes,
+              toolId: baseId,
+            }),
+            createNormalizedMessage({
+              id: `${baseId}_result`,
+              sessionId,
+              timestamp: ts,
+              provider: PROVIDER,
+              kind: 'tool_result',
+              toolId: baseId,
+              content: raw.status === 'failed' ? 'File changes failed' : 'File changes applied',
+              isError: raw.status === 'failed',
+            }),
+          ];
         case 'mcp_tool_call':
-          return [createNormalizedMessage({
-            id: baseId,
-            sessionId,
-            timestamp: ts,
-            provider: PROVIDER,
-            kind: 'tool_use',
-            toolName: raw.tool || 'MCP',
-            toolInput: raw.arguments,
-            toolId: baseId,
-            server: raw.server,
-            result: raw.result,
-            error: raw.error,
-            status: raw.status,
-          })];
+          return [
+            createNormalizedMessage({
+              id: baseId,
+              sessionId,
+              timestamp: ts,
+              provider: PROVIDER,
+              kind: 'tool_use',
+              toolName: raw.tool || 'MCP',
+              toolInput: raw.arguments,
+              toolId: baseId,
+              server: raw.server,
+            }),
+            createNormalizedMessage({
+              id: `${baseId}_result`,
+              sessionId,
+              timestamp: ts,
+              provider: PROVIDER,
+              kind: 'tool_result',
+              toolId: baseId,
+              content: raw.error?.message
+                || extractCodexToolOutput(raw.result?.content ?? raw.result),
+              isError: raw.status === 'failed' || Boolean(raw.error),
+            }),
+          ];
         case 'web_search':
           return [createNormalizedMessage({
             id: baseId,

@@ -8,11 +8,13 @@ import { useWebSocket } from '../../../contexts/WebSocketContext';
 import PermissionContext from '../../../contexts/PermissionContext';
 import type { ChatInterfaceProps, ChatMessage, PermissionMode, Provider  } from '../types/types';
 import { useChatProviderState } from '../hooks/useChatProviderState';
-import { useChatSessionState } from '../hooks/useChatSessionState';
+import { useChatSessionState, chatMessageToNormalized } from '../hooks/useChatSessionState';
 import { useChatRealtimeHandlers } from '../hooks/useChatRealtimeHandlers';
 import { useChatComposerState } from '../hooks/useChatComposerState';
 import { useSessionStore } from '../../../stores/useSessionStore';
 import { authenticatedFetch } from '../../../utils/api';
+import { registerVoiceDispatcher } from '../../../lib/voiceDelivery';
+import { draftScopeFor } from '../utils/chatStorage';
 
 import ChatMessagesPane from './subcomponents/ChatMessagesPane';
 import ChatRequestBar from './subcomponents/ChatRequestBar';
@@ -20,6 +22,8 @@ import ChatComposer from './subcomponents/ChatComposer';
 import CommandResultModal from './subcomponents/CommandResultModal';
 import RewindConfirmDialog from './subcomponents/RewindConfirmDialog';
 import { knownRunStartedAt } from '../utils/liveRunCursor';
+import { normalizedToChatMessages } from '../hooks/useChatMessages';
+import { waitForFreshTailAfterReconnect } from '../utils/reconnectVerdict';
 
 /**
  * Сколько ждать после восстановления связи, прежде чем признать ответ
@@ -55,6 +59,13 @@ function ChatInterface({
   const { t } = useTranslation('chat');
 
   const sessionStore = useSessionStore();
+
+  // Диктовка «с отправкой» для чата, который сейчас не открыт: очередь
+  // voiceDelivery отдаёт текст сюда, а chat.send сам лежит до расписки
+  // сервера — итог одинаков при закрытой вкладке и при обрыве сети.
+  useEffect(() => registerVoiceDispatcher((sessionId, text) => {
+    sendMessage({ type: 'chat.send', sessionId, content: text, options: {} });
+  }), [sendMessage]);
   // Keyed by session id, NOT one buffer for the whole component. A client can
   // receive live deltas for more than one session at a time — watching a run
   // started elsewhere (another device, the CLI) while typing in your own is
@@ -153,7 +164,6 @@ function ChatInterface({
     requestLatestMessages,
     loadOlderMessagesNow,
     historyLoadError,
-    historyLoadErrorKind,
     retryHistoryLoad,
     transcriptMissing,
     setTopSentinel,
@@ -290,6 +300,16 @@ function ChatInterface({
   const lostWhileWaitingRef = useRef(false);
   const isProcessingRef = useRef(isProcessing);
   isProcessingRef.current = isProcessing;
+  const isConnectedRef = useRef(isConnected);
+  isConnectedRef.current = isConnected;
+  // Чат вердикта фиксируется в момент обрыва: если за время ожидания открыть
+  // другую сессию, и догрузка, и проверка, и плашка обязаны остаться в том
+  // чате, где ждали ответ.
+  const liveSessionIdRef = useRef<string | null>(selectedSession?.id ?? null);
+  liveSessionIdRef.current = selectedSession?.id ?? null;
+  const verdictSessionIdRef = useRef<string | null>(null);
+  const reconnectedAtRef = useRef(0);
+  const connectionLostShownRef = useRef(false);
 
   // Ответ мог не только продолжиться — он мог и ЗАКОНЧИТЬСЯ, пока связи не
   // было. Снимок Егора 11.09.26: сообщение обрывается на полуслове («**Что»),
@@ -304,15 +324,20 @@ function ChatInterface({
   const chatMessagesRef = useRef(chatMessages);
   chatMessagesRef.current = chatMessages;
 
-  const replyArrivedAfterLastUserMessage = useCallback(() => {
-    const rows = chatMessagesRef.current;
+  // При выданном sessionId смотрим не в последний рендер, а в сам стор —
+  // догрузка хвоста применяется к нему раньше, чем доедет до chatMessages,
+  // и её видно сразу, без ожидания кадра.
+  const replyArrivedAfterLastUserMessage = useCallback((sessionId?: string) => {
+    const rows = sessionId
+      ? normalizedToChatMessages(sessionStore.getMessages(sessionId))
+      : chatMessagesRef.current;
     for (let index = rows.length - 1; index >= 0; index--) {
       const type = rows[index]?.type;
       if (type === 'user') return false;
       if (type === 'assistant' && (rows[index].content || '').trim().length > 0) return true;
     }
     return false;
-  }, []);
+  }, [sessionStore]);
 
   const wasConnectedRef = useRef(isConnected);
   useEffect(() => {
@@ -321,6 +346,7 @@ function ChatInterface({
 
     if (wasConnected && !isConnected && isProcessing) {
       lostWhileWaitingRef.current = true;
+      verdictSessionIdRef.current = liveSessionIdRef.current;
       return;
     }
 
@@ -330,22 +356,51 @@ function ChatInterface({
 
     // Связь вернулась. Даём серверу время подтвердить, что ответ ещё живёт:
     // подписка уходит сразу, а подтверждение приходит не мгновенно.
+    reconnectedAtRef.current = Date.now();
     const timer = setTimeout(() => {
-      if (!lostWhileWaitingRef.current) return;
-      lostWhileWaitingRef.current = false;
-      if (isProcessingRef.current) return;
-      if (replyArrivedAfterLastUserMessage()) return;
-      addMessage({
-        type: 'error',
-        content: t(
+      void (async () => {
+        // 06.10.26: грейс (8 с) короче таймаута догрузки хвоста (10 с). На
+        // проснувшемся iPhone первый запрос висит в мёртвом соединении до
+        // срока — приговор выносился по УСТАРЕВШЕЙ ленте и объявлял потерю
+        // под готовым ответом; по совету «отправьте ещё раз» уходил дубль.
+        // Сначала ждём, пока хвост реально перечитается (fetchedAt новее
+        // момента реконнекта) — сами дёргая догрузку, — и только потом судим.
+        const readiness = await waitForFreshTailAfterReconnect({
+          sessionId: () => verdictSessionIdRef.current,
+          isProcessing: () => isProcessingRef.current,
+          isConnected: () => isConnectedRef.current,
+          stillArmed: () => lostWhileWaitingRef.current,
+          getFetchedAt: (sid) => sessionStore.getSessionSlot(sid)?.fetchedAt ?? 0,
+          requestLatest: (sid) => requestLatestMessages(sid, true, 'reconnect-verdict'),
+          reconnectedAt: reconnectedAtRef.current,
+        });
+        if (readiness !== 'fresh-tail' && readiness !== 'deadline') return;
+        if (!lostWhileWaitingRef.current) return;
+        lostWhileWaitingRef.current = false;
+        const armedSid = verdictSessionIdRef.current;
+        if (replyArrivedAfterLastUserMessage(armedSid ?? undefined)) return;
+        connectionLostShownRef.current = true;
+        const content = t(
           'errors.connectionLostWhileWaiting',
           'Связь с сервером прервалась, ответ не получен. Отправьте сообщение ещё раз.',
-        ),
-        timestamp: new Date(),
-      });
+        );
+        if (armedSid) {
+          // Плашка принадлежит чату, где ждали ответ: addMessage целился бы
+          // в открытый к этому моменту чат, а снятие ниже ищет в armedSid.
+          const prov = (localStorage.getItem('selected-provider') as Provider) || 'claude';
+          const normalized = chatMessageToNormalized(
+            { type: 'error', clientNotice: 'connection-lost', content, timestamp: new Date() },
+            armedSid,
+            prov,
+          );
+          if (normalized) sessionStore.appendRealtime(armedSid, normalized);
+        } else {
+          addMessage({ type: 'error', clientNotice: 'connection-lost', content, timestamp: new Date() });
+        }
+      })();
     }, RECONNECT_GRACE_MS);
     return () => clearTimeout(timer);
-  }, [isConnected, isProcessing, addMessage, replyArrivedAfterLastUserMessage, t]);
+  }, [isConnected, isProcessing, addMessage, requestLatestMessages, replyArrivedAfterLastUserMessage, sessionStore, t]);
 
   // Ответ продолжился сам — извиняться не за что, снимаем ожидание молча.
   useEffect(() => {
@@ -353,6 +408,19 @@ function ChatInterface({
       lostWhileWaitingRef.current = false;
     }
   }, [isProcessing, isConnected]);
+
+  // Плашка «ответ не получен» сама уходит, когда приговор оказывается ложным:
+  // ход возобновился или ответ доехал после её показа. Оставленная висеть, она
+  // продолжала советовать пересылку под уже пришедшим ответом.
+  useEffect(() => {
+    if (!connectionLostShownRef.current) return;
+    const sid = verdictSessionIdRef.current;
+    if (!isProcessing && !replyArrivedAfterLastUserMessage(sid ?? undefined)) return;
+    connectionLostShownRef.current = false;
+    if (sid) {
+      sessionStore.removeRealtimeWhere(sid, (row) => row.clientNotice === 'connection-lost');
+    }
+  }, [isProcessing, chatMessages, replyArrivedAfterLastUserMessage, sessionStore]);
 
   // Пока связи нет, а ответ ждали, строка состояния показывает не пустоту и не
   // приговор, а честное «восстанавливаем». Прерывать в этот момент нечего,
@@ -440,6 +508,14 @@ function ChatInterface({
     pendingPermissionRequests,
     handlePermissionDecision,
   }), [pendingPermissionRequests, handlePermissionDecision]);
+
+  // Чат-адресат надиктованного: область черновика считается ровно так же,
+  // как в useChatComposerState (draftScopeFor), иначе текст попадёт не туда.
+  const voiceSessionId = selectedSession?.id || currentSessionId || null;
+  const voiceTarget = useMemo(() => ({
+    sessionId: voiceSessionId,
+    scope: draftScopeFor(selectedProject?.projectId, voiceSessionId),
+  }), [voiceSessionId, selectedProject?.projectId]);
 
   // A composer pick becomes the default for new chats and, when a session is
   // open, is recorded against that session so reopening it restores this model.
@@ -598,7 +674,6 @@ function ChatInterface({
           onLoadOlderMessages={loadOlderMessagesNow}
           topSentinelRef={setTopSentinel}
           historyLoadError={historyLoadError}
-          historyLoadErrorKind={historyLoadErrorKind}
           onRetryHistoryLoad={retryHistoryLoad}
           transcriptMissing={transcriptMissing}
           totalMessages={totalMessages}
@@ -613,7 +688,7 @@ function ChatInterface({
           onGrantToolPermission={handleGrantToolPermission}
           showRawParameters={showRawParameters}
           showThinking={showThinking}
-          onRewindToMessage={provider === 'claude' && rewindSessionId ? handleRewindToMessage : undefined}
+          onRewindToMessage={(provider === 'claude' || provider === 'devin') && rewindSessionId ? handleRewindToMessage : undefined}
           selectedProject={selectedProject}
         />
 
@@ -700,6 +775,7 @@ function ChatInterface({
           textareaRef={textareaRef}
           input={input}
           onVoiceTranscript={handleVoiceTranscript}
+          voiceTarget={voiceTarget}
           onInputChange={handleInputChange}
           onTextareaClick={handleTextareaClick}
           onTextareaKeyDown={handleKeyDown}

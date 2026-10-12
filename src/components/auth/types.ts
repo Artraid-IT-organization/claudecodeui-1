@@ -81,6 +81,13 @@ export type AuthContextValue = {
   needsSetup: boolean;
   hasCompletedOnboarding: boolean;
   error: string | null;
+  /**
+   * Момент последней неудачной проверки /api/auth/status, или null, когда
+   * проверка прошла (или ещё не запускалась). Пока не null — клиент в режиме
+   * повтора; ProtectedRoute по нему держит экран ожидания, а не форму входа,
+   * которая при недоступном сервере всё равно не работает.
+   */
+  statusCheckFailedAt: number | null;
   login: (username: string, password: string) => Promise<AuthActionResult>;
   register: (username: string, password: string) => Promise<AuthActionResult>;
   logout: () => void;

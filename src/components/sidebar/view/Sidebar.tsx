@@ -7,7 +7,15 @@ import { useUiPreferences } from '../../../hooks/useUiPreferences';
 import { useAuth } from '../../auth/context/AuthContext';
 import { authenticatedFetch } from '../../../utils/api';
 import { useSidebarController } from '../hooks/useSidebarController';
-import { scopeProjectsToServer, setSecondServerLabel, useSecondServerLabel, useServerScope } from '../hooks/useServerScope';
+import {
+  providerSpaceOf,
+  scopeProjectsToProvider,
+  scopeProjectsToServer,
+  setSecondServerLabel,
+  useSecondServerLabel,
+  useServerScope,
+} from '../hooks/useServerScope';
+import { useSelectedChatProvider } from '../../../hooks/useCodexAccount';
 import { useTaskMaster } from '../../../contexts/TaskMasterContext';
 import { usePaletteOps } from '../../../contexts/PaletteOpsContext';
 import { useTasksSettings } from '../../../contexts/TasksSettingsContext';
@@ -110,9 +118,15 @@ function Sidebar({
 
   // Панель показывает дела одного блока за раз (правило отбора — в
   // scopeProjectsToServer, общее с главным экраном).
+  // Сверху — отбор по помощнику: чаты Codex и чаты Claude не мешаются.
+  const providerSpace = providerSpaceOf(useSelectedChatProvider());
   const scopedProjects = useMemo(
-    () => scopeProjectsToServer(projects, serverScope, Boolean(secondServerLabel)),
-    [projects, serverScope, secondServerLabel],
+    () => scopeProjectsToProvider(
+      scopeProjectsToServer(projects, serverScope, Boolean(secondServerLabel)),
+      providerSpace,
+      serverScope,
+    ),
+    [projects, serverScope, secondServerLabel, providerSpace],
   );
   const { preferences, setPreference } = useUiPreferences();
   const { sidebarVisible } = preferences;
@@ -309,7 +323,7 @@ function Sidebar({
           onShowSettings={onShowSettings}
           updateAvailable={updateAvailable}
           restartRequired={restartRequired}
-          onShowVersionModal={() => setShowVersionModal(true)}
+          onApplyUpdate={() => window.location.reload()}
           t={t}
         />
       ) : (
@@ -400,7 +414,7 @@ function Sidebar({
             accountLabel={accountLabel}
             switchAccountUrl={switchAccountUrl}
             accountEmail={accountEmail}
-            onShowVersionModal={() => setShowVersionModal(true)}
+            onApplyUpdate={() => window.location.reload()}
             onShowSettings={onShowSettings}
             projectListProps={projectListProps}
             t={t}

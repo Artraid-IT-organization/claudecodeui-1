@@ -6,9 +6,14 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 
 import { sessionsDb } from '@/modules/database/index.js';
+import { readDevinTokenUsage } from '@/modules/providers/list/devin/devin-usage.js';
 import { resolveClaudeContextWindow } from '@/modules/providers/services/claude-context-window.js';
 import type { AnyRecord } from '@/shared/types.js';
-import { AppError, getOpenCodeDatabasePath } from '@/shared/utils.js';
+import {
+  AppError,
+  getOpenCodeDatabasePath,
+  readCodexContextTokenUsage,
+} from '@/shared/utils.js';
 
 type SessionRow = NonNullable<ReturnType<typeof sessionsDb.getSessionById>>;
 
@@ -22,6 +27,7 @@ type ProviderTokenUsageServiceDependencies = {
   readTextFile: (filePath: string) => Promise<string>;
   getClaudeContextWindow: () => string | undefined;
   resolveClaudeContextWindow: typeof resolveClaudeContextWindow;
+  readDevinTokenUsage: typeof readDevinTokenUsage;
 };
 
 type TokenUsageResult = {
@@ -71,6 +77,7 @@ const defaultDependencies: ProviderTokenUsageServiceDependencies = {
   readTextFile: (filePath) => fsp.readFile(filePath, 'utf8'),
   getClaudeContextWindow: () => process.env.CONTEXT_WINDOW,
   resolveClaudeContextWindow,
+  readDevinTokenUsage,
 };
 
 function readUsageNumber(value: unknown): number {
@@ -111,10 +118,6 @@ async function findCodexSessionFile(
 }
 
 function readCodexTokenUsage(fileContent: string): TokenUsageResult {
-  let inputTokens = 0;
-  let outputTokens = 0;
-  let totalTokens = 0;
-  let contextWindow = 200_000;
   const lines = fileContent.trim().split('\n');
 
   for (let index = lines.length - 1; index >= 0; index -= 1) {
@@ -127,25 +130,21 @@ function readCodexTokenUsage(fileContent: string): TokenUsageResult {
         continue;
       }
 
-      if (tokenInfo.total_token_usage) {
-        inputTokens = readUsageNumber(tokenInfo.total_token_usage.input_tokens);
-        outputTokens = readUsageNumber(tokenInfo.total_token_usage.output_tokens);
-        totalTokens = readUsageNumber(tokenInfo.total_token_usage.total_tokens)
-          || inputTokens + outputTokens;
+      const tokenUsage = readCodexContextTokenUsage(tokenInfo);
+      if (tokenUsage) {
+        return tokenUsage;
       }
-      contextWindow = readUsageNumber(tokenInfo.model_context_window) || contextWindow;
-      break;
     } catch {
       // A provider may be writing the last JSONL line while this read happens.
     }
   }
 
   return {
-    used: totalTokens,
-    total: contextWindow,
-    inputTokens,
-    outputTokens,
-    breakdown: { input: inputTokens, output: outputTokens },
+    used: 0,
+    total: 200_000,
+    inputTokens: 0,
+    outputTokens: 0,
+    breakdown: { input: 0, output: 0 },
   };
 }
 
@@ -450,7 +449,16 @@ export function createProviderTokenUsageService(
 
       const providerSessionId = session.provider_session_id || session.session_id || sessionId;
 
-      if (session.provider === 'cursor' || session.provider === 'devin') {
+      if (session.provider === 'devin') {
+        // Devin пишет расход каждого ответа в свою sessions.db — читаем его,
+        // как читаем стенограмму Claude. Беседы у Devin нет (чат без ходов) —
+        // нули, но окно уже настоящее, а не «недоступно».
+        const usage = dependencies.readDevinTokenUsage(providerSessionId, {
+          modelHint: session.model,
+        });
+        if (usage) {
+          return usage;
+        }
         return {
           used: 0,
           total: 0,
@@ -458,7 +466,19 @@ export function createProviderTokenUsageService(
           outputTokens: 0,
           breakdown: { input: 0, output: 0 },
           unsupported: true,
-          message: `Token usage tracking not available for ${session.provider === 'devin' ? 'Devin' : 'Cursor'} sessions`,
+          message: 'Devin session was not found in the Devin database',
+        };
+      }
+
+      if (session.provider === 'cursor') {
+        return {
+          used: 0,
+          total: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          breakdown: { input: 0, output: 0 },
+          unsupported: true,
+          message: 'Token usage tracking not available for Cursor sessions',
         };
       }
 
