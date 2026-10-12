@@ -208,7 +208,10 @@ test('Cursor returns an explicit unsupported token usage result', async () => {
 });
 
 test('token usage reports SESSION_NOT_FOUND for an unknown app session id', async () => {
-  const service = createProviderTokenUsageService({ getSessionById: () => null });
+  const service = createProviderTokenUsageService({
+    getSessionById: () => null,
+    getSessionByProviderSessionId: () => null,
+  });
 
   await assert.rejects(
     () => service.getSessionTokenUsage('missing-session'),

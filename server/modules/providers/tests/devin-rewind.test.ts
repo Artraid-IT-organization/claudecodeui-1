@@ -53,7 +53,8 @@ function seedDevinDb(dbPath: string): void {
   db.exec(`
     CREATE TABLE sessions (id TEXT PRIMARY KEY, main_chain_id INTEGER);
     CREATE TABLE message_nodes (
-      node_id INTEGER PRIMARY KEY,
+      row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      node_id INTEGER,
       session_id TEXT,
       parent_node_id INTEGER,
       chat_message TEXT,

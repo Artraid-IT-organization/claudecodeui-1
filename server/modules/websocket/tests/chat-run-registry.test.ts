@@ -328,10 +328,11 @@ test('ожидание перед выкладкой держит только �
       assert.equal(chatRunRegistry.beginPreRestartDrain(), false, 'продление — не новое ожидание');
       assert.equal(chatRunRegistry.isShutdownDraining(), true);
 
-      const devinBlocked = chatRunRegistry.startRun({
+      const devinRun = chatRunRegistry.startRun({
         appSessionId: 'app-predrain-devin', provider: 'devin', providerSessionId: null, connection, userId: null,
       });
-      assert.equal(devinBlocked, null, 'Devin ждёт перезапуска');
+      assert.ok(devinRun, 'Devin тоже переживает перезапуск — его чат не держим');
+      chatRunRegistry.completeRun('app-predrain-devin', { exitCode: 0 });
 
       const claudeRun = chatRunRegistry.startRun({
         appSessionId: 'app-predrain-claude', provider: 'claude', providerSessionId: null, connection, userId: null,
