@@ -104,7 +104,7 @@ export const voiceTranscriptsDb = {
       const rows = getConnection()
         .prepare(
           `SELECT * FROM voice_transcripts
-           WHERE user_id = ? AND delivered_at IS NULL AND text IS NOT NULL
+           WHERE user_id = ? AND delivered_at IS NULL AND TRIM(text) != ''
              AND (session_id IS NOT NULL OR scope IS NOT NULL)
            ORDER BY created_at`,
         )
