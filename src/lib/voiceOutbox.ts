@@ -1,4 +1,5 @@
 import { transcribeVoice } from './voiceApi';
+import { deliverTranscript, type VoiceTarget } from './voiceDelivery';
 
 /**
  * Голосовые записи, которые не должны пропасть, пока нет связи.
@@ -8,11 +9,16 @@ import { transcribeVoice } from './voiceApi';
  * остановки собирается в одну запись и лежит в очереди, пока сервер не принял
  * её. Принял - сервер сам кладёт её в архив и в Telegram (см. AGENTS.md,
  * «Архив голосовых записей»), так что из очереди запись можно убирать.
+ *
+ * У каждой записи есть адресат (чат, в котором диктовали) — вместе со звуком
+ * лежит и он: расшифровку очередь отдаёт в `deliverTranscript`, а та кладёт
+ * текст в черновик или очередь отправки нужного чата (12.10.26: текст
+ * 6-минутной диктовки доехал до сервера дважды, а в чат не попал ни разу).
  */
 
 const DB_NAME = 'voice-outbox';
-const CHUNKS = 'chunks'; // { id: `${recId}:${seq}`, recId, seq, at, blob }
-const PENDING = 'pending'; // { id, at, type, blob }
+const CHUNKS = 'chunks'; // { id: `${recId}:${seq}`, recId, seq, at, blob, sessionId?, scope? }
+const PENDING = 'pending'; // { id, at, type, blob, sessionId?, scope?, send? }
 const ORPHAN_AFTER_MS = 30_000;
 const RETRY_EVERY_MS = 30_000;
 const UPLOAD_TIMEOUT_MS = 12 * 60 * 1000;
@@ -57,11 +63,16 @@ export function newRecordingId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-/** Кусок звука - на диск сразу. Сбой хранилища записи не мешает. */
-export async function saveChunk(recId: string, seq: number, blob: Blob): Promise<void> {
+/** Кусок звука - на диск сразу. Адресат пишется с каждым куском: у записи, убитой вместе со страницей, иначе не узнать, какому чату её текст. */
+export async function saveChunk(recId: string, seq: number, blob: Blob, target?: VoiceTarget): Promise<void> {
   try {
     const s = await store(CHUNKS, 'readwrite');
-    await done(s.put({ id: `${recId}:${String(seq).padStart(6, '0')}`, recId, seq, at: Date.now(), blob }));
+    await done(s.put({
+      id: `${recId}:${String(seq).padStart(6, '0')}`,
+      recId, seq, at: Date.now(), blob,
+      sessionId: target?.sessionId ?? null,
+      scope: target?.scope ?? null,
+    }));
   } catch (e) {
     console.warn('[voice-outbox] chunk not saved', e);
   }
@@ -80,7 +91,7 @@ async function dropChunks(recId: string): Promise<void> {
 }
 
 /** Запись остановлена: куски -> одна запись в очереди. Возвращает её номер. */
-export async function sealRecording(recId: string, type: string, fallback: Blob[]): Promise<string | null> {
+export async function sealRecording(recId: string, type: string, fallback: Blob[], target?: VoiceTarget & { send?: boolean }): Promise<string | null> {
   try {
     const rows = await chunksOf(recId);
     // Куски на диске полнее того, что в памяти, только если память подвела;
@@ -93,13 +104,35 @@ export async function sealRecording(recId: string, type: string, fallback: Blob[
       await dropChunks(recId);
       return null;
     }
+    // Адресат с кусков переживает смерть страницы; явный target — свежее.
+    const fromChunk = rows.find((r) => (r as { sessionId?: string | null }).sessionId || (r as { scope?: string | null }).scope) as
+      { sessionId?: string | null; scope?: string | null } | undefined;
     const s = await store(PENDING, 'readwrite');
-    await done(s.put({ id: recId, at: Date.now(), type, blob }));
+    await done(s.put({
+      id: recId, at: Date.now(), type, blob,
+      sessionId: target?.sessionId ?? fromChunk?.sessionId ?? null,
+      scope: target?.scope ?? fromChunk?.scope ?? null,
+      send: target?.send ?? false,
+    }));
     await dropChunks(recId);
     return recId;
   } catch (e) {
     console.warn('[voice-outbox] could not seal recording', e);
     return null;
+  }
+}
+
+/** Намерение «отправить сразу» может появиться уже после упаковки (Enter, пока идёт расшифровка) — догоняем запись в очереди. */
+export async function updatePendingSend(id: string, send: boolean): Promise<void> {
+  try {
+    const s = await store(PENDING, 'readwrite');
+    const row = (await done(s.get(id))) as { send?: boolean } | undefined;
+    if (row) {
+      row.send = send;
+      await done(s.put(row));
+    }
+  } catch (e) {
+    console.warn('[voice-outbox] could not update send flag', e);
   }
 }
 
@@ -151,23 +184,39 @@ async function adoptOrphans(): Promise<void> {
   }
 }
 
-/** Отправить всё, что лежит в очереди. Сервер сам расшифрует и положит в Telegram. */
+/** Отправить всё, что лежит в очереди. Сервер сам расшифрует и положит в Telegram; текст мы теперь сами доводим до чата. */
 export async function flushOutbox(): Promise<void> {
   if (flushing || typeof indexedDB === 'undefined') return;
   flushing = true;
   try {
     await adoptOrphans();
     const s = await store(PENDING, 'readonly');
-    const items = (await done(s.getAll())) as { id: string; at: number; type: string; blob: Blob }[];
+    const items = (await done(s.getAll())) as { id: string; at: number; type: string; blob: Blob; sessionId?: string | null; scope?: string | null; send?: boolean }[];
     for (const item of items.sort((a, b) => a.at - b.at)) {
       if (navigator.onLine === false) break;
       if (uploadingNow.has(item.id)) continue;
       const abort = new AbortController();
       const timeout = setTimeout(() => abort.abort(), UPLOAD_TIMEOUT_MS);
       try {
-        const res = await transcribeVoice(item.blob, `recording.${extOf(item.type)}`, abort.signal);
+        const res = await transcribeVoice(item.blob, `recording.${extOf(item.type)}`, abort.signal, {
+          recId: item.id,
+          sessionId: item.sessionId,
+          scope: item.scope,
+          send: item.send,
+        });
         // Любой ответ сервера, кроме обрыва на пути, значит: запись принята.
         if (isConnectionFailure(null, res)) break;
+        if (res.ok) {
+          try {
+            const data = (await res.json()) as { text?: unknown };
+            const text = String(data?.text || '').trim();
+            if (text) {
+              deliverTranscript({ recId: item.id, sessionId: item.sessionId, scope: item.scope, text, send: item.send });
+            }
+          } catch {
+            /* ответ не разобрался — текст лежит в серверном инбоксе, дотащит syncServerInbox */
+          }
+        }
         await removePending(item.id);
       } catch (e) {
         if (isConnectionFailure(e)) break; // связи нет - остальные подождут

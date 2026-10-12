@@ -3,16 +3,36 @@ import { Readable } from 'node:stream';
 
 import express from 'express';
 
+import type { StoredVoiceTranscript, VoiceTranscriptTarget } from '@/modules/database/index.js';
+import { getRequestRuntimeContext } from '@/shared/request-context.js';
 import type { VoiceRequestOverrides, VoiceService, VoiceServiceResult } from '@/shared/types.js';
 import { asyncHandler } from '@/shared/utils.js';
 
 import type { AudioArchiveService } from './audio-archive.service.js';
+
+/**
+ * The slice of the voice-transcripts repository the routes use. Kept as a
+ * dependency parameter (not a direct import) so route tests can stub it and
+ * the router stays transport-only, the same discipline as `audioArchive`.
+ */
+type VoiceTranscriptsRepository = {
+  get(recId: string, userId: number): StoredVoiceTranscript | null;
+  upsertReceived(target: VoiceTranscriptTarget, userId: number): void;
+  setText(recId: string, userId: number, text: string): void;
+  listUndelivered(userId: number): StoredVoiceTranscript[];
+  markDelivered(recId: string, userId: number): void;
+};
 
 type VoiceRouterDependencies = {
   voiceService: VoiceService;
   parseAudioUpload: express.RequestHandler;
   /** Необязательная: не задана — копии записей никуда не уходят. */
   audioArchive?: AudioArchiveService;
+  /**
+   * Server-side transcript inbox + upload dedupe. Optional so instances
+   * without a database keep the old stateless behaviour.
+   */
+  transcripts?: VoiceTranscriptsRepository;
 };
 
 function readHeaderValue(value: string | string[] | undefined): string | undefined {
@@ -44,6 +64,22 @@ function sendFailure<TValue>(
 }
 
 /**
+ * Whose transcript row this is. Read at the top of the handler - the multer
+ * callbacks below run outside the request's async context, the same trap
+ * `mayArchiveCurrentRequest` documents. Single-tenant instances carry no
+ * user id in the context and share the `0` bucket.
+ */
+function readRequestUserId(): number {
+  const userId = Number(getRequestRuntimeContext()?.userId);
+  return Number.isFinite(userId) ? userId : 0;
+}
+
+function readField(body: unknown, name: string): string {
+  const value = (body as Record<string, unknown> | undefined)?.[name];
+  return typeof value === 'string' ? value.slice(0, 200) : '';
+}
+
+/**
  * Creates the transport-only router used by the Voice composition root. It is
  * exported for Voice route tests; other modules consume only the composed
  * router exposed from the Voice barrel.
@@ -67,6 +103,7 @@ export function createVoiceRouter(dependencies: VoiceRouterDependencies): expres
     const archive = dependencies.audioArchive?.mayArchiveCurrentRequest()
       ? dependencies.audioArchive
       : undefined;
+    const userId = readRequestUserId();
 
     dependencies.parseAudioUpload(request, response, (uploadError?: unknown) => {
       if (uploadError) {
@@ -81,6 +118,28 @@ export function createVoiceRouter(dependencies: VoiceRouterDependencies): expres
         if (!request.file) {
           response.status(400).json({ error: 'No audio uploaded' });
           return;
+        }
+
+        // Приём + дедуп по номеру записи: телефон шлёт её повторно, пока не
+        // увидел ответ, и повтор уже расшифрованной записи не должен плодить
+        // второй файл в архиве и второе голосовое в Telegram.
+        const recId = readField(request.body, 'clientRecId');
+        const transcripts = dependencies.transcripts;
+        if (recId && transcripts) {
+          const existing = transcripts.get(recId, userId);
+          if (existing?.text != null) {
+            response.json({ text: existing.text, duplicate: true });
+            return;
+          }
+          transcripts.upsertReceived(
+            {
+              recId,
+              sessionId: readField(request.body, 'targetSession') || null,
+              scope: readField(request.body, 'targetScope') || null,
+              send: readField(request.body, 'sendIntent') === '1',
+            },
+            userId,
+          );
         }
 
         const audio = {
@@ -109,6 +168,12 @@ export function createVoiceRouter(dependencies: VoiceRouterDependencies): expres
         // пользователю ответа, который уже готов.
         void archive?.publishOutcome(kept, result.ok ? { text: result.value.text } : { error: result.error });
 
+        if (result.ok && recId && transcripts) {
+          // Текст лежит на сервере до тех пор, пока клиент не доложит, что
+          // положил его в чат, — закрытая в полёте страница ничего не теряет.
+          transcripts.setText(recId, userId, result.value.text);
+        }
+
         if (sendFailure(response, result)) {
           return;
         }
@@ -116,6 +181,26 @@ export function createVoiceRouter(dependencies: VoiceRouterDependencies): expres
         response.json(result.value);
       })().catch(next);
     });
+  });
+
+  // Расшифровки, до которых ответ не доехал (страница была закрыта, чат
+  // сменился, телефон почистили): клиент забирает список и раскладывает по
+  // чатам, подтверждая каждую через /transcripts/delivered.
+  router.get('/transcripts/pending', (request, response) => {
+    const transcripts = dependencies.transcripts;
+    if (!transcripts) {
+      response.json({ items: [] });
+      return;
+    }
+    response.json({ items: transcripts.listUndelivered(readRequestUserId()) });
+  });
+
+  router.post('/transcripts/delivered', (request, response) => {
+    const recId = readField(request.body, 'recId');
+    if (recId) {
+      dependencies.transcripts?.markDelivered(recId, readRequestUserId());
+    }
+    response.json({ ok: true });
   });
 
   router.post('/tts', asyncHandler(async (request, response) => {

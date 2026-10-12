@@ -3,6 +3,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { authenticatedFetch } from '../../../utils/api';
 import { transcribeVoice } from '../../../lib/voiceApi';
 import {
+  acknowledgeTranscript,
+  deliverTranscript,
+  registerVoiceInsert,
+  startServerInboxSync,
+  type VoiceTarget,
+} from '../../../lib/voiceDelivery';
+import {
   flushOutbox,
   isConnectionFailure,
   markRecordingActive,
@@ -11,6 +18,7 @@ import {
   saveChunk,
   sealRecording,
   startOutboxFlush,
+  updatePendingSend,
   uploadingNow,
 } from '../../../lib/voiceOutbox';
 
@@ -102,10 +110,15 @@ async function holdScreenAwake(): Promise<WakeLockSentinelLike | null> {
  * Push-to-talk dictation. Records the mic, uploads to /api/voice/transcribe
  * (an OpenAI-compatible speech-to-text backend via the Express proxy), and
  * returns the transcript through onTranscript.
+ *
+ * `target` — чат, в котором диктовали: с ним расшифровка дойдёт до его
+ * черновика/очереди, даже если человек уже перешёл в другой чат или закрыл
+ * сайт. Без него (терминал) поведение прежнее: текст только в живое поле.
  */
 export function useVoiceInput(
   onTranscript: (text: string, send?: boolean) => void,
   onError?: (msg: string) => void,
+  target?: VoiceTarget,
 ) {
   const [state, setState] = useState<VoiceInputState>('idle');
   // Захват приостановлен системой (iOS глушит микрофон в фоне): запись «идёт»,
@@ -131,6 +144,14 @@ export function useVoiceInput(
   const pausedMsRef = useRef(0);
   const pauseSinceRef = useRef<number | null>(null);
   const silenceWatchRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Куда диктовали эту запись: читается один раз при старте — переход в другой
+  // чат во время записи/расшифровки не должен переписывать адресат.
+  const targetRef = useRef(target);
+  targetRef.current = target;
+  const recordingTargetRef = useRef<VoiceTarget | undefined>(undefined);
+  // Номер записи в очереди телефона — нужен requestSend, чтобы догнать флаг
+  // «отправить сразу», выставленный уже после упаковки.
+  const pendingIdRef = useRef<string | null>(null);
 
   const releaseScreen = () => {
     const lock = wakeLockRef.current;
@@ -143,10 +164,15 @@ export function useVoiceInput(
     streamRef.current = null;
   };
 
+  // Живое поле регистрирует свою область: расшифровка этой записи попадёт в
+  // него напрямую, а области других чатов — в их черновики и очередь отправки.
+  useEffect(() => registerVoiceInsert(target?.scope, onTranscript), [target?.scope, onTranscript]);
+
   // Stop the mic if the component unmounts mid-recording.
   useEffect(() => {
     cancelledRef.current = false;
     startOutboxFlush();
+    startServerInboxSync();
     // Wake lock снимается системой, когда вкладка уходит в фон; вернулись во время записи - берём заново.
     const reacquire = () => {
       if (document.visibilityState !== 'visible' || recorderRef.current?.state !== 'recording') return;
@@ -174,10 +200,30 @@ export function useVoiceInput(
     if (startingRef.current || (recorderRef.current && recorderRef.current.state !== 'inactive')) return;
     startingRef.current = true;
     stopRequestedRef.current = false;
+    recordingTargetRef.current = targetRef.current;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
+      // Записи лежат в IndexedDB — просим у браузера статус «не вычищать»:
+      // под давлением памяти iOS и Chrome иначе имеют право стереть очередь.
+      // Вызов из жеста (тап по микрофону) — единственный момент, когда
+      // браузер его принимает молча.
+      void navigator.storage?.persist?.().catch(() => undefined);
+      const getMic = () => navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true },
       });
+      let stream: MediaStream;
+      try {
+        stream = await getMic();
+      } catch (firstError) {
+        const name = (firstError as { name?: string })?.name;
+        // Занятое/залипшее устройство (другое приложение держит микрофон,
+        // системный диалог) — первая попытка отваливается, вторая берёт.
+        // Отказы разрешения не повторяем: они не заживают сами.
+        const final = name === 'NotAllowedError' || name === 'NotFoundError' || name === 'SecurityError';
+        if (final || cancelledRef.current || stopRequestedRef.current) throw firstError;
+        await new Promise((resolve) => setTimeout(resolve, 700));
+        if (cancelledRef.current || stopRequestedRef.current) throw firstError;
+        stream = await getMic();
+      }
       if (cancelledRef.current || stopRequestedRef.current) {
         stream.getTracks().forEach((t) => t.stop());
         return;
@@ -202,7 +248,7 @@ export function useVoiceInput(
       rec.ondataavailable = (e) => {
         if (e.data.size > 0) {
           chunksRef.current.push(e.data);
-          void saveChunk(recId, seq++, e.data);
+          void saveChunk(recId, seq++, e.data, recordingTargetRef.current);
           chunkCountRef.current += 1;
           // Пауза кончилась: досчитываем её в потерянное время и снимаем флаг.
           if (pauseSinceRef.current !== null) {
@@ -270,7 +316,12 @@ export function useVoiceInput(
         const durMs = Date.now() - startedAtRef.current;
         const lostMs = pausedMsRef.current;
         // Запись попадает в очередь на телефоне ДО отправки: пока сервер не принял, она не пропадёт.
-        const pendingId = await sealRecording(recId, type, chunksRef.current);
+        const pendingId = await sealRecording(recId, type, chunksRef.current, {
+          sessionId: recordingTargetRef.current?.sessionId ?? null,
+          scope: recordingTargetRef.current?.scope ?? null,
+          send: sendRef.current,
+        });
+        pendingIdRef.current = pendingId;
         if (cancelledRef.current) {
           // Экран ушёл с записи (смена чата, закрытие): ждать ответа некому, очередь дошлёт сама.
           if (pendingId) void flushOutbox();
@@ -301,7 +352,12 @@ export function useVoiceInput(
           const ext = type.includes('mp4') ? 'm4a' : type.includes('ogg') ? 'ogg' : 'webm';
           let res: Response;
           try {
-            res = await transcribeVoice(blob, `recording.${ext}`, abort.signal);
+            res = await transcribeVoice(blob, `recording.${ext}`, abort.signal, {
+              recId,
+              sessionId: recordingTargetRef.current?.sessionId,
+              scope: recordingTargetRef.current?.scope,
+              send: sendRef.current,
+            });
           } catch (e) {
             keptInQueue = isConnectionFailure(e);
             throw e;
@@ -311,15 +367,27 @@ export function useVoiceInput(
           else if (pendingId) await removePending(pendingId);
           if (!res.ok) throw new Error(`transcribe ${res.status}`);
           const data = await res.json();
-          if (cancelledRef.current) return;
           const text = String(data?.text || '').trim();
           // The send intent is read only now, not at stop: Enter pressed while the
           // transcript is still on its way (requestSend) must count too.
           const shouldSend = sendRef.current;
           sendRef.current = false;
           reportVoiceProbe({ outcome: text ? 'sent' : 'no-speech', durMs, chunks: chunkCountRef.current, bytes: blob.size, lostMs, mime: type });
-          if (text) onTranscript(text, shouldSend);
-          else onError?.('No speech detected');
+          // Текст идёт в чат, где диктовали, — в живое поле, в черновик или в
+          // очередь отправки, по месту. Доставка ДО проверки cancelledRef: уход
+          // со страницы во время расшифровки больше не выбрасывает текст.
+          if (text) {
+            deliverTranscript({
+              recId,
+              sessionId: recordingTargetRef.current?.sessionId,
+              scope: recordingTargetRef.current?.scope,
+              text,
+              send: shouldSend,
+            });
+            acknowledgeTranscript(recId);
+          }
+          if (cancelledRef.current) return;
+          if (!text) onError?.('No speech detected');
           // Часть диктовки iOS проглотил - текст пришёл урезанным. Говорим об
           // этом после вставки текста: он уже в поле, предупреждение объясняет
           // обрыв посередине мысли.
@@ -407,6 +475,9 @@ export function useVoiceInput(
   // soon as it arrives instead of sending the half-empty box right now.
   const requestSend = useCallback(() => {
     sendRef.current = true;
+    // Запись уже в очереди — догоняем флаг и там: если отправка уйдёт досылке,
+    // она тоже узнает про «отправить сразу».
+    if (pendingIdRef.current) void updatePendingSend(pendingIdRef.current, true);
   }, []);
 
   const toggle = useCallback(() => {
