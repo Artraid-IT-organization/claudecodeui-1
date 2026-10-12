@@ -319,6 +319,7 @@ test('ожидание перед выкладкой держит только �
   await withIsolatedDatabase(() => {
     sessionsDb.createAppSession('app-predrain-claude', 'claude', '/workspace/demo');
     sessionsDb.createAppSession('app-predrain-devin', 'devin', '/workspace/demo');
+    sessionsDb.createAppSession('app-predrain-opencode', 'opencode', '/workspace/demo');
     const connection = new FakeConnection();
     const realNow = Date.now;
     let now = realNow();
@@ -328,11 +329,10 @@ test('ожидание перед выкладкой держит только �
       assert.equal(chatRunRegistry.beginPreRestartDrain(), false, 'продление — не новое ожидание');
       assert.equal(chatRunRegistry.isShutdownDraining(), true);
 
-      const devinRun = chatRunRegistry.startRun({
-        appSessionId: 'app-predrain-devin', provider: 'devin', providerSessionId: null, connection, userId: null,
+      const opencodeBlocked = chatRunRegistry.startRun({
+        appSessionId: 'app-predrain-opencode', provider: 'opencode', providerSessionId: null, connection, userId: null,
       });
-      assert.ok(devinRun, 'Devin тоже переживает перезапуск — его чат не держим');
-      chatRunRegistry.completeRun('app-predrain-devin', { exitCode: 0 });
+      assert.equal(opencodeBlocked, null, 'неживучий провайдер ждёт перезапуска');
 
       const claudeRun = chatRunRegistry.startRun({
         appSessionId: 'app-predrain-claude', provider: 'claude', providerSessionId: null, connection, userId: null,
@@ -340,14 +340,22 @@ test('ожидание перед выкладкой держит только �
       assert.ok(claudeRun, 'Claude переживает перезапуск — его чат не держим');
       chatRunRegistry.completeRun('app-predrain-claude', { exitCode: 0 });
 
+      // Devin тоже переживает: ход держит devin-acp-supervisor, новый сервер
+      // подключается к его сокету обратно (isRestartSafeProvider).
+      const devinRun = chatRunRegistry.startRun({
+        appSessionId: 'app-predrain-devin', provider: 'devin', providerSessionId: null, connection, userId: null,
+      });
+      assert.ok(devinRun, 'Devin переживает перезапуск через супервизора — его чат не держим');
+      chatRunRegistry.completeRun('app-predrain-devin', { exitCode: 0 });
+
       // Скрипт выкладки оборвался и больше не продлевает аренду.
       now += 121_000;
       assert.equal(chatRunRegistry.isShutdownDraining(), false);
-      const devinAfter = chatRunRegistry.startRun({
-        appSessionId: 'app-predrain-devin', provider: 'devin', providerSessionId: null, connection, userId: null,
+      const opencodeAfter = chatRunRegistry.startRun({
+        appSessionId: 'app-predrain-opencode', provider: 'opencode', providerSessionId: null, connection, userId: null,
       });
-      assert.ok(devinAfter, 'вход открылся сам');
-      chatRunRegistry.completeRun('app-predrain-devin', { exitCode: 0 });
+      assert.ok(opencodeAfter, 'вход открылся сам');
+      chatRunRegistry.completeRun('app-predrain-opencode', { exitCode: 0 });
     } finally {
       Date.now = realNow;
     }
