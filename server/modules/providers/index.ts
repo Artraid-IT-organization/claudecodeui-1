@@ -20,6 +20,9 @@ export { getLiveLimits, recordRateLimitEvent } from './services/usage-limits.sto
 // providerModelsService: used by Commands to list models and resolve the active session model.
 export { providerModelsService } from './services/provider-models.service.js';
 
+// sessionsService: модуль обновлений (updates) создаёт через него чат-разбор.
+export { sessionsService } from './services/sessions.service.js';
+
 export { initializeSessionsWatcher } from './services/sessions-watcher.service.js';
 export { closeSessionsWatcher } from './services/sessions-watcher.service.js';
 export { broadcastSessionUpserted } from './services/sessions-watcher.service.js';

@@ -2,6 +2,7 @@ import { Settings, ArrowUpCircle, AlertTriangle, ArrowLeftRight } from 'lucide-r
 import type { TFunction } from 'i18next';
 
 import type { ReleaseInfo } from '../../../../shared/types';
+import ServerUpdateSection from '../../../updates/ServerUpdateSection';
 import SidebarAccountSwitcher from './SidebarAccountSwitcher';
 
 type SidebarFooterProps = {
@@ -109,6 +110,10 @@ export default function SidebarFooter({
           </div>
         </>
       )}
+
+      {/* Пул изменений с другого сервера — плашка «Обновить». Сама решает,
+          рисовать ли что-то (нет обновления или фича не подключена — пусто). */}
+      <ServerUpdateSection />
 
       {/* Settings */}
       <div className="nav-divider" />
