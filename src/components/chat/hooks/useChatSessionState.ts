@@ -159,6 +159,7 @@ export function useChatSessionState({
   // Запрос истории упал (обрыв связи, перезапуск сайта). Без этого признака
   // лента рисовала «Продолжить разговор», будто чат пуст (Егор, 15.09.26).
   const [historyLoadError, setHistoryLoadError] = useState(false);
+  const [historyLoadErrorKind, setHistoryLoadErrorKind] = useState<string | null>(null);
   const [historyRetryTick, setHistoryRetryTick] = useState(0);
   const historyRetryAttemptsRef = useRef(0);
   // Переписка чата не сохранилась (первый ход оборвался перезапуском сайта):
@@ -1014,9 +1015,11 @@ export function useChatSessionState({
       if (activeSessionIdRef.current === selectedSessionId) {
         if (slot?.status === 'error') {
           setHistoryLoadError(true);
+          setHistoryLoadErrorKind(slot.errorKind ?? null);
         } else if (slot) {
           historyRetryAttemptsRef.current = 0;
           setHistoryLoadError(false);
+          setHistoryLoadErrorKind(null);
           setTranscriptMissing(slot.transcriptMissing);
         }
       }
@@ -1386,6 +1389,7 @@ export function useChatSessionState({
     requestLatestMessages,
     loadOlderMessagesNow,
     historyLoadError,
+    historyLoadErrorKind,
     retryHistoryLoad,
     transcriptMissing,
     setTopSentinel,

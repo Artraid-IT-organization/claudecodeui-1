@@ -2,6 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createProviderModelsService } from '@/modules/providers/services/provider-models.service.js';
+import {
+  applyDevinModelAllowlistToCatalog,
+  clampDevinModelForUser,
+  devinModelAllowlistForUser,
+} from '@/modules/providers/services/devin-model-policy.js';
 import type {
   CustomProviderModelInput,
   CustomProviderModelRecord,
@@ -22,10 +27,11 @@ const createCurrentActiveModel = (model: string): ProviderCurrentActiveModel => 
 const createSessionStore = (
   rows: Record<string, string | null> = {},
   efforts: Record<string, string | null> = {},
+  owners: Record<string, number> = {},
 ) => {
   const sessions = new Map(Object.entries(rows).map(([sessionId, model]) => [
     sessionId,
-    { model, effort: efforts[sessionId] ?? null },
+    { model, effort: efforts[sessionId] ?? null, initiated_by_user_id: owners[sessionId] ?? null },
   ]));
   return {
     sessions,
@@ -350,4 +356,98 @@ test('resolveResumeModel never consults provider-global state', async () => {
 
   assert.equal(model, 'gpt-5.5');
   assert.equal(providerLookups, 0);
+});
+
+
+test('devinModelAllowlistForUser restricts only the listed accounts', () => {
+  assert.deepEqual([...devinModelAllowlistForUser(110) ?? []].sort(), [
+    'swe-2-high',
+    'swe-2-max',
+    'swe-2-medium',
+  ]);
+  assert.equal(devinModelAllowlistForUser(1), null);
+  assert.equal(devinModelAllowlistForUser('110') !== null, true);
+  assert.equal(devinModelAllowlistForUser(null), null);
+});
+
+test('clampDevinModelForUser swaps disallowed models for the restricted default', () => {
+  assert.equal(clampDevinModelForUser('devin', 110, 'swe-2-max'), 'swe-2-max');
+  assert.equal(clampDevinModelForUser('devin', 110, 'swe-1.7'), 'swe-2-high');
+  assert.equal(clampDevinModelForUser('devin', 110, undefined), 'swe-2-high');
+  assert.equal(clampDevinModelForUser('devin', 1, 'swe-1.7'), 'swe-1.7');
+  assert.equal(clampDevinModelForUser('codex', 110, 'gpt-5.5'), 'gpt-5.5');
+});
+
+test('applyDevinModelAllowlistToCatalog filters the picker down to the allowlist', () => {
+  const catalog: ProviderModelsDefinition = {
+    OPTIONS: [
+      { value: 'swe-2-high', label: 'High' },
+      { value: 'swe-2-medium', label: 'SWE Medium' },
+      { value: 'swe-2-max', label: 'Max' },
+      { value: 'swe-1.7', label: 'SWE 1.7' },
+      { value: 'adaptive', label: 'Adaptive' },
+    ],
+    DEFAULT: 'adaptive',
+  };
+
+  const restricted = applyDevinModelAllowlistToCatalog('devin', 110, catalog);
+  assert.deepEqual(restricted.OPTIONS.map((option) => option.value), [
+    'swe-2-high',
+    'swe-2-medium',
+    'swe-2-max',
+  ]);
+  assert.equal(restricted.DEFAULT, 'swe-2-high');
+
+  const unrestricted = applyDevinModelAllowlistToCatalog('devin', 1, catalog);
+  assert.equal(unrestricted.OPTIONS.length, 5);
+  assert.equal(unrestricted.DEFAULT, 'adaptive');
+});
+
+test('setSessionModel clamps a disallowed model on a restricted owner session', () => {
+  const sessions = createSessionStore({ 'session-110': null }, {}, { 'session-110': 110 });
+  const { service } = createTestService({ sessions });
+
+  const stored = service.setSessionModel('devin', 'session-110', 'swe-1.7');
+
+  assert.equal(stored?.model, 'swe-2-high');
+  assert.equal(sessions.sessions.get('session-110')?.model, 'swe-2-high');
+});
+
+test('setSessionModel keeps the requested model for unrestricted owners', () => {
+  const sessions = createSessionStore({ 'session-1': null }, {}, { 'session-1': 1 });
+  const { service } = createTestService({ sessions });
+
+  const stored = service.setSessionModel('devin', 'session-1', 'swe-1.7');
+
+  assert.equal(stored?.model, 'swe-1.7');
+  assert.equal(sessions.sessions.get('session-1')?.model, 'swe-1.7');
+});
+
+test('resolveResumeModel clamps the recorded model of a restricted owner session', async () => {
+  const { service } = createTestService({
+    sessions: createSessionStore({ 'session-110': 'swe-1.7' }, {}, { 'session-110': 110 }),
+  });
+
+  const model = await service.resolveResumeModel('devin', 'session-110', 'swe-2-max');
+  assert.equal(model, 'swe-2-high');
+});
+
+test('resolveSessionModel clamps the requested model for a restricted caller', async () => {
+  const { service } = createTestService();
+
+  const resolved = await service.resolveSessionModel('devin', {
+    requestedModel: 'swe-1.7',
+    userId: 110,
+  });
+
+  assert.equal(resolved.model, 'swe-2-high');
+});
+
+test('resolveSessionModel clamps the catalog default for a restricted caller', async () => {
+  const { service } = createTestService();
+
+  const resolved = await service.resolveSessionModel('devin', { userId: 110 });
+
+  assert.equal(resolved.model, 'swe-2-high');
+  assert.equal(resolved.source, 'default');
 });

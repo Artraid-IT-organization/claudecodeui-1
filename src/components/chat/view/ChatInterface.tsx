@@ -153,6 +153,7 @@ function ChatInterface({
     requestLatestMessages,
     loadOlderMessagesNow,
     historyLoadError,
+    historyLoadErrorKind,
     retryHistoryLoad,
     transcriptMissing,
     setTopSentinel,
@@ -597,6 +598,7 @@ function ChatInterface({
           onLoadOlderMessages={loadOlderMessagesNow}
           topSentinelRef={setTopSentinel}
           historyLoadError={historyLoadError}
+          historyLoadErrorKind={historyLoadErrorKind}
           onRetryHistoryLoad={retryHistoryLoad}
           transcriptMissing={transcriptMissing}
           totalMessages={totalMessages}

@@ -1,22 +1,66 @@
-import webPush from 'web-push';
+// @ts-expect-error -- у web-push нет объявлений типов (та же ситуация в vapid-keys.service.ts)
+import webPushModule from 'web-push';
 
 import { notificationPreferencesDb, pushSubscriptionsDb, sessionsDb } from '@/modules/database/index.js';
 import { sendDesktopNotification as sendDesktopNotificationToClients } from '@/modules/notifications/services/desktop-notification-clients.service.js';
+import { sendTelegramNotification } from '@/modules/notifications/services/telegram-notification.service.js';
 
-const KIND_TO_PREF_KEY = {
+const webPush = webPushModule as {
+  sendNotification(subscription: unknown, payload: string): Promise<unknown>;
+};
+
+type NotificationKind = 'action_required' | 'stop' | 'error' | 'info' | string;
+type NotificationSeverity = 'info' | 'error' | string;
+
+export type NotificationEvent = {
+  provider: string;
+  sessionId: string | null;
+  kind: NotificationKind;
+  code: string;
+  meta: Record<string, unknown>;
+  severity: NotificationSeverity;
+  requiresUserAction: boolean;
+  dedupeKey: string | null;
+  createdAt: string;
+};
+
+export type NotificationPayload = {
+  title: string;
+  body: string;
+  data: {
+    sessionId: string | null;
+    code: string;
+    provider: string | null;
+    sessionName: string | null;
+    tag: string;
+  };
+};
+
+type NotificationPreferences = {
+  channels?: Record<string, boolean>;
+  events?: { actionRequired?: boolean; stop?: boolean; error?: boolean };
+};
+
+type NotificationChannel = {
+  id: string;
+  isEnabled: (preferences: NotificationPreferences | null | undefined) => boolean;
+  send: (input: { userId: number; event: NotificationEvent; payload: NotificationPayload }) => unknown;
+};
+
+const KIND_TO_PREF_KEY: Record<string, 'actionRequired' | 'stop' | 'error'> = {
   action_required: 'actionRequired',
   stop: 'stop',
   error: 'error'
 };
 
-const PROVIDER_LABELS = {
+const PROVIDER_LABELS: Record<string, string> = {
   claude: 'Claude',
   cursor: 'Cursor',
   codex: 'Codex',
   system: 'System'
 };
 
-const recentEventKeys = new Map();
+const recentEventKeys = new Map<string, number>();
 const DEDUPE_WINDOW_MS = 20000;
 
 const cleanupOldEventKeys = () => {
@@ -28,14 +72,14 @@ const cleanupOldEventKeys = () => {
   }
 };
 
-function isNotificationEventEnabled(preferences, event) {
+function isNotificationEventEnabled(preferences: NotificationPreferences | null | undefined, event: NotificationEvent): boolean {
   const prefEventKey = KIND_TO_PREF_KEY[event.kind];
   const eventEnabled = prefEventKey ? Boolean(preferences?.events?.[prefEventKey]) : true;
 
   return eventEnabled;
 }
 
-function isDuplicate(event) {
+function isDuplicate(event: NotificationEvent): boolean {
   cleanupOldEventKeys();
   const key = event.dedupeKey || `${event.provider}:${event.kind || 'info'}:${event.code || 'generic'}:${event.sessionId || 'none'}`;
   if (recentEventKeys.has(key)) {
@@ -54,7 +98,16 @@ function createNotificationEvent({
   severity = 'info',
   dedupeKey = null,
   requiresUserAction = false
-}) {
+}: {
+  provider: string;
+  sessionId?: string | null;
+  kind?: NotificationKind;
+  code?: string;
+  meta?: Record<string, unknown>;
+  severity?: NotificationSeverity;
+  dedupeKey?: string | null;
+  requiresUserAction?: boolean;
+}): NotificationEvent {
   return {
     provider,
     sessionId,
@@ -68,13 +121,13 @@ function createNotificationEvent({
   };
 }
 
-function normalizeErrorMessage(error) {
+function normalizeErrorMessage(error: unknown): string {
   if (typeof error === 'string') {
     return error;
   }
 
-  if (error && typeof error.message === 'string') {
-    return error.message;
+  if (error && typeof (error as Error).message === 'string') {
+    return (error as Error).message;
   }
 
   if (error == null) {
@@ -84,7 +137,7 @@ function normalizeErrorMessage(error) {
   return String(error);
 }
 
-function normalizeSessionName(sessionName) {
+function normalizeSessionName(sessionName: unknown): string | null {
   if (typeof sessionName !== 'string') {
     return null;
   }
@@ -97,11 +150,11 @@ function normalizeSessionName(sessionName) {
   return normalized.length > 80 ? `${normalized.slice(0, 77)}...` : normalized;
 }
 
-function rowMatchesProvider(row, provider) {
-  return row && (!provider || row.provider === provider);
+function rowMatchesProvider(row: { provider?: string } | null | undefined, provider: string | undefined): boolean {
+  return Boolean(row) && (!provider || row!.provider === provider);
 }
 
-function resolveSessionRow(sessionId, provider) {
+function resolveSessionRow(sessionId: string | null, provider: string | undefined) {
   if (!sessionId) {
     return null;
   }
@@ -119,7 +172,11 @@ function resolveSessionRow(sessionId, provider) {
   return null;
 }
 
-function normalizeNotificationSession(event) {
+// Часть вызывающих (Settings, тесты) передаёт событие не целиком — поля
+// подхватываются значениями по умолчанию, как это было в JS-версии.
+type NotificationEventInput = Partial<NotificationEvent>;
+
+function normalizeNotificationSession<T extends NotificationEventInput>(event: T): T {
   if (!event?.sessionId || !event.provider || event.provider === 'system') {
     return event;
   }
@@ -135,7 +192,7 @@ function normalizeNotificationSession(event) {
   };
 }
 
-function resolveSessionName(event) {
+function resolveSessionName(event: NotificationEventInput): string | null {
   const explicitSessionName = normalizeSessionName(event.meta?.sessionName);
   if (explicitSessionName) {
     return explicitSessionName;
@@ -148,28 +205,29 @@ function resolveSessionName(event) {
   return normalizeSessionName(sessionsDb.getSessionName(event.sessionId, event.provider));
 }
 
-function buildNotificationPayload(event) {
+function buildNotificationPayload(event: NotificationEventInput): NotificationPayload {
   const normalizedEvent = normalizeNotificationSession(event);
-  const CODE_MAP = {
-    'permission.required': normalizedEvent.meta?.toolName
-      ? `Action Required: Tool "${normalizedEvent.meta.toolName}" needs approval`
+  const meta = normalizedEvent.meta || {};
+  const CODE_MAP: Record<string, string> = {
+    'permission.required': meta.toolName
+      ? `Action Required: Tool "${meta.toolName}" needs approval`
       : 'Action Required: A tool needs your approval',
-    'run.stopped': normalizedEvent.meta?.stopReason || 'Run Stopped: The run has stopped',
+    'run.stopped': (meta.stopReason as string) || 'Run Stopped: The run has stopped',
     'run.background_completed': 'Background work finished',
-    'run.failed': normalizedEvent.meta?.error ? `Run Failed: ${normalizedEvent.meta.error}` : 'Run Failed: The run encountered an error',
-    'agent.notification': normalizedEvent.meta?.message ? String(normalizedEvent.meta.message) : 'You have a new notification',
+    'run.failed': meta.error ? `Run Failed: ${meta.error}` : 'Run Failed: The run encountered an error',
+    'agent.notification': meta.message ? String(meta.message) : 'You have a new notification',
     'push.enabled': 'Push notifications are now enabled!'
   };
-  const providerLabel = PROVIDER_LABELS[normalizedEvent.provider] || 'Assistant';
+  const providerLabel = (normalizedEvent.provider && PROVIDER_LABELS[normalizedEvent.provider]) || 'Assistant';
   const sessionName = resolveSessionName(normalizedEvent);
-  const message = CODE_MAP[normalizedEvent.code] || 'You have a new notification';
+  const message = (normalizedEvent.code && CODE_MAP[normalizedEvent.code]) || 'You have a new notification';
 
   return {
     title: sessionName || 'CloudCLI',
     body: `${providerLabel}: ${message}`,
     data: {
       sessionId: normalizedEvent.sessionId || null,
-      code: normalizedEvent.code,
+      code: normalizedEvent.code || 'generic.info',
       provider: normalizedEvent.provider || null,
       sessionName,
       tag: `${normalizedEvent.provider || 'assistant'}:${normalizedEvent.sessionId || 'none'}:${normalizedEvent.code}`
@@ -177,7 +235,7 @@ function buildNotificationPayload(event) {
   };
 }
 
-function sendWebPushPayload(userId, payload) {
+function sendWebPushPayload(userId: number, payload: NotificationPayload): Promise<void> {
   const subscriptions = pushSubscriptionsDb.getSubscriptions(userId);
   if (!subscriptions.length) return Promise.resolve();
 
@@ -198,7 +256,7 @@ function sendWebPushPayload(userId, payload) {
   ).then((results) => {
     results.forEach((result, index) => {
       if (result.status === 'rejected') {
-        const statusCode = result.reason?.statusCode;
+        const statusCode = (result.reason as { statusCode?: number })?.statusCode;
         if (statusCode === 410 || statusCode === 404) {
           pushSubscriptionsDb.removeSubscription(subscriptions[index].endpoint);
         }
@@ -207,7 +265,7 @@ function sendWebPushPayload(userId, payload) {
   });
 }
 
-const notificationChannels = [
+const notificationChannels: NotificationChannel[] = [
   {
     id: 'webPush',
     // TODO: Web push still uses push_subscriptions. Do not remove that table until
@@ -219,15 +277,22 @@ const notificationChannels = [
     id: 'desktop',
     isEnabled: (preferences) => Boolean(preferences?.channels?.desktop),
     send: ({ userId, payload }) => sendDesktopNotificationToClients(userId, payload)
+  },
+  {
+    // Telegram-канал: адресаты — notification_channel_endpoints (channel='telegram'),
+    // привязка через одноразовый код в боте + ~/scripts/tg_router.py.
+    id: 'telegram',
+    isEnabled: (preferences) => Boolean(preferences?.channels?.telegram),
+    send: ({ userId, payload }) => sendTelegramNotification({ userId, payload })
   }
 ];
 
-function notifyUserIfEnabled({ userId, event }) {
-  if (!userId || !event) {
+function notifyUserIfEnabled({ userId, event }: { userId: number | null | undefined; event: unknown }): void {
+  if (!userId || !event || typeof event !== 'object') {
     return;
   }
 
-  const normalizedEvent = normalizeNotificationSession(event);
+  const normalizedEvent = normalizeNotificationSession(event as NotificationEvent);
   const preferences = notificationPreferencesDb.getPreferences(userId);
   if (!isNotificationEventEnabled(preferences, normalizedEvent)) {
     return;
@@ -247,7 +312,13 @@ function notifyUserIfEnabled({ userId, event }) {
   }
 }
 
-function notifyRunStopped({ userId, provider, sessionId = null, stopReason = 'completed', sessionName = null }) {
+function notifyRunStopped({ userId, provider, sessionId = null, stopReason = 'completed', sessionName = null }: {
+  userId: number | null | undefined;
+  provider: string;
+  sessionId?: string | null;
+  stopReason?: string;
+  sessionName?: string | null;
+}): void {
   notifyUserIfEnabled({
     userId,
     event: createNotificationEvent({
@@ -269,7 +340,12 @@ function notifyRunStopped({ userId, provider, sessionId = null, stopReason = 'co
  * than needing a new opt-in that would default to off. No explicit dedupeKey, so
  * the default composite key collapses repeats inside the dedupe window.
  */
-function notifyBackgroundWorkCompleted({ userId, provider, sessionId = null, sessionName = null }) {
+function notifyBackgroundWorkCompleted({ userId, provider, sessionId = null, sessionName = null }: {
+  userId: number | null | undefined;
+  provider: string;
+  sessionId?: string | null;
+  sessionName?: string | null;
+}): void {
   notifyUserIfEnabled({
     userId,
     event: createNotificationEvent({
@@ -283,7 +359,13 @@ function notifyBackgroundWorkCompleted({ userId, provider, sessionId = null, ses
   });
 }
 
-function notifyRunFailed({ userId, provider, sessionId = null, error, sessionName = null }) {
+function notifyRunFailed({ userId, provider, sessionId = null, error, sessionName = null }: {
+  userId: number | null | undefined;
+  provider: string;
+  sessionId?: string | null;
+  error: unknown;
+  sessionName?: string | null;
+}): void {
   const errorMessage = normalizeErrorMessage(error);
 
   notifyUserIfEnabled({
