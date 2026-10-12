@@ -21,3 +21,5 @@ export { sessionsDb } from '@/modules/database/repositories/sessions.db.js';
 export { promptPresetsDb } from '@/modules/database/repositories/prompt-presets.js';
 export { userDb } from '@/modules/database/repositories/users.js';
 export { vapidKeysDb } from '@/modules/database/repositories/vapid-keys.js';
+export { voiceTranscriptsDb } from '@/modules/database/repositories/voice-transcripts.js';
+export type { StoredVoiceTranscript, VoiceTranscriptTarget } from '@/modules/database/repositories/voice-transcripts.js';

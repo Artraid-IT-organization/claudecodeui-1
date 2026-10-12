@@ -193,6 +193,36 @@ CREATE TABLE IF NOT EXISTS app_config (
 `;
 
 /**
+ * Server-side copy of voice transcripts awaiting delivery to a chat.
+ *
+ * The phone keeps recordings in an IndexedDB outbox until the server answers,
+ * but that only protects the AUDIO: a transcript returned while the tab was
+ * closed, or after the user switched chats, used to be dropped on the floor
+ * (12.10.26 - a 6-minute dictation was transcribed, archived and sent to
+ * Telegram twice, yet never appeared in the chat). Rows are written when the
+ * upload arrives (`text` stays NULL until transcription succeeds) and are
+ * deleted from the pending list only after the client reports the transcript
+ * reached its draft or send queue. `rec_id` also dedupes outbox retries: a
+ * repeat upload of an already-transcribed recording returns the stored text
+ * instead of re-archiving and re-transcribing.
+ */
+export const VOICE_TRANSCRIPTS_TABLE_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS voice_transcripts (
+    rec_id TEXT NOT NULL,
+    user_id INTEGER NOT NULL DEFAULT 0,
+    session_id TEXT,
+    scope TEXT,
+    send INTEGER NOT NULL DEFAULT 0,
+    text TEXT,
+    created_at INTEGER NOT NULL,
+    delivered_at INTEGER,
+    PRIMARY KEY (rec_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_voice_transcripts_pending
+ON voice_transcripts(user_id, delivered_at);
+`;
+
+/**
  * Persistent custom-model library used by the Providers module.
  *
  * Only user-created models are stored here. Predefined models remain source-
@@ -283,6 +313,8 @@ CREATE INDEX IF NOT EXISTS idx_session_ids_lookup ON sessions(session_id);
 ${LAST_SCANNED_AT_SQL}
 
 ${APP_CONFIG_TABLE_SCHEMA_SQL}
+
+${VOICE_TRANSCRIPTS_TABLE_SCHEMA_SQL}
 
 ${PROVIDER_MODELS_TABLE_SCHEMA_SQL}
 CREATE INDEX IF NOT EXISTS idx_provider_models_provider_order

@@ -3,6 +3,7 @@ import fs from 'node:fs';
 
 import multer from 'multer';
 
+import { voiceTranscriptsDb } from '@/modules/database/index.js';
 import { getRequestRuntimeContext } from '@/shared/request-context.js';
 import { OPEN_REGISTRATION, isPlatformOwnerWebUser } from '@/shared/utils.js';
 
@@ -128,4 +129,5 @@ export const voiceRoutes = createVoiceRouter({
   voiceService,
   audioArchive,
   parseAudioUpload: audioUpload.single('audio'),
+  transcripts: voiceTranscriptsDb,
 });

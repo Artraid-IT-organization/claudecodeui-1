@@ -13,6 +13,8 @@ import { useChatRealtimeHandlers } from '../hooks/useChatRealtimeHandlers';
 import { useChatComposerState } from '../hooks/useChatComposerState';
 import { useSessionStore } from '../../../stores/useSessionStore';
 import { authenticatedFetch } from '../../../utils/api';
+import { registerVoiceDispatcher } from '../../../lib/voiceDelivery';
+import { draftScopeFor } from '../utils/chatStorage';
 
 import ChatMessagesPane from './subcomponents/ChatMessagesPane';
 import ChatRequestBar from './subcomponents/ChatRequestBar';
@@ -57,6 +59,13 @@ function ChatInterface({
   const { t } = useTranslation('chat');
 
   const sessionStore = useSessionStore();
+
+  // Диктовка «с отправкой» для чата, который сейчас не открыт: очередь
+  // voiceDelivery отдаёт текст сюда, а chat.send сам лежит до расписки
+  // сервера — итог одинаков при закрытой вкладке и при обрыве сети.
+  useEffect(() => registerVoiceDispatcher((sessionId, text) => {
+    sendMessage({ type: 'chat.send', sessionId, content: text, options: {} });
+  }), [sendMessage]);
   // Keyed by session id, NOT one buffer for the whole component. A client can
   // receive live deltas for more than one session at a time — watching a run
   // started elsewhere (another device, the CLI) while typing in your own is
@@ -500,6 +509,14 @@ function ChatInterface({
     handlePermissionDecision,
   }), [pendingPermissionRequests, handlePermissionDecision]);
 
+  // Чат-адресат надиктованного: область черновика считается ровно так же,
+  // как в useChatComposerState (draftScopeFor), иначе текст попадёт не туда.
+  const voiceSessionId = selectedSession?.id || currentSessionId || null;
+  const voiceTarget = useMemo(() => ({
+    sessionId: voiceSessionId,
+    scope: draftScopeFor(selectedProject?.projectId, voiceSessionId),
+  }), [voiceSessionId, selectedProject?.projectId]);
+
   // A composer pick becomes the default for new chats and, when a session is
   // open, is recorded against that session so reopening it restores this model.
   // «Вернуться сюда» под своим сообщением: сервер останавливает ход, убирает
@@ -758,6 +775,7 @@ function ChatInterface({
           textareaRef={textareaRef}
           input={input}
           onVoiceTranscript={handleVoiceTranscript}
+          voiceTarget={voiceTarget}
           onInputChange={handleInputChange}
           onTextareaClick={handleTextareaClick}
           onTextareaKeyDown={handleKeyDown}
