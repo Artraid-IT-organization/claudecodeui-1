@@ -193,9 +193,7 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 // Public health check endpoint (no authentication required)
 app.get('/health', (req, res) => {
     const activeRuns = chatRunRegistry.listRunningRuns();
-    const restartBlockingRuns = activeRuns.filter(
-        (run) => !chatRunRegistry.isRestartSafeProvider(run.provider),
-    );
+    const restartBlockingRuns = chatRunRegistry.listRestartBlockingRuns();
     res.json({
         status: 'ok',
         timestamp: new Date().toISOString(),
@@ -668,9 +666,7 @@ async function startServer() {
                 const waitingSince = Date.now();
                 let lastProgressLog = 0;
                 while (true) {
-                    const blockingRuns = chatRunRegistry
-                        .listRunningRuns()
-                        .filter((run) => !chatRunRegistry.isRestartSafeProvider(run.provider));
+                    const blockingRuns = chatRunRegistry.listRestartBlockingRuns();
                     if (blockingRuns.length === 0) {
                         break;
                     }
@@ -689,6 +685,16 @@ async function startServer() {
                 }
                 if (lastProgressLog !== 0) {
                     console.log(`[shutdown-drain] активные ходы закончились за ${Math.round((Date.now() - waitingSince) / 1000)} с — перезапускаюсь`);
+                }
+
+                // Ходы, чей prompt так и не доехал до выживающего процесса
+                // (зависшая сборка, поздний SIGTERM), умирают вместе с нами —
+                // их сообщения возвращаем в серверную очередь: обход очередей
+                // после подъёма отправит их заново.
+                try {
+                    chatRunRegistry.requeueUnanchoredRuns();
+                } catch (err) {
+                    console.error('[shutdown-drain] возврат недоставленных сообщений в очередь не удался:', getErrorMessage(err));
                 }
 
                 try {
@@ -723,9 +729,7 @@ async function startServer() {
         // вход снова. Скрипт ждёт draining=true при restartBlockingRuns=0 — это
         // наступит, когда ходы закончатся и придёт следующий сигнал.
         process.on('SIGUSR2', () => {
-            const blocking = chatRunRegistry
-                .listRunningRuns()
-                .filter((run) => !chatRunRegistry.isRestartSafeProvider(run.provider));
+            const blocking = chatRunRegistry.listRestartBlockingRuns();
             if (blocking.length > 0) {
                 // Аренду не выдаём и не продлеваем: выданная сама погаснет за 2 мин.
                 return;

@@ -1151,10 +1151,15 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
       run.usageTimer = setInterval(() => emitDevinTokenBudget(ws, run, sessionId), DEVIN_USAGE_POLL_MS);
       run.usageTimer.unref?.();
 
-      const result = await connection.call('session/prompt', {
+      const promptResult = connection.call('session/prompt', {
         sessionId: run.devinSessionId,
         prompt: [{ type: 'text', text: promptText }],
       });
+      // Кадр prompt уже записан в сокет супервизора: с этого момента ход
+      // переживает перезапуск сайта (promptInFlight не даёт супервизору убрать
+      // агента, новый сервер переподключится и дочитает ответ).
+      options.onPromptAnchored?.();
+      const result = await promptResult;
 
       if (run.usageTimer) {
         clearInterval(run.usageTimer);

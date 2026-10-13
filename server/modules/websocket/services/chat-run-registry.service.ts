@@ -1,6 +1,6 @@
 import path from 'node:path';
 
-import { chatGroupsDb, projectsDb, sessionsDb } from '@/modules/database/index.js';
+import { chatGroupsDb, chatMessageQueueDb, projectsDb, sessionsDb } from '@/modules/database/index.js';
 import { isSurvivorRunning, listSurvivors } from '@/modules/providers/index.js';
 import { generateDisplayName } from '@/modules/projects/index.js';
 import { ChatSessionWriter } from '@/modules/websocket/services/chat-session-writer.service.js';
@@ -26,6 +26,16 @@ type ChatRunStatus = 'running' | 'completed';
  * - `lastSeq` / `events`: the per-run event log. Every live event gets a
  *   monotonically increasing `seq` and is buffered so a reconnecting client
  *   can replay exactly the events it missed via `chat.subscribe`.
+ * - `promptAnchored`: true once the user prompt has been handed to a process
+ *   that survives a web server restart (Devin supervisor saw session/prompt,
+ *   Codex worker launched, Claude CLI produced its first event). Until then
+ *   the run is only bootstrap — a restart kills it together with the accepted
+ *   user message, which is how a fresh chat could end up permanently empty
+ *   (13.10.26: deploy restarted the site 20 s into a Devin session/new, the
+ *   prompt was never sent, the chat opened empty forever).
+ * - `pendingMessage`: the accepted user message kept while the run is
+ *   unanchored, so the shutdown path can push it back onto the durable chat
+ *   queue instead of losing it.
  */
 type ChatRun = {
   appSessionId: string;
@@ -37,6 +47,16 @@ type ChatRun = {
   writer: ChatSessionWriter;
   startedAt: number;
   completedAt: number | null;
+  promptAnchored: boolean;
+  pendingMessage: PendingUserMessage | null;
+};
+
+/** Message accepted from a user, remembered until the provider has it. */
+type PendingUserMessage = {
+  id: string;
+  userId: string | null;
+  content: string;
+  options: Record<string, unknown>;
 };
 
 /**
@@ -53,6 +73,14 @@ const COMPLETED_RUN_RETENTION_MS = 5 * 60 * 1000;
  * REST history refresh, which is always the authoritative source.
  */
 const MAX_BUFFERED_EVENTS_PER_RUN = 5000;
+
+/**
+ * Сколько незаякоренный ход ещё держит перезапуск. Сборка хода в норме —
+ * секунды (spawn + рукопожатие + session/new у Devin ~15–20 с); вышедший за
+ * предел ход считается зависшим: перезапуск больше не ждёт, а сообщение
+ * уходит в очередь при гашении (requeueUnanchoredRuns).
+ */
+const PROMPT_ANCHOR_GRACE_MS = 120_000;
 
 /**
  * Active and recently-completed runs keyed by app session id.
@@ -299,6 +327,7 @@ export const chatRunRegistry = {
     providerSessionId: string | null;
     connection: RealtimeClientConnection;
     userId: string | number | null;
+    pendingMessage?: PendingUserMessage;
   }): ChatRun | null {
     if (!acceptingNewRuns) {
       return null;
@@ -326,6 +355,8 @@ export const chatRunRegistry = {
       writer: null as unknown as ChatSessionWriter,
       startedAt: Date.now(),
       completedAt: null,
+      promptAnchored: false,
+      pendingMessage: input.pendingMessage ?? null,
     };
 
     run.writer = new ChatSessionWriter({
@@ -356,6 +387,7 @@ export const chatRunRegistry = {
     provider: LLMProvider;
     startedAt: number;
     lastSeq: number;
+    promptAnchored: boolean;
   }> {
     const live = Array.from(runs.values())
       .filter((run) => run.status === 'running')
@@ -364,9 +396,86 @@ export const chatRunRegistry = {
         provider: run.provider,
         startedAt: run.startedAt,
         lastSeq: run.lastSeq,
+        promptAnchored: run.promptAnchored,
       }));
     const liveIds = new Set(live.map((run) => run.sessionId));
-    return [...live, ...listSurvivors().filter((run) => !liveIds.has(run.sessionId))] as typeof live;
+    // Агент прошлого сервера — по определению заякорен: его процесс уже
+    // держит ход, иначе супервизор убрал бы его ещё до нашего подъёма.
+    const survivors = listSurvivors()
+      .filter((run) => !liveIds.has(run.sessionId))
+      .map((run) => ({ ...run, promptAnchored: true }));
+    return [...live, ...survivors] as typeof live;
+  },
+
+  /**
+   * Заякорить ход: prompt ушёл выживающему процессу, перезапуск сайта ход
+   * больше не рвёт. Вызывают рантаймы провайдеров в точке передачи prompt;
+   * сверка по объекту хода — протухший вызов уже сменившегося хода не бьёт
+   * по новому.
+   */
+  markRunPromptAnchored(run: ChatRun): void {
+    if (runs.get(run.appSessionId) === run && run.status === 'running') {
+      run.promptAnchored = true;
+    }
+  },
+
+  /**
+   * Ходы, которым перезапуск сайта ещё опасен. Неживучий провайдер мешает до
+   * конца хода, живучий — только пока не заякорен: процесс-держатель уже
+   * поднят, но prompt ему ещё не записан, и смерть сервера сейчас убьёт и
+   * агента, и сообщение человека.
+   *
+   * Щит незаякоренного хода ограничен по времени: если сборка зависла
+   * (например, чат держит замок другой Devin-процесс), сообщение спасает
+   * возврат в очередь при гашении, а выкладка не встаёт навсегда.
+   */
+  listRestartBlockingRuns(): Array<{
+    sessionId: string;
+    provider: LLMProvider;
+    startedAt: number;
+    lastSeq: number;
+    promptAnchored: boolean;
+  }> {
+    return this.listRunningRuns().filter((run) =>
+      !isRestartSafeProvider(run.provider)
+      || (!run.promptAnchored && Date.now() - run.startedAt < PROMPT_ANCHOR_GRACE_MS));
+  },
+
+  /**
+   * Возвращает в серверную очередь сообщения ходов, до агента не доехавшие.
+   * Зовётся на гашении процесса (SIGTERM/SIGINT) — синхронной записью в базу:
+   * после подъёма обход очередей отправит их заново. Заякоренные ходы не
+   * трогаем — их сообщения уже у выживающего процесса.
+   */
+  requeueUnanchoredRuns(): number {
+    let requeued = 0;
+    for (const run of runs.values()) {
+      if (run.status !== 'running' || run.promptAnchored || !run.pendingMessage) {
+        continue;
+      }
+      const pending = run.pendingMessage;
+      run.pendingMessage = null;
+      try {
+        chatMessageQueueDb.pushFront({
+          id: pending.id,
+          sessionId: run.appSessionId,
+          userId: pending.userId,
+          content: pending.content,
+          options: pending.options,
+          createdAt: new Date().toISOString(),
+        });
+        requeued += 1;
+        console.warn(
+          `[shutdown-drain] сообщение ${pending.id} чата ${run.appSessionId} не дошло до агента — вернул в очередь, уйдёт после подъёма`,
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(
+          `[shutdown-drain] не удалось вернуть сообщение ${pending.id} чата ${run.appSessionId} в очередь: ${message}`,
+        );
+      }
+    }
+    return requeued;
   },
 
   /**

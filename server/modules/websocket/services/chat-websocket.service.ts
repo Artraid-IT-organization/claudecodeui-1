@@ -306,6 +306,15 @@ async function handleChatSend(
     providerSessionId: session.provider_session_id,
     connection: ws,
     userId,
+    // Сообщение держим на ходу, пока оно не доехало до агента: сервер,
+    // погибший посреди сборки хода, возвращает его в очередь (requeue),
+    // иначе оно сгорало молча между «принято» и session/prompt.
+    pendingMessage: {
+      id: clientMessageId || `q_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`,
+      userId: userId === null ? null : String(userId),
+      content: command,
+      options: clientOptions,
+    },
   });
 
   if (!run && data.sendNow === true) {
@@ -517,6 +526,11 @@ async function runProviderTurn(input: {
     claudeConfigDir: runtimeContext.claudeConfigDir ?? undefined,
     anthropicApiKey: runtimeContext.anthropicApiKey ?? undefined,
     isolateInheritedClaudeAuth: runtimeContext.isolateInheritedClaudeAuth || undefined,
+    // Рантайм отмечает, когда prompt реально попал к выживающему процессу
+    // (Devin — session/prompt записан в сокет супервизора, Codex — worker
+    // запущен, Claude — первое событие SDK). До якоря ход держит перезапуск,
+    // а при гашении сообщение возвращается в очередь.
+    onPromptAnchored: () => chatRunRegistry.markRunPromptAnchored(run),
   };
 
   try {
@@ -537,6 +551,8 @@ async function runProviderTurn(input: {
       })
       : null;
     if (adopted) {
+      // Сообщение ушло в уже живой выживающий процесс — ход заякорен.
+      chatRunRegistry.markRunPromptAnchored(run);
       console.log(`[Chat] сообщение передано живому процессу чата ${sessionId} (идёт фоновая работа)`);
       await adopted.done;
     } else {
@@ -662,6 +678,15 @@ async function runQueuedChatMessage(
     providerSessionId: session.provider_session_id,
     connection: broadcastConnection(provider),
     userId,
+    // Тот же якорь, что у прямой отправки: снятая с очереди строка уже не в
+    // базе — до доставки prompt агенту её держит ход, а при гашении сервера
+    // вернёт в очередь.
+    pendingMessage: {
+      id: message.id,
+      userId: message.userId === null ? null : String(message.userId),
+      content: message.content,
+      options: (message.options ?? {}) as AnyRecord,
+    },
   });
   if (!run) {
     return false;
