@@ -59,27 +59,32 @@ function currentBundleName(): string | null {
   return script ? (script.getAttribute('src') ?? '').split('/').pop() ?? null : null;
 }
 
-function reloadForBundle(latest: string): void {
+type ReloadGuardStorage = Pick<Storage, 'getItem' | 'setItem'>;
+
+export function claimReloadTarget(storage: ReloadGuardStorage, key: string, target: string): boolean {
   try {
-    if (sessionStorage.getItem(RELOAD_GUARD_KEY) === latest) {
-      return;
+    if (storage.getItem(key) === target) {
+      return false;
     }
-    sessionStorage.setItem(RELOAD_GUARD_KEY, latest);
+    storage.setItem(key, target);
+    return storage.getItem(key) === target;
   } catch {
-    // Приватный режим без хранилища: одна лишняя перезагрузка лучше, чем
-    // застрять на старой сборке.
+    return false;
+  }
+}
+
+function reloadForBundle(latest: string): void {
+  if (!claimReloadTarget(sessionStorage, RELOAD_GUARD_KEY, latest)) {
+    markUpdatePending(latest);
+    return;
   }
   window.location.reload();
 }
 
 function reloadOnceForServiceWorker(): void {
-  try {
-    if (sessionStorage.getItem(SW_RELOAD_GUARD_KEY)) {
-      return;
-    }
-    sessionStorage.setItem(SW_RELOAD_GUARD_KEY, '1');
-  } catch {
-    // см. выше
+  if (!claimReloadTarget(sessionStorage, SW_RELOAD_GUARD_KEY, '1')) {
+    markUpdatePending('service-worker');
+    return;
   }
   window.location.reload();
 }
