@@ -1136,10 +1136,12 @@ export function resolveDevinCliCommand(): string {
  * Devin models the owner allows (Egor, 03.10.26: "only SWE-2, the rest are not allowed").
  * One rule for the picker (devin-models.provider.ts) and for the run itself
  * (devin-runtime.provider.js): anything else would spend the shared Devin quota
- * on models the owner has not approved. Matches swe-2, swe-2-high, swe-2-medium, swe-2-max.
+ * on models the owner has not approved. Matches swe-2, swe-2-high, swe-2-medium, swe-2-max,
+ * plus `adaptive` (Egor, 13.10.26: "сделай возможность и мне адаптив взять" — Slava's server
+ * runs it and hits the free limit less often; claude-*, gpt-*, fusion-* stay refused).
  */
 export function isAllowedDevinModel(model: unknown): boolean {
-  return typeof model === 'string' && /^swe-2(-(high|medium|max|low))?$/i.test(model.trim());
+  return typeof model === 'string' && /^(swe-2(-(high|medium|max|low))?|adaptive)$/i.test(model.trim());
 }
 
 export const DEVIN_DEFAULT_MODEL = 'swe-2-high';

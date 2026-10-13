@@ -298,7 +298,7 @@ test('devin runtime: model + permission mode are passed to the agent', async () 
 });
 
 test('devin runtime: a model other than SWE-2 is replaced by swe-2-high', async () => {
-  for (const forbidden of ['claude-opus-5-5-medium', 'adaptive', 'fusion-claude-opus-5-5-medium-sidekick-swe-2-medium', 'gpt-6-sol-high']) {
+  for (const forbidden of ['claude-opus-5-5-medium', 'adaptive-pro', 'fusion-claude-opus-5-5-medium-sidekick-swe-2-medium', 'gpt-6-sol-high']) {
     await withFakeDevin(async (tempRoot) => {
       const writer = makeWriter();
       await devinRuntime.run('Hi', {
@@ -314,6 +314,23 @@ test('devin runtime: a model other than SWE-2 is replaced by swe-2-high', async 
       assert.equal(setModel?.params?.value, 'swe-2-high');
     });
   }
+});
+
+test('devin runtime: adaptive is allowed and reaches the agent as picked', async () => {
+  await withFakeDevin(async (tempRoot) => {
+    const writer = makeWriter();
+    await devinRuntime.run('Hi', {
+      cwd: tempRoot,
+      sessionId: 'app-adaptive-allowed',
+      model: 'adaptive',
+      permissionMode: 'default',
+    }, writer, runtimeContext);
+
+    const capture = JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8'));
+    assert.deepEqual(capture.args, ['acp', '--model', 'adaptive']);
+    const setModel = capture.calls.find((c) => c.method === 'session/set_config_option');
+    assert.equal(setModel?.params?.value, 'adaptive');
+  });
 });
 
 test('devin runtime: /model, /fusion and /adaptive inside the chat are refused without starting the agent', async () => {

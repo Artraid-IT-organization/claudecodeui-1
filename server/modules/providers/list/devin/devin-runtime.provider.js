@@ -604,7 +604,7 @@ async function queryDevin(command, options = {}, ws, context) {
       provider: 'devin',
       sessionId: sessionId || null,
       kind: 'error',
-      content: 'Смена модели Devin запрещена: на этом аккаунте работает только SWE-2.',
+      content: 'Смена модели Devin командой запрещена: на этом аккаунте работает только SWE-2 и Adaptive — выберите модель в списке моделей чата.',
     }));
     sendMessage(ws, createCompleteMessage({
       provider: 'devin',
