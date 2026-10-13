@@ -2,7 +2,7 @@ import { Check, ChevronsUpDown, Users } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
-import { selectChatProvider, useCodexAccount, useSelectedChatProvider } from '../../../../hooks/useCodexAccount';
+import { switchChatProvider, useCodexAccount, useSelectedChatProvider } from '../../../../hooks/useCodexAccount';
 import {
   selectDevinConnection,
   useDevinConnections,
@@ -59,7 +59,7 @@ export default function SidebarAccountSwitcher({
 
   const available = accounts.filter((account) => account.available);
   // Подписка Codex — третий аккаунт хозяина. Выбор её не переключает слот
-  // Claude, а направляет новые чаты к Codex (см. selectChatProvider).
+  // Claude, а направляет новые чаты к Codex (см. switchChatProvider).
   const codex = useCodexAccount();
   const codexReady = Boolean(codex?.available);
   const selectedProvider = useSelectedChatProvider();
@@ -68,6 +68,7 @@ export default function SidebarAccountSwitcher({
   const { connections: devinConnections, reload: reloadDevinConnections } = useDevinConnections();
   const selectedDevinId = useSelectedDevinConnectionId();
   const devinSelected = selectedProvider === 'devin' && devinConnections.length > 0;
+  const nonClaudeSelected = codexSelected || devinSelected;
   const selectedDevin = devinConnections.find((connection) => connection.id === selectedDevinId) ?? null;
   const canSwitch = available.length + (codexReady ? 1 : 0) + devinConnections.length > 1;
 
@@ -181,7 +182,7 @@ export default function SidebarAccountSwitcher({
                       role="menuitem"
                       disabled={isActive || pendingSlot !== null}
                       onClick={() => {
-                        selectChatProvider('claude');
+                        if (nonClaudeSelected) switchChatProvider('claude');
                         if (account.slot === activeSlot) {
                           // Слот уже этот — вернуться с Codex на Claude.
                           setIsOpen(false);
@@ -237,7 +238,7 @@ export default function SidebarAccountSwitcher({
                     role="menuitem"
                     disabled={codexSelected || pendingSlot !== null}
                     onClick={() => {
-                      selectChatProvider('codex');
+                      switchChatProvider('codex');
                       setIsOpen(false);
                     }}
                     className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm transition-colors hover:bg-accent/60 disabled:cursor-default"

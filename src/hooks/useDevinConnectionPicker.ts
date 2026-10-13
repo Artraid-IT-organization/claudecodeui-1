@@ -2,7 +2,9 @@ import { useCallback, useEffect, useState } from 'react';
 
 import { authenticatedFetch } from '../utils/api';
 
-import { SELECT_PROVIDER_EVENT, selectChatProvider } from './useCodexAccount';
+import { SELECT_PROVIDER_EVENT, readSelectedDevinConnectionId } from './providerSelection';
+
+export { readSelectedDevinConnectionId, selectDevinConnection } from './providerSelection';
 
 /** Канал Devin из реестра сервера (GET /api/providers/devin/connections), поля для пикера. */
 export type DevinConnectionOption = {
@@ -14,25 +16,6 @@ export type DevinConnectionOption = {
   cooldownUntil: string | null;
   accountEmail: string | null;
 };
-
-/**
- * localStorage-ключ подписки, выбранной в пикере; уходит серверу с каждым
- * ходом Devin — и в новом чате, и в открытом (история чата живёт в его линии,
- * платить за ход может любая подписка: devin-connections.service).
- */
-const SELECTED_DEVIN_CONNECTION_KEY = 'selected-devin-connection';
-
-/** Выбрать канал Devin для новых чатов: запоминает его и переключает помощника на Devin. */
-export function selectDevinConnection(connectionId: number): void {
-  localStorage.setItem(SELECTED_DEVIN_CONNECTION_KEY, String(connectionId));
-  selectChatProvider('devin');
-}
-
-/** Канал, выбранный в пикере; null — сервер выбирает сам (первый годный по приоритету). */
-export function readSelectedDevinConnectionId(): number | null {
-  const id = Number(localStorage.getItem(SELECTED_DEVIN_CONNECTION_KEY));
-  return id > 0 ? id : null;
-}
 
 /** Реактивная версия readSelectedDevinConnectionId для отметки в меню. */
 export function useSelectedDevinConnectionId(): number | null {

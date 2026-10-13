@@ -2,6 +2,16 @@ import { useCallback, useEffect, useState } from 'react';
 
 import { api } from '../utils/api';
 
+import { SELECT_PROVIDER_EVENT } from './providerSelection';
+
+export {
+  CONTINUE_IN_PROVIDER_EVENT,
+  SELECT_PROVIDER_EVENT,
+  selectChatProvider,
+  switchChatProvider,
+  type ChatProviderChoice,
+} from './providerSelection';
+
 export type CodexUsageWindow = {
   kind: string;
   percent: number;
@@ -20,34 +30,6 @@ export type CodexAccount = {
 
 /** Сервер держит ответ две минуты; чаще спрашивать бессмысленно. */
 const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
-
-/** Событие выбора помощника для нового чата: из меню аккаунтов в поле ввода. */
-export const SELECT_PROVIDER_EVENT = 'ccui:select-provider';
-
-/**
- * Выбор в меню аккаунтов (а не синхронизация при открытии чата): открытый чат
- * другого помощника сменяется новым пустым чатом выбранного. Переписка не
- * переносится — каждый помощник держит свой список чатов (useServerScope).
- */
-export const CONTINUE_IN_PROVIDER_EVENT = 'ccui:continue-in-provider';
-
-/** Выбор помощника человеком в меню аккаунтов: запомнить и открыть его список. */
-export type ChatProviderChoice = 'claude' | 'codex' | 'devin';
-
-export function switchChatProvider(provider: ChatProviderChoice): void {
-  selectChatProvider(provider);
-  window.dispatchEvent(new CustomEvent(CONTINUE_IN_PROVIDER_EVENT, { detail: provider }));
-}
-
-/**
- * Выбрать помощника (claude / codex / devin) для следующего нового чата — так же, как
- * это делает выбор модели на пустом экране: запись в localStorage плюс событие
- * для уже открытого поля ввода.
- */
-export function selectChatProvider(provider: ChatProviderChoice): void {
-  localStorage.setItem('selected-provider', provider);
-  window.dispatchEvent(new CustomEvent(SELECT_PROVIDER_EVENT, { detail: provider }));
-}
 
 /** Какой помощник выбран сейчас и его смена — для отметки в меню аккаунтов. */
 export function useSelectedChatProvider(): string {
