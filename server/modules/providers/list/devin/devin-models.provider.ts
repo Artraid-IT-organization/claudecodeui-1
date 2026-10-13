@@ -4,7 +4,7 @@ import path from 'node:path';
 
 import spawn from 'cross-spawn';
 
-import { sessionsDb } from '@/modules/database/index.js';
+import { devinConnectionsDb, sessionsDb } from '@/modules/database/index.js';
 import type { IProviderModels } from '@/shared/interfaces.js';
 import type {
   AnyRecord,
@@ -13,15 +13,14 @@ import type {
   ProviderModelsDefinition,
 } from '@/shared/types.js';
 import {
+  getDevinDatabasePath,
+  isAllowedDevinModel,
   readObjectRecord,
-  buildDevinChildEnv,
   readOptionalString,
   resolveDevinCliCommand,
-  isAllowedDevinModel,
 } from '@/shared/utils.js';
+import { readChannelModelOptions } from '@/modules/providers/list/devin/devin-runtime.provider.js';
 import { openDevinDatabase } from '@/modules/providers/list/devin/devin-sessions.provider.js';
-import { readSlotModelOptions } from '@/modules/providers/list/devin/devin-runtime.provider.js';
-import { getActiveDevinSlot } from '@/shared/devin-slots.js';
 
 const PROVIDER = 'devin' as const;
 
@@ -35,9 +34,16 @@ const CATALOG_TIMEOUT_MS = 15_000;
  * a stale subset is better than an empty picker.
  */
 const FALLBACK_MODELS: ProviderModelOption[] = [
+  { value: 'adaptive', label: 'Adaptive (auto-picked)', description: 'Devin picks the best model per session' },
   { value: 'swe-2-high', label: 'SWE-2 High', description: 'Cognition SWE-2, high effort' },
   { value: 'swe-2-medium', label: 'SWE-2 Medium', description: 'Cognition SWE-2, medium effort' },
   { value: 'swe-2-max', label: 'SWE-2 Max', description: 'Cognition SWE-2, maximum effort' },
+  { value: 'swe-1.7-lightning', label: 'SWE-1.7 Lightning', description: 'Fast Cognition model' },
+  { value: 'swe-1.7-lightning-medium', label: 'SWE-1.7 Lightning Medium' },
+  { value: 'swe-1.7', label: 'SWE-1.7' },
+  { value: 'claude-opus-5-5-medium', label: 'Claude Opus 5.5' },
+  { value: 'claude-sonnet-5-5-medium', label: 'Claude Sonnet 5.5' },
+  { value: 'claude-opus-4-7-medium', label: 'Claude Opus 4.7' },
 ];
 
 const DEFAULT_MODEL = 'swe-2-high';
@@ -80,11 +86,20 @@ function parseDevinModelsCatalog(raw: unknown): ProviderModelOption[] {
 }
 
 function readDevinModelsFromCli(): ProviderModelOption[] {
+  // Каталог моделей одинаков для всех каналов одной подписки — спрашиваем его
+  // у первого годного (Connection Layer), legacy-дефолт — запасной ответ.
+  const usable = devinConnectionsDb.list().find(
+    (conn) => conn.enabled && conn.health_status !== 'auth_failed',
+  );
   const result = spawn.sync(resolveDevinCliCommand(), ['models', 'list', '--format', 'json'], {
     encoding: 'utf8',
     timeout: CATALOG_TIMEOUT_MS,
     maxBuffer: 4 * 1024 * 1024,
-    env: buildDevinChildEnv(),
+    env: {
+      ...process.env,
+      PATH: `${path.join(os.homedir(), '.local', 'bin')}:${process.env.PATH || ''}`,
+      ...(usable ? { XDG_DATA_HOME: usable.xdg_data_home } : {}),
+    },
   });
   if (result.error || result.status !== 0 || !result.stdout) {
     return [];
@@ -96,9 +111,14 @@ function readDevinModelsFromCli(): ProviderModelOption[] {
   }
 }
 
-/** Reads the model stored on a Devin session row (`sessions.model`). */
+/** Reads the model stored on a Devin session row (`sessions.model`) — из базы канала чата. */
 function readSessionModel(sessionId: string): string | null {
-  const db = openDevinDatabase();
+  const row = sessionsDb.getSessionById(sessionId)
+    ?? sessionsDb.getSessionByProviderSessionId(sessionId);
+  const connXdg = row?.devin_connection_id != null
+    ? devinConnectionsDb.getById(row.devin_connection_id)?.xdg_data_home
+    : null;
+  const db = openDevinDatabase(getDevinDatabasePath(connXdg ?? null));
   if (!db) {
     return null;
   }
@@ -114,11 +134,7 @@ function readSessionModel(sessionId: string): string | null {
   }
 }
 
-/**
- * `~/.config/devin/config.json` → `agent.model` (the owner's configured
- * default). Exported for `devin-usage.ts`: the token counter resolves the
- * context window of CLI-started sessions whose `sessions.model` is empty.
- */
+/** `~/.config/devin/config.json` → `agent.model` (the owner's configured default). */
 export function readConfiguredDefaultModel(): string | null {
   try {
     const configPath = path.join(os.homedir(), '.config', 'devin', 'config.json');
@@ -149,21 +165,21 @@ export class DevinModelsProvider implements IProviderModels {
 
     // Only SWE-2 is allowed by the owner; the rest of the Devin catalog stays hidden.
     const allowed = (models ?? []).filter((option) => isAllowedDevinModel(option.value));
-    // The CLI catalog is wider than the account's real list (slot 2 has no
-    // swe-2-medium/max — set_config_option answered Invalid params on every
-    // turn, 10.10.26). Once any session reported its configOptions, the picker
-    // shows only the intersection; before that the full SWE-2 list stands.
-    const slotOptions = readSlotModelOptions(getActiveDevinSlot());
-    const intersected = slotOptions
-      ? allowed.filter((option) => slotOptions.has(option.value))
+    // The CLI catalog is wider than a channel's real list (set_config_option
+    // answered Invalid params on every turn, 10.10.26). Once any session
+    // reported its configOptions, the picker shows only models some channel
+    // actually has (union across channels); before that the SWE-2 list stands.
+    const channelOptions = readChannelModelOptions();
+    const intersected = channelOptions
+      ? allowed.filter((option) => channelOptions.has(option.value))
       : allowed;
-    // Пересечение пусто: каталог вообще не знает реальных моделей слота —
-    // показываем сам список аккаунта (он истина), а не FALLBACK с моделями,
-    // которых у слота нет и каждый ход кончался бы уведомлением о замене.
+    // Пересечение пусто: каталог вообще не знает реальных моделей канала —
+    // показываем сам список канала (он истина), а не FALLBACK с моделями,
+    // которых нет и каждый ход кончался бы уведомлением о замене.
     const options = intersected.length > 0
       ? intersected
-      : slotOptions
-        ? [...slotOptions].filter(isAllowedDevinModel).map((value) => ({ value, label: value }))
+      : channelOptions
+        ? [...channelOptions].filter(isAllowedDevinModel).map((value) => ({ value, label: value }))
         : FALLBACK_MODELS;
     const finalOptions = options.length > 0 ? options : FALLBACK_MODELS;
     const configuredDefault = readConfiguredDefaultModel();

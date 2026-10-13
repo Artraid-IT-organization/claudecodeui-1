@@ -709,12 +709,12 @@ CLI отдаёт модели отказ стоп-хука (`decision: block`) �
 - Экран ожидания (`AuthLoadingScreen`) пишет «Пробую другой путь: попытка N».
 - Не проверено на живом iPhone: поведение при замороженном соединении в реальной сети (в тестах заморозка имитируется зависшим запросом).
 
-## Devin — четвёртый аккаунт хозяина (03.10.26)
+## Devin — корпоративные каналы (03.10.26, слоты упразднены 13.10.26)
 
-- Что: подписка Devin (Cognition) — четвёртой строкой в меню «Ваши аккаунты» (`SidebarAccountSwitcher.tsx`, подпись «Devin · SWE-2», имя входа из `devin auth status`). Выбор слот Claude не трогает: пишет `selected-provider=devin` (`useCodexAccount.ts`: `switchChatProvider`/`useDevinAccount`), новый чат идёт к Devin. Егор 03.10.26: «подписка Devin, где работает только он, только его токены, только SWE-2; чаты отдельно, как с другими ИИ».
-- Аккаунт: `GET /api/user/devin-account` (`devin-account.service.ts` → `devin auth status`, кэш 60 с, не тратит квоту; в ответе только имя и `available`, без путей и токенов). Только владельцу (`isDevinAllowedForWebUser` = граница Codex: вход один на машину). Лимитных окон Devin не публикует — «Расход» в режиме Devin скрыт, лимиты Claude там не показываем.
-- Свой список чатов — как у Codex: `ProviderSpace = 'codex' | 'devin' | 'claude'` (`useServerScope.ts`), `GET /sessions/recent?space=devin`, `sessions.db.ts` (`provider = 'devin'`; список Claude теперь `NOT IN ('codex','devin')`). Владельцу чаты Devin видны через оба слота Claude (`shared-codex` пропускает и Devin), гостю — никогда (`hide-codex`). Устройство то же, что у Codex: выбор в меню = вход в его список; открытие чата переключает выбор на его помощника.
-- Только токены Devin: в режиме Devin (1) в выборе модели одна вкладка Devin (`ProviderSelectionEmptyState.tsx`, `devinOnly`); (2) только SWE-2 — `isAllowedDevinModel` в списке и при запуске; **(2а) список пикера — по опциям аккаунта, не по каталогу CLI** (10.10.26): `devin models list` знает swe-2-medium/max, а `configOptions` сессии слота 2 — нет; каждый ход кончался `set_config_option → Invalid params` и тихой работой на другой модели. Истина — `configOptions` из `session/new`/`session/load`/`config_option_update` (`run.modelOptions`/`modelCurrent`): недоступную модель не шлём и один раз за ход говорим в чат; список кладём в `~/.cloudcli-shared/devin-model-options-<slot>.json`, `devin-models.provider.ts` пересекает с ним каталог (`readSlotModelOptions`); (3) разбор чатов по группам (запрос к Claude Haiku) чаты Devin исключает — `HUMAN_CHAT_SQL` (`provider <> 'devin'`, тест в `chat-group-classifier.test.ts`); (4) перевод «мыслей» через Claude (`/api/user/thought-digest`) в режиме Devin не запрашивается (`WorkStretchContainer.tsx`, `claudeFree`); (5) перенос чата Devin делает выжимку самим Devin, не Claude — `askDevinOnce` (`handoff.service.ts`). Новый путь «сайт сам зовёт Claude» для чатов Devin нельзя — проверять этим же списком.
+- Что: Devin работает через серверные каналы `devin_connections` — раздел ниже «Devin Connection Layer» описывает модель. Слотов `devin-slots.ts` / `devin-account.service.ts` / `devin-login.service.ts` / `DevinLoginModal.tsx` больше нет: второй аккаунт — просто ещё один канал в реестре, вход — кредой `credentials.toml` в админке. В меню «Ваши аккаунты» канал — строкой с ярлыком (`useDevinConnections`), выбор — `selected-provider=devin` + `selected-devin-connection`.
+- Аккаунт: `GET /api/user/devin-account` читает состояние активного канала (в ответе только имя и `available`, без путей и токенов). Лимитных окон Devin не публикует — «Расход» в режиме Devin показывает строки канала, лимиты Claude там не показываем.
+- Свой список чатов — как у Codex: `ProviderSpace = 'codex' | 'devin' | 'claude'` (`useServerScope.ts`), `GET /sessions/recent?space=devin`, `sessions.db.ts` (`provider = 'devin'`; список Claude теперь `NOT IN ('codex','devin')`). Чат виден автору (`initiated_by_user_id`) и владельцу площадки; `shared-codex` пропускает владельцу Devin-строки обоих `account_dir`, `hide-codex` гостю — только свои. Устройство то же, что у Codex: выбор в меню = вход в его список; открытие чата переключает выбор на его помощника.
+- Только токены Devin: в режиме Devin (1) в выборе модели одна вкладка Devin (`ProviderSelectionEmptyState.tsx`, `devinOnly`); (2) только SWE-2 — `isAllowedDevinModel` в списке и при запуске; **(2а) список пикера — по опциям аккаунта, не по каталогу CLI** (10.10.26): `devin models list` знает swe-2-medium/max, а `configOptions` сессии слота 2 — нет; каждый ход кончался `set_config_option → Invalid params` и тихой работой на другой модели. Истина — `configOptions` из `session/new`/`session/load`/`config_option_update` (`run.modelOptions`/`modelCurrent`): недоступную модель не шлём и один раз за ход говорим в чат; список кладём в `~/.cloudcli-shared/devin-model-options-<id канала>.json`, `devin-models.provider.ts` пересекает каталог с объединением списков всех каналов (`readChannelModelOptions`); (3) разбор чатов по группам (запрос к Claude Haiku) чаты Devin исключает — `HUMAN_CHAT_SQL` (`provider <> 'devin'`, тест в `chat-group-classifier.test.ts`); (4) перевод «мыслей» через Claude (`/api/user/thought-digest`) в режиме Devin не запрашивается (`WorkStretchContainer.tsx`, `claudeFree`); (5) перенос чата Devin делает выжимку самим Devin, не Claude — `askDevinOnce` (`handoff.service.ts`). Новый путь «сайт сам зовёт Claude» для чатов Devin нельзя — проверять этим же списком.
 - Паритет с Claude (04.10.26): откат сообщения, перенос в новый чат и `/compact` работают и для Devin.
   - Откат: `devin-rewind.ts` (через `session-rewind.service.ts`, endpoint общий). ACP-методов fork/revert у `devin acp` нет (они только в desktop-мосте), поэтому откат — прямой сдвиг `sessions.main_chain_id` в базе Devin (`getDevinDatabasePath()`) на родителя выбранного узла; хвост остаётся в `message_nodes` — восстановление возможно, ничего не удаляется. Живая цепочка = обход `parent_id` от `main_chain_id` (`devin-chain.ts → liveDevinChain`); сообщение ленты `devin_<nodeId>` ↔ узел. Перед сдвигом ход гасится (`abort`/`stopSurvivor`), очередь чата снимается и её тексты возвращаются в поле ввода.
   - Перенос: `devin-transcript.ts → exportDevinTranscript` выгружает полную переписку в Claude-подобный JSONL (`type`/`sessionId`/`message.content`) в `handoffs/devin-<providerSessionId>.jsonl` — дальше общий конвейер дайджеста. `resolveSource` допускает `provider='devin'`; выжимку пишет `askDevinOnce` — разовый `devin -p` из служебной папки `~/.cloudcli/handoff-devin-cwd`, её беседы помечаются `hidden=1` (`hideDevinSessionsInDirectory`) — в список чатов не попадают. Пользовательские узлы опознаются по `metadata.is_user_input`, служебные роли (system/tool) в выгрузку не идут.
@@ -724,9 +724,7 @@ CLI отдаёт модели отказ стоп-хука (`decision: block`) �
 - История ≠ живая цепочка (05.10.26, «нет загрузки дальше вверх по чату»). `main_chain_id` — вершина ТЕКУЩЕГО окна контекста: Devin каждый ход пересобирает контекст (системные блоки + сводка + хвост), вытесненные ходы остаются в `message_nodes` брошенными ветками (у «absorbing-mass» в живой было 58 узлов из 2816 — лента кончалась через три порции по 20). Лента и перенос читают `fullDevinConversation` (`devin-chain.ts`): сообщение принято, если дожило хотя бы до одного снимка с более поздней репликой человека ИЛИ входит в живую цепочку — отрезанные rewind-ветки не воскресают; последний ход человека принят, если в живой цепочке есть работа агента позже него (в новых сессиях ввод — отдельная ветка «протокол → ввод», в цепочку не входит); ветка с prompt «Conversation to summarize:» исключается целиком; копии одного `message_id` сходятся в самую свежую по `row_id`; порядок — `metadata.created_at` (стабильное время события), НЕ `row.created_at` (переписывается при перелинковке). Тест — `devin-chain.test.ts`.
 - Грабли: чаты Devin записаны с `account_dir` слота Claude — без `shared-codex` пропадали бы при смене слота. Выбор `devin` запомнен в localStorage: если Devin пропал (вышли из аккаунта), переключатель сам возвращает Claude, иначе список остался бы пустым.
 - «Показать ещё чаты» грузит срезом, а не общей кучей (05.10.26, кнопка молчала у Devin). Список в панели режется `scopeProjectsToProvider` на клиенте ПОСЛЕ выдачи, поэтому `GET /api/projects/:id/sessions` принимает `space`+`serverScope` (как `/sessions/recent`): база фильтрует и считает `total`/`hasMore` внутри среза, иначе offset клиента (по отфильтрованным чатам) и страница сервера (по всем провайдерам) говорят о разных очередях — у `/home/claude` страница приходила почти сплошь из чужих чатов и список не рос. `offset` клиента = число загруженных чатов ЭТОГО среза. Симметрично список папок несёт `sessionMeta.scopeTotals` (`<помощник>:<блок>` → сколько всего): клиент считает `hasMore` по своему срезу, а не по общему `total`, иначе кнопка висела бы, когда свои чаты кончились, или пропадала при целых чужих. Правило: любой новый потребитель `sessions` с выбором помощника обязан просить страницу своим срезом и верить только его счётчикам.
-- Второй аккаунт Devin (07.10.26, на первом кончился бесплатный лимит): слот 2 = отдельные `XDG_DATA_HOME=~/.devin-account2/data` и `XDG_CONFIG_HOME=~/.devin-account2/config` (`shared/devin-slots.ts`). Вход лежит в `$XDG_DATA_HOME/devin/credentials.toml`; `cli` (история чатов, `sessions.db`, доверенные папки) и `mcp` у слота 2 — ссылки на каталоги слота 1, иначе чаты второго аккаунта ушли бы в другую базу и сайт их не увидел. Конфиг слота 2 пересобирается из общего при каждом запуске (`syncDevinSlot2Config`): всё то же, кроме `devin.org_id` — он свой (его пишет вход), общий `config.json` слот 2 не пишет никогда; `AGENTS.md` и `hooks` — ссылки. Активный слот — файл `~/.devin-account2/active-slot`, общий для хозяина; ВСЕ запуски `devin` обязаны брать окружение через `buildDevinChildEnv()` (чат, названия, модели, окна контекста, терминал в `shell-websocket`) — потерянное окружение = молча идём под аккаунтом 1 с кончившимся лимитом. Меню показывает строку на каждый вошедший аккаунт плюс «Добавить аккаунт Devin» (`canAddSecond`), выбор строки = `POST /api/user/devin-account/slot` + `selected-provider=devin`.
-- Авто-переход на другой аккаунт при лимите (07.10.26, Егор: «токены переключаются сами, чаты те же»): ошибка квоты `session/prompt` (`errorKind:'unavailable'` или текст «rate limit…», та же проверка по хвосту stderr) → `failoverToOtherSlot` в `devin-runtime.provider.js` ставит второй слот активным и повторяет тот же ход один раз — беседа общая (`sessions.db` одна, `devinSessionIdOverride` передаёт уже созданную), в ленту идёт строка статуса, а не красная ошибка. Один повтор на сообщение (`slotFailoverDone`): ограничены оба — ошибка показывается как раньше. Вход второго слота проверяется дёшево — `devinSlotHasCredentials` смотрит файл `credentials.toml`, без запуска процесса. Тест — `devin-failover.test.js` (HOME подменяется ДО импорта: пути слотов вычисляются при загрузке модуля).
-- Вход из чата без терминала (`devin-login.service.ts`, окно `DevinLoginModal.tsx`): ссылку Devin выдаёт ОДНОРАЗОВУЮ и привязывает к живому процессу `devin auth login --force-manual-token-flow` (PKCE), поэтому «стабильна» кнопка, а не ссылка: каждый старт = свежий процесс (≤1, живёт ≤20 мин). Devin читает код только с терминала — запуск в `node-pty`; два нюанса, найденных пробами 07.10.26: на запрос позиции курсора `ESC[6n` отвечаем сами (`ESC[1;1R`), иначе окно ввода не оживает; подтверждение — `\r`, не `\n` (с `\n` код оставался в строке ввода, вход «висел»). Успех = `devin auth status` слота 2 показывает вход (опрос, не ждём выхода процесса) → слот 2 становится активным. Маршруты `/api/user/devin-account/{slot,login/start,login/code,login/cancel}` — только владельцу. Тесты: `providers/tests/devin-slots.test.ts`.
+- Второй и дальнейшие аккаунты Devin — каналы в `devin_connections` (раздел «Connection Layer» ниже): у каждого свой `xdg_data_home` со своей `credentials.toml` и своей `sessions.db` истории. Лимит подписки ловится на `session/prompt` ДО вывода — ход повторяется на другой годной креде в ТОЙ ЖЕ линии через теневой XDG (`prepareTurnDataHome`), человеку — строка статуса, не красная ошибка. Вход нового канала — в админке «Devin — корпоративные каналы» (креда целиком, живой пробой `devin auth status`). Наследие до Layer'а: у чата `devin_connection_id` NULL — линия опознаётся по базе, из которой он поднялся.
 
 ## Лёгкие запросы загрузки — через оба входа (06.10.26)
 
@@ -868,3 +866,64 @@ CLI отдаёт модели отказ стоп-хука (`decision: block`) �
 - Применение — внешняя команда установки (у cc2 — `cc2-update.sh --now`,
   у Егора — `~/scripts/ccui-accept-remote.sh`: merge в main + build-shared).
   Бэкенд пишет apply.json{running}; сторож помечает ok/failed по факту версии.
+## Devin Connection Layer — корпоративные каналы (03.10.26)
+
+Devin — не одна машинная креда, а реестр серверных каналов `devin_connections`.
+Сотрудники не логинятся в Devin сами: ход идёт через канал, который сервер
+выбирает по приоритету; каждый чат прибит к линии (каталогу истории) и к автору.
+
+- **Канал = каталог.** `xdg_data_home` строки — это XDG_DATA_HOME дочернего
+  `devin acp`: внутри `<xdg>/devin/credentials.toml` (0600, каталоги 0700) и
+  `<xdg>/devin/cli/sessions.db`. Креды в БД и в API не живут — только путь и
+  метаданные. Кто начал чат — `sessions.initiated_by_user_id` (ставит
+  createAppSession из request-контекста; наследие до Layer'а — NULL, видно
+  только владельцу).
+- **Линия ≠ подписка (10.10.26).** `sessions.devin_connection_id` — ЛИНИЯ:
+  каталог с sessions.db чата, не меняется никогда. Платит за ход ПОДПИСКА —
+  креда любого годного канала: пикер → своя креда линии → первая годная
+  (`pickCredentialForLane`). Чужая креда подаётся теневым XDG
+  `<connections-root>/.overlays/lane-L-cred-C` (`prepareTurnDataHome`):
+  содержимое линии симлинками (запись идёт в линию), `devin/credentials.toml`
+  → креда подписки; созданное процессом прямо в тени (каталоги MCP-серверов —
+  они тоже пишут в XDG_DATA_HOME) при следующей сборке переезжает в линию.
+  В схеме sessions.db Devin поля аккаунта нет — проверено вживую: сессия,
+  начатая под mywork-djn, продолжилась под default с полной памятью.
+  Выключенный канал остаётся линией (`resolveLaneForSession`, ошибка только
+  если канал удалён), его креда просто не платит.
+- **Фоллбэк по подпискам**: лимит Devin приходит ошибкой на `session/prompt`
+  ДО вывода («Reached free model rate limit… reset… at HH:MM UTC»). Пока
+  человек не увидел ни строчки хода (`run.liveOutputSent`), ход повторяется
+  на следующей подписке в той же линии (новый чат — грузит уже выделенную
+  сессию, второй session_created не шлётся), MAX_TURN_ATTEMPTS=4. В UI —
+  статус «У текущей подписки Devin исчерпан лимит — продолжаю на другой»
+  (без имени подписки: строку видит гость). `recordOutcome`: auth_failed —
+  навсегда до замены креды; rate_limited — cooldown до времени сброса из
+  текста Devin (иначе 15 мин); прочее — error. **Грабля:** классификатор
+  искал `403`/`401` подстрокой, а в тексте лимита hex trace ID — «…c403…»
+  превращал лимит в вечный auth_failed; trace ID теперь вырезается, коды — `\b`.
+- **Админка**: владелец — `Settings → API` → «Devin — корпоративные каналы»
+  (список, здоровье, вкл/выкл, замена креды credentials.toml целиком,
+  живая проба `devin auth status`, список задач канала). API —
+  `/api/providers/devin/connections*` (owner-only гейт; у гостя 403, секция
+  сама скрывается). Добавление канала без кода: POST connections → POST
+  /:id/credential с телом креды.
+- **Посев**: если реестр пуст и есть машинная креда — она становится каналом
+  «default» (xdg = общий `~/.local/share`), файлы не копируются.
+- **Пикер аккаунтов (09.10.26)**: в меню сайдбара — Claude (только слоты с
+  вошедшим аккаунтом: пустой слот 2 скрыт, `readOwnerSlotInfo` в user.service),
+  Devin (все включённые каналы реестра, подпись — ярлык
+  `devin_connections.account_email`), Codex. Выбор канала Devin →
+  localStorage `selected-devin-connection` → `options.devinConnectionId` в
+  `chat.send` (каждый ход) → подписка следующего ответа и в новом, и в открытом
+  чате; негодная — авто-фолбэк. Почту CLI не отдаёт — ярлык ставится кнопкой
+  «Ярлык» в админке (PATCH accountEmail). Список каналов в пикере — owner-only
+  (403 — пункты скрыты); гостям фолбэк по подпискам работает автоматически.
+- **Ошибки видны**: `canReceiveProviderEvents` для devin фильтрует по
+  sessionId → initiated_by_user_id (наследие — владельцу); websocket-гейт
+  `isDevinSessionForbiddenForUser` — по той же авторской проверке.
+- **Service-user ключи (`cog_`) CLI отвергает** — они для REST API v3, не для
+  `devin acp`. Если Devin доделает service-аккаунты для CLI — креда канала
+  меняется на неё без правок кода.
+- Watcher (`sessions-watcher`) и activity-sync обходят все включённые каналы;
+  survivor-запись хранит `devinDataHome` — после рестарта прогресс читается
+  из базы канала, не из машинного дефолта.

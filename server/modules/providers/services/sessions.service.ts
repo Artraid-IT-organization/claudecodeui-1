@@ -21,46 +21,23 @@ import {
   isPlatformOwnerWebUser,
   normalizeServerScope,
   OPEN_REGISTRATION,
+  resolveScopedWorkingDirectory,
 } from '@/shared/utils.js';
+import { getWebUserWorkspaceRoot } from '@/shared/web-user-paths.js';
+import { hasOwnClaudeAccess, resolveWebUserRuntimeContext } from '@/shared/web-user-runtime.js';
 
 /**
- * Devin sessions may only ever be read by the platform owner: the provider's
- * credentials and session store are machine-global. A guest who guesses a
- * session id must not be able to read history or provider ids through the
- * provider-agnostic session endpoints.
- */
-const assertSessionProviderAllowed = (provider: string): void => {
-  if (provider !== 'devin' || !OPEN_REGISTRATION) {
-    return;
-  }
-  const userId = getRequestRuntimeContext()?.userId;
-  const numericUserId = userId === undefined || userId === null ? NaN : Number(userId);
-  if (!Number.isFinite(numericUserId) || !isPlatformOwnerWebUser(numericUserId)) {
-    throw new AppError('The Devin provider is only available to the platform owner.', {
-      code: 'PROVIDER_NOT_ALLOWED',
-      statusCode: 403,
-    });
-  }
-};
-
-/**
- * Любой чат читает/меняет владелец площадки и человек, которому чат
- * принадлежит (`initiated_by_user_id` автора или `account_dir` аккаунта —
- * то же правило, что `assertSessionRowAllowed` в provider.routes).
- * Строки без владельца (наследие до атрибуции) — только владельцу площадки.
- *
- * Проверка общая для ВСЕХ провайдеров: раньше гейт стоял только на devin,
- * и чужой claude/codex-чат читался, переименовывался и удалялся по прямой
- * ссылке (IDOR, аудит корпоративной линии 10.10.26 — fe3cc270).
+ * Любой чат читает владелец площадки и человек, которому чат принадлежит
+ * (`initiated_by_user_id` или каталог аккаунта — то же правило, что у
+ * `assertSessionRowAllowed` в provider.routes). Чужой session id не должен
+ * отдавать ни историю, ни provider id, ни метаданные: проверка раньше стояла
+ * только на devin, и claude-чаты открывались по прямой ссылке (IDOR, аудит
+ * 10.10.26).
  */
 const assertSessionReadable = (session: {
-  provider: string;
   initiated_by_user_id: number | null;
   account_dir: string | null;
 }): void => {
-  // Креды Devin одни на машину — провайдерный гейт владельца остаётся
-  // поверх проверки владения чатом (до Connection Layer интеграции).
-  assertSessionProviderAllowed(session.provider);
   if (!OPEN_REGISTRATION) {
     return;
   }
@@ -116,6 +93,31 @@ async function upgradeHeicAttachmentsToImages(messages: NormalizedMessage[]): Pr
     message.images = [...images, ...converted];
     message.files = remaining;
   }
+}
+
+/**
+ * Провайдер, под которым реально пойдёт ход человека общей площадки.
+ *
+ * У гостя без своего входа в Claude (ни ключа API, ни подписки в его
+ * каталоге) `claude` мёртв: браузер мог запомнить его выбор или человек
+ * открыл старый чат, и оба пути упирались в «войдите в Claude». Такой чат и
+ * такое создание молча переводятся на корпоративный Devin — история при этом
+ * остаётся на месте (fetchHistory доклеивает jsonl-стенограмму). Владельца
+ * площадки правило не касается: у него вход в Claude свой и живой.
+ */
+export async function resolveEffectiveProvider(
+  provider: LLMProvider,
+  userId: string | number | null | undefined,
+): Promise<LLMProvider> {
+  if (!OPEN_REGISTRATION || provider !== 'claude') {
+    return provider;
+  }
+  const numericUserId = userId === undefined || userId === null ? NaN : Number(userId);
+  if (!Number.isFinite(numericUserId) || isPlatformOwnerWebUser(numericUserId)) {
+    return provider;
+  }
+  const runtimeContext = resolveWebUserRuntimeContext(userId ?? null);
+  return (await hasOwnClaudeAccess(runtimeContext)) ? 'claude' : 'devin';
 }
 
 type CreateAppSessionResult = {
@@ -356,12 +358,26 @@ export const sessionsService = {
    * comes directly from the first visible CloudCLI message and is limited to
    * four whole words before any provider-owned storage exists.
    */
-  createAppSession(
+  async createAppSession(
     provider: LLMProvider,
     projectPath: string,
     initialMessage: string,
-  ): CreateAppSessionResult {
-    const normalizedProjectPath = projectPath.trim();
+    userId?: string | number | null,
+  ): Promise<CreateAppSessionResult> {
+    // Устаревший выбор провайдера в браузере («Claude» без живого входа)
+    // заменяется рабочим — строка сразу ложится под тем провайдером, под
+    // которым пойдёт первый ход, и чат не переводится посреди отправки.
+    const effectiveProvider = await resolveEffectiveProvider(provider, userId);
+    // Рабочая зона не-владельца — его ~/.claude-webuser-<id>/workspace:
+    // проект вне зоны (устаревший/чужой путь от клиента) не записывается,
+    // чат приземляется в корень зоны — зона у человека одна.
+    const numericUserId = userId != null ? Number(userId) : NaN;
+    const scopeRoot = OPEN_REGISTRATION
+      && Number.isFinite(numericUserId)
+      && !isPlatformOwnerWebUser(numericUserId)
+      ? getWebUserWorkspaceRoot(numericUserId)
+      : null;
+    const normalizedProjectPath = resolveScopedWorkingDirectory(projectPath, scopeRoot) ?? '';
     if (!normalizedProjectPath) {
       throw new AppError('projectPath is required.', {
         code: 'PROJECT_PATH_REQUIRED',
@@ -371,11 +387,11 @@ export const sessionsService = {
 
     const sessionId = randomUUID();
     const sessionName = buildCloudCliSessionName(initialMessage);
-    sessionsDb.createAppSession(sessionId, provider, normalizedProjectPath, sessionName);
+    sessionsDb.createAppSession(sessionId, effectiveProvider, normalizedProjectPath, sessionName);
 
     return {
       sessionId,
-      provider,
+      provider: effectiveProvider,
       projectPath: normalizedProjectPath,
       sessionName,
     };
@@ -466,10 +482,16 @@ export const sessionsService = {
       });
     }
     assertSessionReadable(session);
+    // Чат, переведённый с мёртвого Claude на Devin, держит файл старой
+    // переписки в jsonl_path — она доклеивается префиксом ленты, иначе после
+    // перевода человек увидел бы пустой чат. У родных devin-строк jsonl_path
+    // всегда NULL, поэтому признак встречается только на переведённых.
+    const hasLegacyTranscript = session.provider !== 'claude' && Boolean(session.jsonl_path);
 
     // App-created sessions that never produced a provider transcript yet
-    // (e.g. first message still streaming) simply have no history.
-    if (!session.provider_session_id) {
+    // (e.g. first message still streaming) simply have no history — unless a
+    // legacy transcript remains from the provider migration above.
+    if (!session.provider_session_id && !hasLegacyTranscript) {
       return {
         messages: [],
         total: 0,
@@ -480,21 +502,48 @@ export const sessionsService = {
     }
 
     const provider = session.provider as LLMProvider;
-    const result = await providerRegistry.resolveProvider(provider).sessions.fetchHistory(sessionId, {
-      limit: options.limit ?? null,
-      offset: options.offset ?? 0,
+    const result = session.provider_session_id
+      ? await providerRegistry.resolveProvider(provider).sessions.fetchHistory(sessionId, {
+          limit: options.limit ?? null,
+          offset: options.offset ?? 0,
+          projectPath: session.project_path ?? '',
+          providerSessionId: session.provider_session_id,
+        })
+      : { messages: [], total: 0, hasMore: false, offset: 0, limit: null };
+
+    if (!hasLegacyTranscript) {
+      return {
+        ...result,
+        messages: result.messages.map((message) => ({
+          ...message,
+          sessionId,
+        })),
+      };
+    }
+
+    // Читалка Claude фильтрует строки стенограммы по provider-native id —
+    // он же имя файла (`<id>.jsonl`); в строке его уже нет, после перевода
+    // туда записан id нового провайдера.
+    const legacyProviderSessionId = path.basename(session.jsonl_path as string, '.jsonl');
+    const legacy = await providerRegistry.resolveProvider('claude').sessions.fetchHistory(sessionId, {
+      limit: null,
+      offset: 0,
       projectPath: session.project_path ?? '',
-      providerSessionId: session.provider_session_id,
+      providerSessionId: legacyProviderSessionId,
     });
 
     await upgradeHeicAttachmentsToImages(result.messages);
 
     return {
       ...result,
-      messages: result.messages.map((message) => ({
+      messages: [
+        ...legacy.messages,
+        ...result.messages,
+      ].map((message) => ({
         ...message,
         sessionId,
       })),
+      total: legacy.total + result.total,
     };
   },
 

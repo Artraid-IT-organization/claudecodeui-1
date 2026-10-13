@@ -18,7 +18,6 @@ import { fileURLToPath } from 'node:url';
 
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 
-import { getActiveDevinSlot, getDevinSlotEnv, type DevinSlot } from '@/shared/devin-slots.js';
 import { parseFrontMatter } from '@/shared/frontmatter.js';
 import { getRequestRuntimeContext } from '@/shared/request-context.js';
 import type { ServerScope } from '@/shared/types.js';
@@ -345,6 +344,62 @@ export function normalizeProjectPath(inputPath: string): string {
   }
 
   return normalized.replace(/[\\/]+$/, '');
+}
+
+/**
+ * Приводит запрошенный рабочий каталог к зоне пользователя.
+ *
+ * Единственный расчёт «где может стартовать процесс не-владельца» — общий
+ * для создания сессии (sessions.service) и обоих путей запуска хода
+ * (chat-websocket: runProviderTurn и steerIntoRunningTurn). Потребители берут
+ * корень зоны из `resolveWebUserRuntimeContext(userId).workspaceRoot`
+ * (WS-путь) или из request runtime context (HTTP-путь).
+ *
+ * Семантика — та же, что у `projectsDb.isProjectPathInScope`: корень зоны
+ * приводится через realpath, кандидат — лексически. Это позволяет путям ВНУТРИ
+ * зоны оставаться симлинками наружу (комнаты team-access смонтированы как
+ * `workspace/work -> people/<имя>/home/work`): по букве пути каталог в зоне,
+ * по разрешённому — снаружи, и это задумано.
+ *
+ * - `scopeRootDir` пуст (владелец площадки, OPEN_REGISTRATION выключен,
+ *   пользователь не опознан) — запрошенный путь возвращается как был:
+ *   ограничения нет, поведение прежнее.
+ * - Запрошенный путь лежит внутри зоны И существует — возвращается он.
+ * - Иначе — корень зоны. Не ошибка: клиент мог прислать устаревший или
+ *   чужой путь (так чат, привязанный к исчезнувшему `/tmp/...`, не умирает
+ *   `spawn ENOENT`, а приземляется в зоне). Корень при этом гарантированно
+ *   создаётся — зона обязана работать у всех.
+ */
+export function resolveScopedWorkingDirectory(
+  requestedPath: string | null | undefined,
+  scopeRootDir: string | null | undefined,
+): string | undefined {
+  if (!scopeRootDir) {
+    return typeof requestedPath === 'string' && requestedPath.trim()
+      ? requestedPath.trim()
+      : undefined;
+  }
+
+  let normalizedRoot: string;
+  try {
+    normalizedRoot = normalizeProjectPath(fs.realpathSync(scopeRootDir));
+  } catch {
+    normalizedRoot = normalizeProjectPath(scopeRootDir);
+  }
+  const requested = typeof requestedPath === 'string'
+    ? normalizeProjectPath(requestedPath)
+    : '';
+
+  if (
+    requested
+    && (requested === normalizedRoot || requested.startsWith(`${normalizedRoot}${path.sep}`))
+    && fs.existsSync(requested)
+  ) {
+    return requested;
+  }
+
+  fs.mkdirSync(scopeRootDir, { recursive: true });
+  return scopeRootDir;
 }
 
 /**
@@ -1090,9 +1145,13 @@ export function unwrapJsonStringLiteral(value: string): string {
  * `~/.local/share/devin`). Devin keeps a single shared `sessions.db` plus
  * `transcripts/` under `cli/` inside it — provider readers use this root and
  * must never hand it out as a deletable per-session transcript path.
+ *
+ * `xdgDataHomeOverride` — Devin Connection Layer: у корпоративного канала
+ * (devin_connections.xdg_data_home) свой XDG_DATA_HOME, значит свои креды и
+ * своя sessions.db. Без параметра — машинный дефолт (legacy-канал).
  */
-export function getDevinDataDir(): string {
-  const xdgDataHome = process.env.XDG_DATA_HOME?.trim();
+export function getDevinDataDir(xdgDataHomeOverride?: string | null): string {
+  const xdgDataHome = xdgDataHomeOverride?.trim() || process.env.XDG_DATA_HOME?.trim();
   return path.join(xdgDataHome || path.join(os.homedir(), '.local', 'share'), 'devin');
 }
 
@@ -1101,8 +1160,20 @@ export function getDevinDataDir(): string {
  * Like OpenCode's `opencode.db`, it is shared across every Devin session on
  * this account — read-only access only.
  */
-export function getDevinDatabasePath(): string {
-  return path.join(getDevinDataDir(), 'cli', 'sessions.db');
+export function getDevinDatabasePath(xdgDataHomeOverride?: string | null): string {
+  return path.join(getDevinDataDir(xdgDataHomeOverride), 'cli', 'sessions.db');
+}
+
+/**
+ * Корень каталогов корпоративных Devin-каналов. Каждый канал живёт в
+ * `<root>/<id>` как самостоятельный XDG_DATA_HOME: `<root>/<id>/devin/
+ * credentials.toml` (0600, каталоги 0700), `<root>/<id>/devin/cli/sessions.db`.
+ * Legacy-канал (машинный `~/.local/share`) здесь не создаётся — он указывает
+ * на общий домашний каталог.
+ */
+export function getDevinConnectionsRoot(): string {
+  const configured = process.env.DEVIN_CONNECTIONS_ROOT?.trim();
+  return configured || path.join(os.homedir(), '.cloudcli-shared', 'devin-connections');
 }
 
 /**
@@ -1165,14 +1236,16 @@ export function isDevinCliInstalled(): boolean {
  * minimal PATH: the child's PATH gains the well-known user bin dirs so tools
  * Devin itself shells out to (and Devin's own subprocess lookups) still work.
  */
-export function buildDevinChildEnv(slot: DevinSlot = getActiveDevinSlot()): Record<string, string | undefined> {
+export function buildDevinChildEnv(xdgDataHome?: string | null): Record<string, string | undefined> {
   const home = os.homedir();
   const extraPath = [path.join(home, '.local', 'bin'), path.join(home, 'bin')];
   const currentPath = process.env.PATH || '';
   const augmentedPath = [...extraPath, currentPath].join(path.delimiter);
-  // Слот Devin: второй аккаунт = другой XDG_DATA_HOME (см. devin-slots.ts).
-  // Без слота берётся активный; явный слот нужен проверке входа конкретного аккаунта.
-  return { ...process.env, PATH: augmentedPath, ...getDevinSlotEnv(slot) };
+  const env: Record<string, string | undefined> = { ...process.env, PATH: augmentedPath };
+  if (xdgDataHome) {
+    env.XDG_DATA_HOME = xdgDataHome;
+  }
+  return env;
 }
 
 // ---------------------------
@@ -1222,12 +1295,24 @@ export function sanitizeLeafDirectoryName(inputName: string, label = 'directory 
  * forever, since birthtime never changes after creation. The sidebar showed
  * a long-running chat as stuck "1d ago" indefinitely even while it was being
  * actively used, because the synchronizer stopped ever re-visiting it.
+ *
+ * `knownPaths` (optional) is the set of transcript paths already present in
+ * the sessions DB. When provided, a file that is NOT in the set is collected
+ * regardless of mtime: a transcript can land in the tree with an mtime older
+ * than the scan cursor (copied with preserved timestamps, appended during a
+ * scan between cursor read and tree walk), and mtime filtering alone would
+ * skip it forever — the file existed on disk but stayed invisible in the UI
+ * (audit 10.10.26: two Vince transcripts, one 50 MB, invisible for days).
+ * Corollary: a transcript whose DB row was deleted while the file was kept
+ * (`deletedFromDisk=false`) will be re-indexed — the file on disk is the
+ * source of truth.
  */
 export async function findFilesRecursivelyCreatedAfter(
   rootDir: string,
   extension: string,
   lastScanAt: Date | null,
-  fileList: string[] = []
+  fileList: string[] = [],
+  knownPaths?: ReadonlySet<string>
 ): Promise<string[]> {
   try {
     const entries = await readdir(rootDir, { withFileTypes: true });
@@ -1235,7 +1320,7 @@ export async function findFilesRecursivelyCreatedAfter(
       const fullPath = path.join(rootDir, entry.name);
 
       if (entry.isDirectory()) {
-        await findFilesRecursivelyCreatedAfter(fullPath, extension, lastScanAt, fileList);
+        await findFilesRecursivelyCreatedAfter(fullPath, extension, lastScanAt, fileList, knownPaths);
         continue;
       }
 
@@ -1249,7 +1334,7 @@ export async function findFilesRecursivelyCreatedAfter(
       }
 
       const fileStat = await stat(fullPath);
-      if (fileStat.mtime > lastScanAt) {
+      if (fileStat.mtime > lastScanAt || (knownPaths && !knownPaths.has(fullPath))) {
         fileList.push(fullPath);
       }
     }

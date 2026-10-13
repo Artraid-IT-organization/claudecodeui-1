@@ -14,6 +14,7 @@ import { useDropzone } from 'react-dropzone';
 import { CONTINUE_IN_PROVIDER_EVENT } from '../../../hooks/useCodexAccount';
 import { authenticatedFetch } from '../../../utils/api';
 import type { MarkSessionProcessing, SessionActivityMap } from '../../../hooks/useSessionProtection';
+import { readSelectedDevinConnectionId } from '../../../hooks/useDevinConnectionPicker';
 import { grantClaudeToolPermission } from '../utils/chatPermissions';
 import { useSessionMessageQueue } from './useSessionMessageQueue';
 import {
@@ -848,6 +849,8 @@ export function useChatComposerState({
     const toolsSettings = getToolsSettings();
 
     return {
+      // Подписка Devin из пикера аккаунтов: платит за этот ход (новый или открытый чат), если годна.
+      ...(provider === 'devin' ? { devinConnectionId: readSelectedDevinConnectionId() } : {}),
       model: currentProviderModel,
       effort: currentProviderEffort,
       permissionMode: resolvePermissionModeForProvider(provider, permissionMode),

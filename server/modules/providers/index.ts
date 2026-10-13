@@ -21,7 +21,9 @@ export { getLiveLimits, recordRateLimitEvent } from './services/usage-limits.sto
 export { providerModelsService } from './services/provider-models.service.js';
 
 // sessionsService: модуль обновлений (updates) создаёт через него чат-разбор.
-export { sessionsService } from './services/sessions.service.js';
+// resolveEffectiveProvider: the websocket gateway asks it before every run —
+// a guest without Claude access is silently served by the corporate Devin.
+export { sessionsService, resolveEffectiveProvider } from './services/sessions.service.js';
 
 export { initializeSessionsWatcher } from './services/sessions-watcher.service.js';
 export { closeSessionsWatcher } from './services/sessions-watcher.service.js';
@@ -31,10 +33,11 @@ export { startSessionActivitySync, stopSessionActivitySync } from './services/se
 
 // readCodexAccountLimits: used by the user module for the Codex account row and its limits.
 export { readCodexAccountLimits } from './services/codex-account-limits.service.js';
+
+// readDevinAccountLimits: used by the user module for the Devin account row and its daily/weekly quota.
+export { readDevinAccountLimits } from './services/devin-account-limits.service.js';
 // readDevinAccount: used by the user module for the Devin account row in the account menu.
-export { readDevinAccount, selectDevinSlot } from './services/devin-account.service.js';
 // Вход во второй аккаунт Devin из чата (кнопка «Добавить аккаунт»).
-export { startDevinLogin, submitDevinLoginCode, cancelDevinLogin } from './services/devin-login.service.js';
 // codexHome / resolveCodexBinary: handoff module writes a Codex-bound brief with Codex itself.
 export { codexHome, resolveCodexBinary } from './services/codex-account-limits.service.js';
 

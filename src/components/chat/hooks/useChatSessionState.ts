@@ -13,6 +13,7 @@ import { reportCatchupProbe } from '../utils/catchupProbe';
 import { createCachedDiffCalculator, type DiffCalculator } from '../utils/messageTransforms';
 
 import { normalizedToChatMessages } from './useChatMessages';
+import { DEFAULT_PROVIDER } from '../../../utils/defaultProvider';
 import { useScrollAnchor } from './useScrollAnchor';
 import { useRowPrewarm } from './useRowPrewarm';
 import { useRowHeightRecorder } from './useRowHeightRecorder';
@@ -437,7 +438,7 @@ export function useChatSessionState({
       return;
     }
 
-    const prov = (localStorage.getItem('selected-provider') as LLMProvider) || 'claude';
+    const prov = (localStorage.getItem('selected-provider') as LLMProvider) || DEFAULT_PROVIDER;
     const normalized = chatMessageToNormalized(pendingUserMessage, activeSessionId, prov);
     if (normalized) {
       sessionStore.appendRealtime(activeSessionId, normalized);
@@ -476,7 +477,7 @@ export function useChatSessionState({
       setPendingUserMessage(msg);
       return;
     }
-    const prov = (localStorage.getItem('selected-provider') as LLMProvider) || 'claude';
+    const prov = (localStorage.getItem('selected-provider') as LLMProvider) || DEFAULT_PROVIDER;
     const normalized = chatMessageToNormalized(msg, activeSessionId, prov);
     if (normalized) {
       sessionStore.appendRealtime(activeSessionId, normalized);

@@ -34,10 +34,12 @@ type SessionRow = {
   server_scope: ServerScope | null;
   /** Ярлык-флажок на чате: 1 — висит, 0 — нет. */
   is_flagged: number;
-  /** Каталог аккаунта, которому принадлежит переписка (атрибуция владельца). */
+  /** Каталог аккаунта, которому принадлежит чат (изоляция пользователей). */
   account_dir: string | null;
-  /** Веб-пользователь, начавший чат через приложение; NULL — строки наследия. */
+  /** Кто из веб-пользователей инициировал чат (NULL у наследия и у строк с диска). */
   initiated_by_user_id: number | null;
+  /** devin_connections.id — канал, через который идёт devin-чат. */
+  devin_connection_id: number | null;
   isArchived: number;
   created_at: string;
   updated_at: string;
@@ -49,7 +51,7 @@ type RecentSessionsPage = {
 };
 
 const SESSION_ROW_COLUMNS =
-  'session_id, provider, provider_session_id, project_path, jsonl_path, custom_name, title_source, model, effort, group_id, group_label, server_scope, is_flagged, account_dir, initiated_by_user_id, isArchived, created_at, updated_at';
+  'session_id, provider, provider_session_id, project_path, jsonl_path, custom_name, title_source, model, effort, group_id, group_label, server_scope, is_flagged, account_dir, initiated_by_user_id, devin_connection_id, isArchived, created_at, updated_at';
 
 /**
  * Decides whether a freshly-derived title candidate should replace the
@@ -146,7 +148,7 @@ function normalizeProjectPathForProvider(provider: string, projectPath: string):
  */
 const ACCOUNT_SCOPE_SQL = ' AND (account_dir IS NULL OR account_dir = ?)';
 
-type SessionAccountVisibility = 'current' | 'shared-codex' | 'hide-codex';
+type SessionAccountVisibility = 'current' | 'shared-codex' | 'hide-codex' | 'all';
 
 /**
  * Builds the account boundary used by session-list queries.
@@ -164,6 +166,9 @@ function accountVisibilitySql(
   const prefix = tableAlias ? `${tableAlias}.` : '';
   const currentAccount = `(${prefix}account_dir IS NULL OR ${prefix}account_dir = ?)`;
 
+  if (visibility === 'all') {
+    return '';
+  }
   if (visibility === 'shared-codex') {
     return ` AND (${prefix}provider IN ('codex', 'devin') OR ${currentAccount})`;
   }
@@ -228,6 +233,14 @@ export const sessionsDb = {
    * behavior unchanged, so this fix stays scoped to the provider it was
    * reported for.
    */
+  /*
+   * `project_path` у рождённой в вебе строки (`origin='web'`) провайдер не
+   * перетирает: человек выбрал проект при создании, а cwd, который присылает
+   * синхронизатор, может быть другим написанием того же места (Devin пишет в
+   * sessions.db realpath — у гостей team-access `workspace/work` это симлинк,
+   * и чат уезжал в одноимённую папку-двойник: «не все чаты в списке»).
+   * Строкам без веб-выбора (terminal/auto/CLI) cwd провайдера — правда.
+   */
   createSession(
     providerSessionId: string,
     provider: string,
@@ -265,7 +278,10 @@ export const sessionsDb = {
           `UPDATE sessions SET
              provider = ?,
              updated_at = COALESCE(?, CURRENT_TIMESTAMP),
-             project_path = ?,
+             project_path = CASE
+               WHEN origin = 'web' AND project_path IS NOT NULL THEN project_path
+               ELSE ?
+             END,
              jsonl_path = ?,
              account_dir = COALESCE(?, account_dir),
              origin = COALESCE(origin, ?),
@@ -288,7 +304,10 @@ export const sessionsDb = {
           `UPDATE sessions SET
              provider = ?,
              updated_at = COALESCE(?, CURRENT_TIMESTAMP),
-             project_path = ?,
+             project_path = CASE
+               WHEN origin = 'web' AND project_path IS NOT NULL THEN project_path
+               ELSE ?
+             END,
              jsonl_path = ?,
              account_dir = COALESCE(?, account_dir),
              origin = COALESCE(origin, ?),
@@ -322,7 +341,11 @@ export const sessionsDb = {
          provider = excluded.provider,
          provider_session_id = excluded.provider_session_id,
          updated_at = excluded.updated_at,
-         project_path = excluded.project_path,
+         project_path = CASE
+           WHEN sessions.origin = 'web' AND sessions.project_path IS NOT NULL
+             THEN sessions.project_path
+           ELSE excluded.project_path
+         END,
          jsonl_path = excluded.jsonl_path,
          account_dir = COALESCE(excluded.account_dir, sessions.account_dir),
          origin = COALESCE(sessions.origin, excluded.origin),
@@ -393,6 +416,17 @@ export const sessionsDb = {
   },
 
   /**
+   * Прибивает devin-чат к корпоративному каналу (devin_connections.id).
+   * Ставится рантаймом в момент session/new и при resume: канал чата не
+   * меняется — sessions.db живёт внутри каталога канала.
+   */
+  setSessionDevinConnection(sessionId: string, connectionId: number | null): void {
+    getConnection()
+      .prepare('UPDATE sessions SET devin_connection_id = ?, updated_at = CURRENT_TIMESTAMP WHERE session_id = ?')
+      .run(connectionId, sessionId);
+  },
+
+  /**
    * Records the provider-native session id for one app-allocated session.
    *
    * If the filesystem watcher indexed the provider transcript before this
@@ -436,6 +470,53 @@ export const sessionsDb = {
     });
 
     merge();
+  },
+
+  /**
+   * Переводит чат на другого провайдера (миграция Claude → Devin у человека
+   * без своего доступа к Claude).
+   *
+   * `provider_session_id` обнуляется намеренно: новый провайдер не умеет
+   * продолжать чужую сессию, он начнёт свою и назовёт свой id — его запишет
+   * `assignProviderSessionId`. `model`/`effort` сбрасываются тоже — записанная
+   * Claude-модель передалась бы новому провайдеру как `--model claude-…` и
+   * завалила бы ход. Переписка до перевода не теряется: файл остаётся в
+   * `jsonl_path`, и читалка истории доклеивает его к ленте
+   * (sessions.service.fetchHistory).
+   */
+  retargetSessionProvider(sessionId: string, provider: string): void {
+    const db = getConnection();
+    db.prepare(
+      `UPDATE sessions
+       SET provider = ?,
+           provider_session_id = NULL,
+           model = NULL,
+           effort = NULL,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE session_id = ?`
+    ).run(provider, sessionId);
+  },
+
+  /**
+   * Строка чата, которой принадлежит файл переписки.
+   *
+   * Синхронизатор Claude пропускает стенограмму, занятую переведённым на
+   * другого провайдера чатом (`provider <> 'claude'`): иначе обход файлов
+   * посеял бы вторую строку того же разговора под старым провайдером, и в
+   * списке возникал чат-призрак.
+   */
+  getSessionByTranscriptPath(jsonlPath: string): Pick<SessionRow, 'session_id' | 'provider'> | null {
+    const db = getConnection();
+    const row = db
+      .prepare(
+        `SELECT session_id, provider
+         FROM sessions
+         WHERE jsonl_path = ?
+         LIMIT 1`
+      )
+      .get(jsonlPath) as Pick<SessionRow, 'session_id' | 'provider'> | undefined;
+
+    return row ?? null;
   },
 
   /**
@@ -674,6 +755,46 @@ export const sessionsDb = {
     return normalizeSessionRow(row) ?? null;
   },
 
+  /**
+   * Все ожидающие provider-id app-строки провайдера — кандидаты на привязку,
+   * когда точного совпадения `project_path` нет. Devin хранит в sessions.db
+   * `working_directory` в realpath-написании, а app-строка рождается с
+   * лексическим путём (у гостей team-access `workspace/work` — симлинк), так
+   * что равенство строк тут не работает: сравнивать по realpath обязан
+   * вызывающий. Потребитель — devin-session-synchronizer.
+   */
+  findPendingAppSessions(provider: string): SessionRow[] {
+    const db = getConnection();
+    const rows = db
+      .prepare(
+        `SELECT ${SESSION_ROW_COLUMNS}
+         FROM sessions
+         WHERE provider = ?
+           AND provider_session_id IS NULL
+           AND isArchived = 0
+         ORDER BY datetime(COALESCE(updated_at, created_at)) DESC, session_id DESC`
+      )
+      .all(provider) as SessionRow[];
+
+    return normalizeSessionRows(rows);
+  },
+
+  /**
+   * Все известные пути транскриптов из таблицы сессий. Инкрементальный скан
+   * сверяет с ними диск: файл, которого нет в базе, индексируется независимо
+   * от mtime — иначе появившийся с «старым» временем (копия с сохранённым
+   * mtime, файл, долившийся между курсором и границей скана) навсегда
+   * оставался невидимым. Потребитель — claude-session-synchronizer.
+   */
+  listTranscriptPaths(): string[] {
+    const db = getConnection();
+    const rows = db
+      .prepare(`SELECT jsonl_path FROM sessions WHERE jsonl_path IS NOT NULL`)
+      .all() as { jsonl_path: string }[];
+
+    return rows.map((row) => row.jsonl_path);
+  },
+
   getAllSessions(): SessionRow[] {
     const db = getConnection();
     const rows = db
@@ -786,14 +907,14 @@ export const sessionsDb = {
    */
   getSessionsByProjectPathIncludingArchived(
     projectPath: string,
-    accountVisibility?: SessionAccountVisibility,
+    accountVisibility: SessionAccountVisibility = 'current',
   ): SessionRow[] {
     const db = getConnection();
     const normalizedProjectPath = normalizeProjectPath(projectPath);
-    // Permanent project deletion intentionally omits accountVisibility so it
-    // can still clean every transcript for the path. Sidebar/archive reads
-    // pass it explicitly and retain the same owner/guest boundary as active
-    // project pages.
+    // Скоуп обязателен и здесь: путь проекта не уникален между аккаунтами
+    // (симлинк/realpath дают один project_path у разных webuser-корней), и без
+    // него архивный вид показывал чужие сессии. Permanent project deletion
+    // передаёт 'all' явно — оно обязано вычистить транскрипты всех владельцев.
     const visibilitySql = accountVisibility
       ? accountVisibilitySql(accountVisibility)
       : '';

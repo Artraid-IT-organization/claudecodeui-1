@@ -102,6 +102,6 @@ test('apply: повторный запуск при идущей установ�
   assert.throws(() => startApply(PENDING.id, false), AppError);
 });
 
-test('discuss без пула — отказ, чат не создаётся', () => {
-  assert.throws(() => openDiscussChat('1'), AppError);
+test('discuss без пула — отказ, чат не создаётся', async () => {
+  await assert.rejects(() => openDiscussChat('1'), AppError);
 });

@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import Database from 'better-sqlite3';
 
-import { sessionsDb } from '@/modules/database/index.js';
+import { devinConnectionsDb, sessionsDb } from '@/modules/database/index.js';
 import { readDevinTokenUsage } from '@/modules/providers/list/devin/devin-usage.js';
 import { resolveClaudeContextWindow } from '@/modules/providers/services/claude-context-window.js';
 import type { AnyRecord } from '@/shared/types.js';
@@ -450,11 +450,15 @@ export function createProviderTokenUsageService(
       const providerSessionId = session.provider_session_id || session.session_id || sessionId;
 
       if (session.provider === 'devin') {
-        // Devin пишет расход каждого ответа в свою sessions.db — читаем его,
-        // как читаем стенограмму Claude. Беседы у Devin нет (чат без ходов) —
-        // нули, но окно уже настоящее, а не «недоступно».
+        // Devin пишет расход каждого ответа в sessions.db своего канала —
+        // читаем его, как читаем стенограмму Claude. Беседы у Devin нет (чат
+        // без ходов) — нули, но окно уже настоящее, а не «недоступно».
+        const connXdg = session.devin_connection_id != null
+          ? devinConnectionsDb.getById(session.devin_connection_id)?.xdg_data_home
+          : null;
         const usage = dependencies.readDevinTokenUsage(providerSessionId, {
           modelHint: session.model,
+          xdgDataHome: connXdg ?? null,
         });
         if (usage) {
           return usage;

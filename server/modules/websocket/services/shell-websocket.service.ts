@@ -5,7 +5,7 @@ import path from 'node:path';
 import pty, { type IPty } from 'node-pty';
 import { WebSocket, type RawData } from 'ws';
 
-import { getActiveDevinSlot, getDevinSlotEnv } from '@/shared/devin-slots.js';
+import { devinConnectionsDb, sessionsDb } from '@/modules/database/index.js';
 import type { AuthenticatedWebSocketRequest } from '@/shared/types.js';
 import { isPlatformOwnerWebUser, OPEN_REGISTRATION, parseIncomingJsonObject } from '@/shared/utils.js';
 import {
@@ -545,8 +545,15 @@ export function handleShellConnection(
             ...(runtimeContext.anthropicApiKey
               ? { ANTHROPIC_API_KEY: runtimeContext.anthropicApiKey }
               : {}),
-            // Devin в терминале входит под тем же аккаунтом, что и чаты (слот 1 или 2).
-            ...(provider === 'devin' ? getDevinSlotEnv(getActiveDevinSlot()) : {}),
+            // Devin в терминале — с XDG_DATA_HOME канала чата (Connection
+            // Layer): `devin` CLI в шелле видит креды и историю той линии.
+            ...(provider === 'devin' && sessionId
+              ? (() => {
+                  const connId = sessionsDb.getSessionById(sessionId)?.devin_connection_id;
+                  const conn = connId != null ? devinConnectionsDb.getById(connId) : null;
+                  return conn ? { XDG_DATA_HOME: conn.xdg_data_home } : {};
+                })()
+              : {}),
           },
         });
 

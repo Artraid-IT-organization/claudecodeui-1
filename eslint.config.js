@@ -163,6 +163,7 @@ export default tseslint.config(
             "server/shared/claude-cli-path.ts",
             "server/shared/image-attachments.ts",
             "server/shared/request-context.ts",
+            "server/shared/session-scope.ts",
             "server/shared/web-user-paths.ts",
             "server/shared/claude-login.ts",
             "server/shared/devin-slots.ts",

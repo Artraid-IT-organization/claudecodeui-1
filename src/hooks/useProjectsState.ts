@@ -3,6 +3,7 @@ import { markDetachedRun } from '../utils/detachedRuns';
 import type { NavigateFunction } from 'react-router-dom';
 
 import { api } from '../utils/api';
+import { DEFAULT_PROVIDER } from '../utils/defaultProvider';
 import type { ServerEvent } from '../contexts/WebSocketContext';
 import {
   effectiveScope,
@@ -88,7 +89,6 @@ type SessionDetailsApiPayload = {
 
 type ProjectSessionPage = Pick<Project, 'sessions' | 'sessionMeta'>;
 
-const DEFAULT_PROVIDER: LLMProvider = 'claude';
 
 const serialize = (value: unknown) => JSON.stringify(value ?? null);
 

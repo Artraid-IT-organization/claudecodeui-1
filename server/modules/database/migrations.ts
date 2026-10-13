@@ -2,7 +2,9 @@ import { Database } from 'better-sqlite3';
 
 import {
   APP_CONFIG_TABLE_SCHEMA_SQL,
+  DEVIN_CONNECTIONS_TABLE_SCHEMA_SQL,
   INVITE_TOKENS_TABLE_SCHEMA_SQL,
+  LOGIN_TOKEN_ALIASES_TABLE_SCHEMA_SQL,
   ACCOUNT_SCAN_STATE_TABLE_SCHEMA_SQL,
   LAST_SCANNED_AT_SQL,
   NOTIFICATION_CHANNEL_ENDPOINTS_TABLE_SCHEMA_SQL,
@@ -600,12 +602,10 @@ const addSessionFlagColumn = (db: Database): void => {
 };
 
 /**
- * Adds `initiated_by_user_id` (web user who created the chat through the app)
- * and `devin_connection_id` (corporate channel binding — filled by the Devin
- * runtime when the connection layer lands).
- *
- * Both are nullable — existing rows do not know their author, and the channel
- * binding only appears when a devin session runs through the new runtime.
+ * Атрибуция Devin-чатов (Connection Layer): кто из веб-пользователей
+ * инициировал сессию и через какой корпоративный канал она идёт. Обе колонки
+ * nullable — существующие строки авторства не знают, а привязка к каналу
+ * появляется у devin-сессии при первом ходе через новый рантайм.
  */
 const addSessionAttributionColumns = (db: Database): void => {
   if (!tableExists(db, 'sessions')) {
@@ -724,6 +724,16 @@ export const runMigrations = (db: Database) => {
       ON provider_models(provider, sort_order, id)
     `);
 
+    db.exec(DEVIN_CONNECTIONS_TABLE_SCHEMA_SQL);
+    addColumnToTableIfNotExists(
+      db,
+      'devin_connections',
+      (db.prepare('PRAGMA table_info(devin_connections)').all() as { name: string }[]).map((column) => column.name),
+      'account_email',
+      'TEXT',
+    );
+    db.exec(LOGIN_TOKEN_ALIASES_TABLE_SCHEMA_SQL);
+
     db.exec(PROJECTS_TABLE_SCHEMA_SQL);
     rebuildProjectsTableWithPrimaryKeySchema(db);
 
@@ -739,6 +749,7 @@ export const runMigrations = (db: Database) => {
     addSessionAttributionColumns(db);
     addServerScopeColumns(db);
     addSessionFlagColumn(db);
+    addSessionAttributionColumns(db);
     ensureProjectsForSessionPaths(db);
 
     db.exec('CREATE INDEX IF NOT EXISTS idx_session_ids_lookup ON sessions(session_id)');

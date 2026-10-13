@@ -496,6 +496,7 @@ export const api = {
     usageLimits: () => authenticatedFetch('/api/user/usage-limits'),
     codexAccount: () => authenticatedFetch('/api/user/codex-account'),
     devinAccount: () => authenticatedFetch('/api/user/devin-account'),
+    devinAccount: () => authenticatedFetch('/api/user/devin-account'),
     devinSelectSlot: (slot) =>
       authenticatedFetch('/api/user/devin-account/slot', {
         method: 'POST',

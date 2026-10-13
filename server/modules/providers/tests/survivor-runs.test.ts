@@ -288,7 +288,7 @@ test('переживший агент: этап известен сразу по
       await new Promise((resolve) => setTimeout(resolve, 20));
       await appendFile(transcript, toolResult('a1'));
       const phases: unknown[] = [];
-      pollSurvivors({ onPhase: (_id: string, phase: { phase: string; detail: string | null } | null) => { phases.push(phase); } });
+      pollSurvivors({ onPhase: (_id: string, phase: { phase: string; detail: string | null } | null, _provider: string) => { phases.push(phase); } });
       assert.deepEqual(phases, [{ phase: 'reading', detail: null }]);
 
       let repeats = 0;

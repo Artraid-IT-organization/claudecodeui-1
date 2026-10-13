@@ -22,11 +22,12 @@ import { DevinSkillsProvider } from '@/modules/providers/list/devin/devin-skills
  * Talks to `devin acp` — Devin CLI's Agent Client Protocol endpoint — one
  * child process per turn. Sessions persist inside Devin's shared
  * `~/.local/share/devin/cli/sessions.db` and resume across processes via
- * `session/load`.
+ * `session/load`. С Connection Layer хранилище — по каналу:
+ * `<devin_connections.xdg_data_home>/devin/cli/sessions.db`.
  *
- * Access note: Devin credentials are machine-global (one login per host), so
- * the provider is owner-only — enforced in provider routes and the chat
- * websocket gateway, not here.
+ * Access note: Devin работает через корпоративные каналы (devin_connections):
+ * сервер выбирает канал сам, пользователю логиниться не нужно. Администрирует
+ * каналы владелец площадки — гейт на /devin/connections в provider.routes.
  */
 export class DevinProvider extends AbstractProvider {
   readonly runtime: IProviderRuntime = devinRuntime;

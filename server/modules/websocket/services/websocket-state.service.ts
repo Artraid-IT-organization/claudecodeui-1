@@ -26,32 +26,56 @@ export const connectedClients = new Set<RealtimeClientConnection>();
  */
 export const clientUserIds = new WeakMap<RealtimeClientConnection, string | number | null>();
 
+import { sessionsDb } from '@/modules/database/index.js';
+
 /**
  * Whether this connection may receive realtime events of `provider`.
- * Owner-only providers (devin) are filtered per connection; everyone else
- * gets everything. Outside OPEN_REGISTRATION there are no guests, so all
- * events go through.
+ * Devin-чаты — собственность инициатора (Connection Layer): событие с
+ * sessionId идёт только его сокетам (+ владельцу площадки); без sessionId
+ * (наследие) — только владельцу. Остальные провайдеры видят все — как раньше.
  */
 export function canReceiveProviderEvents(
   client: RealtimeClientConnection,
   provider: string | null | undefined,
+  sessionId?: string | null,
 ): boolean {
   if (provider !== 'devin' || !OPEN_REGISTRATION) {
     return true;
   }
   const userId = clientUserIds.get(client);
   const numericUserId = userId === null || userId === undefined ? NaN : Number(userId);
-  return Number.isFinite(numericUserId) && isPlatformOwnerWebUser(numericUserId);
+  if (Number.isFinite(numericUserId) && isPlatformOwnerWebUser(numericUserId)) {
+    return true;
+  }
+  if (!sessionId) {
+    return false;
+  }
+  // В devin-событиях sessionId — чаще всего провайдерский (devinSessionId),
+  // строку находим по обоим ключам.
+  const row = sessionsDb.getSessionById(sessionId)
+    ?? sessionsDb.getSessionByProviderSessionId(sessionId);
+  return row?.initiated_by_user_id != null
+    && Number(row.initiated_by_user_id) === numericUserId;
 }
 
 /**
  * Broadcast one JSON payload to every connected client allowed to see
- * `provider` traffic. Replaces open-coded `connectedClients.forEach` at call
- * sites whose payload belongs to one session/provider.
+ * `provider` traffic. `sessionId` вытаскивается из payload, если вызывающий
+ * его явно не передал — нужен для per-user фильтрации devin-событий.
  */
-export function broadcastRealtimeEvent(payload: string, provider?: string | null): void {
+export function broadcastRealtimeEvent(payload: string, provider?: string | null, sessionId?: string | null): void {
+  let sid = sessionId ?? null;
+  if (provider === 'devin' && sid == null) {
+    try {
+      const parsed = JSON.parse(payload) as { sessionId?: unknown; newSessionId?: unknown };
+      sid = typeof parsed.sessionId === 'string' ? parsed.sessionId
+        : typeof parsed.newSessionId === 'string' ? parsed.newSessionId : null;
+    } catch {
+      sid = null;
+    }
+  }
   for (const client of connectedClients) {
-    if (client.readyState === WS_OPEN_STATE && canReceiveProviderEvents(client, provider)) {
+    if (client.readyState === WS_OPEN_STATE && canReceiveProviderEvents(client, provider, sid)) {
       client.send(payload);
     }
   }

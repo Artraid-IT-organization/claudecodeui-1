@@ -2,7 +2,7 @@ export { initializeDatabase } from '@/modules/database/init-db.js';
 export { closeConnection, getConnection, getDatabasePath } from '@/modules/database/connection.js';
 export { apiKeysDb } from '@/modules/database/repositories/api-keys.js';
 export { appConfigDb } from '@/modules/database/repositories/app-config.js';
-// chatGroupsDb: used by Chat Groups and WebSocket to assign a completed chat before broadcasting its canonical sidebar row.
+// chatGroupsDb: used by Providers (группировка чатов по словам) and WebSocket (session_upserted несёт группу).
 export { chatGroupsDb } from '@/modules/database/repositories/chat-groups.js';
 // chatMessageQueueDb: used by WebSocket to keep the chat message queue server-side (survives restarts, dispatched without an open tab).
 export { chatMessageQueueDb, type StoredQueuedChatMessage } from '@/modules/database/repositories/chat-message-queue.js';
@@ -17,9 +17,10 @@ export { providerModelsDb } from '@/modules/database/repositories/provider-model
 export { projectsDb } from '@/modules/database/repositories/projects.db.js';
 export { pushSubscriptionsDb } from '@/modules/database/repositories/push-subscriptions.js';
 export { scanStateDb } from '@/modules/database/repositories/scan-state.db.js';
+export { devinConnectionsDb, type DevinConnectionRow, type DevinConnectionHealth } from '@/modules/database/repositories/devin-connections.db.js';
 export { sessionsDb } from '@/modules/database/repositories/sessions.db.js';
 export { promptPresetsDb } from '@/modules/database/repositories/prompt-presets.js';
 export { userDb } from '@/modules/database/repositories/users.js';
-export { vapidKeysDb } from '@/modules/database/repositories/vapid-keys.js';
 export { voiceTranscriptsDb } from '@/modules/database/repositories/voice-transcripts.js';
 export type { StoredVoiceTranscript, VoiceTranscriptTarget } from '@/modules/database/repositories/voice-transcripts.js';
+export { vapidKeysDb } from '@/modules/database/repositories/vapid-keys.js';

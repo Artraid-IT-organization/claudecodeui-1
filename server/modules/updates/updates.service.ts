@@ -281,13 +281,13 @@ ${conflictPart}
  * «Обсудить с чатом»: новый чат, первым сообщением — бриф с фактами пула.
  * Отправка серверной очередью: ход начинается сразу, вкладка не нужна.
  */
-export function openDiscussChat(userId: string | null): { sessionId: string } {
+export async function openDiscussChat(userId: string | null): Promise<{ sessionId: string }> {
   const pending = readPending();
   if (!pending) {
     throw new AppError('Сейчас нет ожидающего обновления — обсуждать нечего.', { statusCode: 409 });
   }
 
-  const { sessionId } = sessionsService.createAppSession(DISCUSS_PROVIDER, discussCwd(), DISCUSS_SESSION_NAME);
+  const { sessionId } = await sessionsService.createAppSession(DISCUSS_PROVIDER, discussCwd(), DISCUSS_SESSION_NAME);
   queueChatMessage({
     id: `upd_${Date.now().toString(36)}`,
     sessionId,
