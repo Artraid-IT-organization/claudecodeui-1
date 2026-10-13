@@ -1204,13 +1204,19 @@ export function resolveDevinCliCommand(): string {
 }
 
 /**
- * Devin models the owner allows (Egor, 03.10.26: "only SWE-2, the rest are not allowed").
- * One rule for the picker (devin-models.provider.ts) and for the run itself
- * (devin-runtime.provider.js): anything else would spend the shared Devin quota
- * on models the owner has not approved. Matches swe-2, swe-2-high, swe-2-medium, swe-2-max.
+ * Devin models the owner allows. 03.10.26: "only SWE-2"; 13.10.26 Egor: "хочу видеть выбор
+ * адаптив или разные модели" — now every ordinary catalog model is pickable, with its cost tier
+ * in the picker description (only SWE-2 is free; the rest spend credits). One rule for the picker
+ * (devin-models.provider.ts) and for the run itself (devin-runtime.provider.js).
+ * Still refused: `fusion-*` (575 two-model combinations — would bury the picker) and the legacy
+ * `MODEL_*` ids. Real availability per account is the slot's configOptions (devin-models.provider.ts).
  */
 export function isAllowedDevinModel(model: unknown): boolean {
-  return typeof model === 'string' && /^swe-2(-(high|medium|max|low))?$/i.test(model.trim());
+  if (typeof model !== 'string') {
+    return false;
+  }
+  const value = model.trim();
+  return value.length > 0 && !/^fusion-/i.test(value) && !/^MODEL_/.test(value);
 }
 
 export const DEVIN_DEFAULT_MODEL = 'swe-2-high';

@@ -666,17 +666,17 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
     activeDevinRuns.set(sessionKey, run);
   }
 
-  // Only SWE-2 may run (owner's rule, 03.10.26): an old chat, a stale tab or a hand-made
-  // request naming another model is run on the default SWE-2 instead of spending the quota elsewhere.
+  // Каталог разрешён почти весь (Егор 13.10.26), отклоняются только fusion-*/MODEL_* —
+  // старый чат или ручной запрос с такой моделью идёт на модели по умолчанию.
   const requestedModel = await context.resolveResumeModel(sessionId, model);
   // Пустая модель тоже заменяется: иначе Devin взял бы модель из своего конфига, а защита держалась бы на внешнем файле.
   const resolvedModel = !requestedModel || !isAllowedDevinModel(requestedModel) ? DEVIN_DEFAULT_MODEL : requestedModel;
   run.resolvedModel = resolvedModel;
   if (resolvedModel !== requestedModel) {
-    console.warn(`[Devin] model "${requestedModel}" is not allowed (SWE-2 only) — running ${DEVIN_DEFAULT_MODEL}`);
+    console.warn(`[Devin] model "${requestedModel}" is not in the allowed catalog — running ${DEVIN_DEFAULT_MODEL}`);
   }
   // Команды Devin, меняющие модель изнутри чата ("/model opus", "/fusion", "/adaptive"), обошли бы
-  // правило «только SWE-2» — до запуска агента такой ход отклоняем.
+  // выбор модели из пикера — до запуска агента такой ход отклоняем.
   if (/^\s*\/(model|fusion|adaptive)\b/i.test(String(command ?? ''))) {
     if (sessionKey) {
       activeDevinRuns.delete(sessionKey);
@@ -685,7 +685,7 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
       provider: 'devin',
       sessionId: sessionId || null,
       kind: 'error',
-      content: 'Смена модели Devin запрещена: на этом аккаунте работает только SWE-2.',
+      content: 'Смена модели Devin командой запрещена — выберите модель в списке моделей чата.',
     }));
     sendMessage(ws, createCompleteMessage({
       provider: 'devin',

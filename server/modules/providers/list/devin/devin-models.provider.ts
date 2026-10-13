@@ -72,8 +72,9 @@ function parseDevinModelsCatalog(raw: unknown): ProviderModelOption[] {
         continue;
       }
       const label = readOptionalString(variantRecord?.label) || modelUid;
+      const costTier = readOptionalString(variantRecord?.cost_tier);
       const description = readOptionalString(variantRecord?.description)
-        ?? ([familyLabel, readOptionalString(variantRecord?.cost_summary)].filter(Boolean).join(' · ') || undefined);
+        ?? ([familyLabel, costTier === 'Free' ? 'бесплатная' : costTier ? `платная (${costTier})` : '', readOptionalString(variantRecord?.cost_summary)].filter(Boolean).join(' · ') || undefined);
       options.push({
         value: modelUid,
         label,
@@ -163,7 +164,7 @@ export class DevinModelsProvider implements IProviderModels {
       }
     }
 
-    // Only SWE-2 is allowed by the owner; the rest of the Devin catalog stays hidden.
+    // Everything but fusion-* and legacy MODEL_* (see isAllowedDevinModel); cost tier is in the description.
     const allowed = (models ?? []).filter((option) => isAllowedDevinModel(option.value));
     // The CLI catalog is wider than a channel's real list (set_config_option
     // answered Invalid params on every turn, 10.10.26). Once any session

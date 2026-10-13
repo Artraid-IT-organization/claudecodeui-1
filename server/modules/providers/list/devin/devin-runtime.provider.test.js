@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -367,6 +368,68 @@ test('devin runtime: model + permission mode are passed to the agent', async () 
     assert.equal(setMode?.params?.modeId, 'bypass');
     const setModel = capture.calls.find((c) => c.method === 'session/set_config_option');
     assert.equal(setModel?.params?.value, 'swe-2-max');
+  });
+});
+
+test('devin runtime: fusion-* and legacy MODEL_* ids are replaced by swe-2-high', async () => {
+  for (const forbidden of ['fusion-claude-opus-5-5-medium-sidekick-swe-2-medium', 'MODEL_GPT_5_2_LOW']) {
+    await withFakeDevin(async (tempRoot) => {
+      const writer = makeWriter();
+      await devinRuntime.run('Hi', {
+        cwd: tempRoot,
+        sessionId: `app-forbidden-${forbidden}`,
+        model: forbidden,
+        permissionMode: 'default',
+      }, writer, runtimeContext);
+
+      const capture = JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8'));
+      assert.deepEqual(capture.args, ['acp', '--model', 'swe-2-high'], `model ${forbidden} must not reach the agent`);
+      const setModel = capture.calls.find((c) => c.method === 'session/set_config_option');
+      assert.equal(setModel?.params?.value, 'swe-2-high');
+    });
+  }
+});
+
+test('devin runtime: adaptive and ordinary catalog models are allowed and reach the agent as picked', async () => {
+  for (const picked of ['adaptive', 'claude-haiku-5-5-medium']) {
+    await withFakeDevin(async (tempRoot) => {
+      const writer = makeWriter();
+      await devinRuntime.run('Hi', {
+        cwd: tempRoot,
+        sessionId: `app-allowed-${picked}`,
+        model: picked,
+        permissionMode: 'default',
+      }, writer, runtimeContext);
+
+      const capture = JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8'));
+      assert.deepEqual(capture.args, ['acp', '--model', picked]);
+      const setModel = capture.calls.find((c) => c.method === 'session/set_config_option');
+      assert.equal(setModel?.params?.value, picked);
+    });
+  }
+});
+
+test('devin runtime: /model, /fusion and /adaptive inside the chat are refused without starting the agent', async () => {
+  for (const forbidden of ['/model opus', '  /fusion', '/Adaptive']) {
+    await withFakeDevin(async (tempRoot) => {
+      const writer = makeWriter();
+      await devinRuntime.run(forbidden, { cwd: tempRoot, sessionId: `app-slash-${forbidden.trim()}` }, writer, runtimeContext);
+      const errors = writer.messages.filter((m) => m.kind === 'error');
+      const completes = writer.messages.filter((m) => m.kind === 'complete');
+      assert.equal(errors.length, 1, `${forbidden}: one error`);
+      assert.match(String(errors[0].content), /Смена модели Devin командой запрещена/);
+      assert.equal(completes.length, 1, `${forbidden}: exactly one complete`);
+      assert.equal(existsSync(process.env.DEVIN_RPC_CAPTURE), false, `${forbidden}: the agent must not have been started`);
+    });
+  }
+});
+
+test('devin runtime: an empty model is replaced by swe-2-high, not left to the agent config', async () => {
+  await withFakeDevin(async (tempRoot) => {
+    const writer = makeWriter();
+    await devinRuntime.run('Hi', { cwd: tempRoot, sessionId: 'app-nomodel-1', permissionMode: 'default' }, writer, runtimeContext);
+    const capture = JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8'));
+    assert.deepEqual(capture.args, ['acp', '--model', 'swe-2-high']);
   });
 });
 
