@@ -6,6 +6,11 @@ import { providerAuthService } from '@/modules/providers/services/provider-auth.
 import { providerCapabilitiesService } from '@/modules/providers/services/provider-capabilities.service.js';
 import { providerMcpService } from '@/modules/providers/services/mcp.service.js';
 import { providerModelsService } from '@/modules/providers/services/provider-models.service.js';
+import {
+  applyDevinModelAllowlistToCatalog,
+  assertDevinModelCatalogWritable,
+  clampDevinModelForUser,
+} from '@/modules/providers/services/devin-model-policy.js';
 import { providerTokenUsageService } from '@/modules/providers/services/provider-token-usage.service.js';
 import { providerSkillsService } from '@/modules/providers/services/skills.service.js';
 import { sessionConversationsSearchService } from '@/modules/providers/services/session-conversations-search.service.js';
@@ -696,7 +701,12 @@ router.get(
         statusCode: 404,
       });
     }
-    const models = await providerModelsService.getProviderModels(provider);
+    // Персональные белые списки: ограниченный аккаунт видит только свои модели.
+    const models = applyDevinModelAllowlistToCatalog(
+      provider,
+      getRequestRuntimeContext()?.userId,
+      await providerModelsService.getProviderModels(provider),
+    );
     res.json(createApiSuccessResponse({ provider, models }));
   }),
 );
@@ -705,6 +715,7 @@ router.post(
   '/:provider/models',
   asyncHandler(async (req: Request, res: Response) => {
     const provider = parseProvider(req.params.provider);
+    assertDevinModelCatalogWritable(provider, getRequestRuntimeContext()?.userId);
     const input = parseCustomProviderModelPayload(req.body);
     const result = await providerModelsService.createCustomModel(provider, input);
     res.status(201).json(createApiSuccessResponse({ provider, ...result }));
@@ -715,6 +726,7 @@ router.patch(
   '/:provider/models/:recordId',
   asyncHandler(async (req: Request, res: Response) => {
     const provider = parseProvider(req.params.provider);
+    assertDevinModelCatalogWritable(provider, getRequestRuntimeContext()?.userId);
     const recordId = parseModelRecordId(req.params.recordId);
     const input = parseCustomProviderModelPayload(req.body);
     const result = await providerModelsService.updateCustomModel(provider, recordId, input);
@@ -726,6 +738,7 @@ router.delete(
   '/:provider/models/:recordId',
   asyncHandler(async (req: Request, res: Response) => {
     const provider = parseProvider(req.params.provider);
+    assertDevinModelCatalogWritable(provider, getRequestRuntimeContext()?.userId);
     const recordId = parseModelRecordId(req.params.recordId);
     const result = await providerModelsService.deleteCustomModel(provider, recordId);
     res.json(createApiSuccessResponse({ provider, ...result }));
@@ -746,6 +759,7 @@ router.get(
     const result = await providerModelsService.resolveSessionModel(provider, {
       sessionId,
       requestedModel,
+      userId: getRequestRuntimeContext()?.userId,
     });
     res.json(createApiSuccessResponse(result));
   }),
@@ -756,7 +770,8 @@ router.post(
   asyncHandler(async (req: Request, res: Response) => {
     const provider = parseProvider(req.params.provider);
     const sessionId = parseSessionId(req.params.sessionId);
-    const model = parseSessionModelPayload(req.body);
+    const requestedModel = parseSessionModelPayload(req.body);
+    const model = clampDevinModelForUser(provider, getRequestRuntimeContext()?.userId, requestedModel) ?? requestedModel;
     const stored = providerModelsService.setSessionModel(provider, sessionId, model);
     // A session row only exists once the gateway has allocated one. Report the
     // selection back either way so the client can hold it until the first send.

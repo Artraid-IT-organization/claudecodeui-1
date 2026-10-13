@@ -11,6 +11,7 @@ import {
   resolveEffectiveProvider,
   stopSurvivor,
 } from '@/modules/providers/index.js';
+import { clampDevinModelForUser } from '@/modules/providers/services/devin-model-policy.js';
 import { chatRunRegistry, onChatRunCompleted } from '@/modules/websocket/services/chat-run-registry.service.js';
 import {
   broadcastChatQueue,
@@ -455,6 +456,10 @@ async function runProviderTurn(input: {
 }): Promise<void> {
   const { run, sessionId, provider, userId, projectPath, content, clientOptions, dependencies } = input;
   const runtimeContext = resolveWebUserRuntimeContext(userId);
+  // Персональные белые списки (devin-model-policy): недопустимая для этого
+  // аккаунта модель приводится к разрешённой до записи на сессию и до
+  // передачи ходу провайдера — устаревший выбор или прямой вызов не сработают.
+  clientOptions.model = clampDevinModelForUser(provider, userId, clientOptions.model);
   // Record what this turn runs with so reopening the session later restores the
   // same model and reasoning effort, and so the resume path has a
   // session-scoped model answer to use.

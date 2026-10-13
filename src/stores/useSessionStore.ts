@@ -127,6 +127,29 @@ export interface NormalizedMessage {
 
 export type SessionStatus = 'idle' | 'loading' | 'streaming' | 'error';
 
+/** Причина неудачной загрузки истории — UI показывает конкретное сообщение. */
+export type HistoryErrorKind =
+  | 'auth'
+  | 'denied'
+  | 'notfound'
+  | 'server'
+  | 'timeout'
+  | 'network'
+  | 'unknown';
+
+const classifyHistoryError = (error: unknown): HistoryErrorKind => {
+  const status = error instanceof Error ? Number(/HTTP (\d{3})/.exec(error.message)?.[1]) : NaN;
+  if (status === 401) return 'auth';
+  if (status === 403) return 'denied';
+  if (status === 404) return 'notfound';
+  if (status >= 500 && status < 600) return 'server';
+  if (error instanceof DOMException && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+    return 'timeout';
+  }
+  if (error instanceof TypeError) return 'network';
+  return 'unknown';
+};
+
 export interface SessionSlot {
   serverMessages: NormalizedMessage[];
   realtimeMessages: NormalizedMessage[];
@@ -147,6 +170,8 @@ export interface SessionSlot {
   tokenUsage: unknown;
   /** Номер разговора есть, файла переписки на диске нет — первый ход оборвался. */
   transcriptMissing: boolean;
+  /** Категория последней ошибки загрузки истории (null — ошибок не было). */
+  errorKind: HistoryErrorKind | null;
 }
 
 const EMPTY: NormalizedMessage[] = [];
@@ -170,6 +195,7 @@ function createEmptySlot(): SessionSlot {
     offset: 0,
     tokenUsage: null,
     transcriptMissing: false,
+    errorKind: null,
     _historyMutationQueue: Promise.resolve(),
   };
 }
@@ -465,6 +491,7 @@ export function useSessionStore() {
         slot.transcriptMissing = Boolean(data.transcriptMissing);
         slot.fetchedAt = Date.now();
         slot.status = 'idle';
+        slot.errorKind = null;
         slot.realtimeMessages = pruneRealtimeSupersededByServer(
           slot.serverMessages,
           slot.realtimeMessages,
@@ -479,6 +506,7 @@ export function useSessionStore() {
       } catch (error) {
         console.error(`[SessionStore] fetch failed for ${sessionId}:`, error);
         slot.status = 'error';
+        slot.errorKind = classifyHistoryError(error);
         notify(sessionId);
         return slot;
       }
