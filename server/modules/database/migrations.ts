@@ -600,6 +600,23 @@ const addSessionFlagColumn = (db: Database): void => {
 };
 
 /**
+ * Adds `initiated_by_user_id` (web user who created the chat through the app)
+ * and `devin_connection_id` (corporate channel binding — filled by the Devin
+ * runtime when the connection layer lands).
+ *
+ * Both are nullable — existing rows do not know their author, and the channel
+ * binding only appears when a devin session runs through the new runtime.
+ */
+const addSessionAttributionColumns = (db: Database): void => {
+  if (!tableExists(db, 'sessions')) {
+    return;
+  }
+  const columnNames = getTableInfo(db, 'sessions').map((column) => column.name);
+  addColumnToTableIfNotExists(db, 'sessions', columnNames, 'initiated_by_user_id', 'INTEGER');
+  addColumnToTableIfNotExists(db, 'sessions', columnNames, 'devin_connection_id', 'INTEGER');
+};
+
+/**
  * Adds `account_dir` (which Claude account a transcript belongs to) and
  * `origin` (terminal / web / auto — see server/shared/session-scope.ts).
  *
@@ -719,6 +736,7 @@ export const runMigrations = (db: Database) => {
     addSessionTitleSourceColumn(db);
     addSessionGroupColumns(db);
     addSessionAccountAndOriginColumns(db);
+    addSessionAttributionColumns(db);
     addServerScopeColumns(db);
     addSessionFlagColumn(db);
     ensureProjectsForSessionPaths(db);
@@ -731,6 +749,8 @@ export const runMigrations = (db: Database) => {
     db.exec('CREATE INDEX IF NOT EXISTS idx_projects_is_starred ON projects(isStarred)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_projects_is_archived ON projects(isArchived)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_server_scope ON sessions(server_scope)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_initiated_by ON sessions(initiated_by_user_id)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_devin_connection ON sessions(devin_connection_id)');
 
     db.exec('DROP INDEX IF EXISTS idx_session_names_lookup');
     db.exec('DROP INDEX IF EXISTS idx_sessions_workspace_path');

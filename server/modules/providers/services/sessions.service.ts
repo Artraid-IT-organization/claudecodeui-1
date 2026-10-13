@@ -13,6 +13,7 @@ import type {
   ServerScope,
 } from '@/shared/types.js';
 import { getRequestRuntimeContext } from '@/shared/request-context.js';
+import { getActiveAccountDir } from '@/shared/session-scope.js';
 import { ensureJpegForHeic } from '@/shared/image-attachments.js';
 import {
   AppError,
@@ -40,6 +41,44 @@ const assertSessionProviderAllowed = (provider: string): void => {
       statusCode: 403,
     });
   }
+};
+
+/**
+ * Любой чат читает/меняет владелец площадки и человек, которому чат
+ * принадлежит (`initiated_by_user_id` автора или `account_dir` аккаунта —
+ * то же правило, что `assertSessionRowAllowed` в provider.routes).
+ * Строки без владельца (наследие до атрибуции) — только владельцу площадки.
+ *
+ * Проверка общая для ВСЕХ провайдеров: раньше гейт стоял только на devin,
+ * и чужой claude/codex-чат читался, переименовывался и удалялся по прямой
+ * ссылке (IDOR, аудит корпоративной линии 10.10.26 — fe3cc270).
+ */
+const assertSessionReadable = (session: {
+  provider: string;
+  initiated_by_user_id: number | null;
+  account_dir: string | null;
+}): void => {
+  // Креды Devin одни на машину — провайдерный гейт владельца остаётся
+  // поверх проверки владения чатом (до Connection Layer интеграции).
+  assertSessionProviderAllowed(session.provider);
+  if (!OPEN_REGISTRATION) {
+    return;
+  }
+  const userId = getRequestRuntimeContext()?.userId;
+  const numericUserId = userId === undefined || userId === null ? NaN : Number(userId);
+  if (Number.isFinite(numericUserId) && isPlatformOwnerWebUser(numericUserId)) {
+    return;
+  }
+  if (session.initiated_by_user_id != null && Number(session.initiated_by_user_id) === numericUserId) {
+    return;
+  }
+  if (session.account_dir != null && session.account_dir === getActiveAccountDir()) {
+    return;
+  }
+  throw new AppError('This session belongs to another user.', {
+    code: 'PROVIDER_NOT_ALLOWED',
+    statusCode: 403,
+  });
 };
 
 /**
@@ -358,6 +397,7 @@ export const sessionsService = {
         statusCode: 404,
       });
     }
+    assertSessionReadable(session);
 
     sessionsDb.setSessionServerScope(sessionId, serverScope);
     return { serverScope };
@@ -375,6 +415,7 @@ export const sessionsService = {
         statusCode: 404,
       });
     }
+    assertSessionReadable(session);
 
     sessionsDb.setSessionFlagged(sessionId, flagged);
     return { flagged };
@@ -392,7 +433,7 @@ export const sessionsService = {
         statusCode: 404,
       });
     }
-    assertSessionProviderAllowed(session.provider);
+    assertSessionReadable(session);
 
     if (!session.provider_session_id) {
       throw new AppError('This session ID is not available yet.', {
@@ -424,7 +465,7 @@ export const sessionsService = {
         statusCode: 404,
       });
     }
-    assertSessionProviderAllowed(session.provider);
+    assertSessionReadable(session);
 
     // App-created sessions that never produced a provider transcript yet
     // (e.g. first message still streaming) simply have no history.
@@ -475,7 +516,7 @@ export const sessionsService = {
         statusCode: 404,
       });
     }
-    assertSessionProviderAllowed(session.provider);
+    assertSessionReadable(session);
 
     const projectPath = session.project_path?.trim() ? session.project_path : null;
     const project = projectPath ? projectsDb.getProjectPath(projectPath) : null;
@@ -567,6 +608,7 @@ export const sessionsService = {
         statusCode: 404,
       });
     }
+    assertSessionReadable(session);
 
     if (!options.force) {
       sessionsDb.updateSessionIsArchived(sessionId, true);
@@ -608,6 +650,7 @@ export const sessionsService = {
         statusCode: 404,
       });
     }
+    assertSessionReadable(session);
 
     sessionsDb.updateSessionIsArchived(sessionId, false);
     return { sessionId, isArchived: false };
@@ -624,6 +667,7 @@ export const sessionsService = {
         statusCode: 404,
       });
     }
+    assertSessionReadable(session);
 
     sessionsDb.renameSessionByUser(sessionId, summary);
     return { sessionId, summary };
