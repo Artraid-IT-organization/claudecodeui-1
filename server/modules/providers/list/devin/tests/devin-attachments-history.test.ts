@@ -6,25 +6,36 @@ import test from 'node:test';
 
 import Database from 'better-sqlite3';
 
+import { closeConnection, initializeDatabase } from '@/modules/database/index.js';
 import { DevinSessionsProvider } from '@/modules/providers/list/devin/devin-sessions.provider.js';
 import { appendFilesInputTag, appendImagesInputTag } from '@/shared/image-attachments.js';
 
 const SESSION_ID = 'session-att';
 
 /**
- * Минимальная изоляция: `fetchHistory` читает только Devin-хранилище
- * (`XDG_DATA_HOME/devin/cli/sessions.db`), прикладной базы не касается.
+ * Изоляция: Devin-хранилище — во временном `XDG_DATA_HOME`, прикладная база
+ * (привязка чата к каналу через `sessionsDb`) — во временном `DATABASE_PATH`.
  */
 async function withDevinStore(runTest: (devinDbPath: string) => Promise<void>): Promise<void> {
   const previousXdg = process.env.XDG_DATA_HOME;
+  const previousDbPath = process.env.DATABASE_PATH;
   const xdgHome = await mkdtemp(path.join(os.tmpdir(), 'devin-att-xdg-'));
   process.env.XDG_DATA_HOME = xdgHome;
   const devinDbDir = path.join(xdgHome, 'devin', 'cli');
   await mkdir(devinDbDir, { recursive: true });
   const devinDbPath = path.join(devinDbDir, 'sessions.db');
+  closeConnection();
+  process.env.DATABASE_PATH = path.join(xdgHome, 'auth.db');
+  await initializeDatabase();
   try {
     await runTest(devinDbPath);
   } finally {
+    closeConnection();
+    if (previousDbPath === undefined) {
+      delete process.env.DATABASE_PATH;
+    } else {
+      process.env.DATABASE_PATH = previousDbPath;
+    }
     if (previousXdg === undefined) {
       delete process.env.XDG_DATA_HOME;
     } else {
