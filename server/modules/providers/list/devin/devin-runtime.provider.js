@@ -492,6 +492,9 @@ function answerPermissionRequest(request, devinMode, ws, sessionId, run, connect
  * поэтому повтор честный (без дублей и потерь).
  */
 const FAILOVER_TAG = '__devinFailover';
+// Модель не приняла запрос (invalid_argument) до живого вывода — тот же ход повторяем на DEVIN_DEFAULT_MODEL
+// той же подпиской, аккаунт не меняем (Егор 13.10.26: на adaptive ошибка, на High заработало).
+const MODEL_FALLBACK_TAG = '__devinModelFallback';
 
 /** Сколько всего попыток у хода: по одной на подписку, с запасом на будущие. */
 const MAX_TURN_ATTEMPTS = 4;
@@ -530,6 +533,7 @@ async function queryDevin(command, options = {}, ws, context) {
   let lane = null;
   const attempted = [];
   let lastError = null;
+  let turnOptions = options;
   for (let attempt = 0; attempt < MAX_TURN_ATTEMPTS; attempt++) {
     let connection;
     let dataHome;
@@ -557,7 +561,7 @@ async function queryDevin(command, options = {}, ws, context) {
 
     try {
       await attemptDevinTurn(
-        command, options, ws, context, { lane: lane ?? connection, credential: connection, dataHome },
+        command, turnOptions, ws, context, { lane: lane ?? connection, credential: connection, dataHome },
         providerSessionId, attempt + 1 < MAX_TURN_ATTEMPTS,
       );
       return;
@@ -565,7 +569,7 @@ async function queryDevin(command, options = {}, ws, context) {
       lastError = error instanceof Error ? error : new Error(String(error));
       devinConnectionsService.recordOutcome(connection.id, 'failed', lastError.message);
       // Сбой после начала живого ответа повтор не лечит — ход заканчивается ошибкой.
-      if (!lastError[FAILOVER_TAG]) {
+      if (!lastError[FAILOVER_TAG] && !lastError[MODEL_FALLBACK_TAG]) {
         throw lastError;
       }
       // Новый чат успел получить сессию на этой линии — повтор продолжает её же,
@@ -573,6 +577,19 @@ async function queryDevin(command, options = {}, ws, context) {
       if (lastError.devinSessionId) {
         providerSessionId = lastError.devinSessionId;
         lane = lane ?? connection;
+      }
+      if (lastError[MODEL_FALLBACK_TAG]) {
+        // Та же подписка, другая модель: подписка здорова, не считаем её «испробованной».
+        attempted.pop();
+        turnOptions = { ...turnOptions, forceModel: DEVIN_DEFAULT_MODEL };
+        console.log(`[Devin] ход чата ${sessionId || '-'}: модель ${lastError.requestedModel || '?'} не приняла запрос — повтор на ${DEVIN_DEFAULT_MODEL}`);
+        sendMessage(ws, createNormalizedMessage({
+          provider: 'devin',
+          sessionId: sessionId || null,
+          kind: 'status',
+          text: `Модель ${lastError.requestedModel || ''} не приняла запрос — повторяю на ${DEVIN_DEFAULT_MODEL}. Чтобы не терять время, выберите SWE-2 High в списке моделей.`,
+        }));
+        continue;
       }
       // Без имени подписки: строку видит и гость, а реестр подписок — только владелец.
       const reason = classifyDevinFailure(lastError.message) === 'rate_limit'
@@ -668,7 +685,7 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
 
   // Каталог разрешён почти весь (Егор 13.10.26), отклоняются только fusion-*/MODEL_* —
   // старый чат или ручной запрос с такой моделью идёт на модели по умолчанию.
-  const requestedModel = await context.resolveResumeModel(sessionId, model);
+  const requestedModel = options.forceModel || await context.resolveResumeModel(sessionId, model);
   // Пустая модель тоже заменяется: иначе Devin взял бы модель из своего конфига, а защита держалась бы на внешнем файле.
   const resolvedModel = !requestedModel || !isAllowedDevinModel(requestedModel) ? DEVIN_DEFAULT_MODEL : requestedModel;
   run.resolvedModel = resolvedModel;
@@ -864,14 +881,15 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
   };
 
   return await new Promise((resolve, reject) => {
-    const requestFailover = (message) => {
+    const requestFailover = (message, tag = FAILOVER_TAG) => {
       run.failoverRequested = true;
       // Поздний onClose убитого процесса обязан молчать: complete хода теперь
       // принадлежит следующей попытке на другом канале.
       run.finishRun = true;
       silentCleanup();
       const error = new Error(message);
-      error[FAILOVER_TAG] = true;
+      error[tag] = true;
+      error.requestedModel = resolvedModel;
       // Сессия, которую Devin успел выделить на линии: повтор её загрузит.
       error.devinSessionId = run.devinSessionId || null;
       reject(error);
@@ -1208,6 +1226,10 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
         ? `${message} — ${tail.trim().split('\n').pop()}`
         : message;
       const failureClass = classifyDevinFailure(detail);
+      if (failureClass === 'model' && !run.failoverRequested && canFailoverNow() && resolvedModel !== DEVIN_DEFAULT_MODEL) {
+        requestFailover(detail, MODEL_FALLBACK_TAG);
+        return;
+      }
       if (!run.failoverRequested && canFailoverNow() && isFailoverableFailure(failureClass)) {
         requestFailover(detail);
         return;

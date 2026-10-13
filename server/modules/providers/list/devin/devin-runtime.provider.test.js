@@ -91,6 +91,11 @@ rl.on('line', (line) => {
       if (process.env.DEVIN_TURN_LOG) {
         fs.appendFileSync(process.env.DEVIN_TURN_LOG, JSON.stringify({ xdg: process.env.XDG_DATA_HOME, cred: cred.trim(), methods: seen.map((m) => m.method) }) + '\\n');
       }
+      if (process.env.DEVIN_REJECT_MODEL && process.argv.includes(process.env.DEVIN_REJECT_MODEL)) {
+        // Живой формат отказа модели (журнал 13.10.26, adaptive в чате с историей SWE-2): ошибка на prompt, до вывода.
+        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code: -32013, message: 'Client error: Protocol error (invalid_argument): There is an issue with this request, please try a different model. (trace ID: 9074a8d8c7a08d1b)', data: { 'cognition.ai/retryable': true } } }) + '\\n');
+        return;
+      }
       if (cred.includes('limited')) {
         // Живой формат лимита Devin (журнал cc2 09.10.26): ошибка на prompt, до вывода.
         process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code: -32010, message: 'Reached free model rate limit. Your limit will reset in 34 minutes (at 21:01 UTC). (trace ID: afd89c403f6c)' } }) + '\\n');
@@ -407,6 +412,50 @@ test('devin runtime: adaptive and ordinary catalog models are allowed and reach 
       assert.equal(setModel?.params?.value, picked);
     });
   }
+});
+
+test('devin runtime: model rejected with invalid_argument is retried once on swe-2-high, same subscription', async () => {
+  await withFakeDevin(async (tempRoot) => {
+    process.env.DEVIN_REJECT_MODEL = 'adaptive';
+    try {
+      const writer = makeWriter();
+      await devinRuntime.run('Hi', {
+        cwd: tempRoot,
+        sessionId: 'app-model-reject',
+        model: 'adaptive',
+        permissionMode: 'default',
+      }, writer, runtimeContext);
+
+      const capture = JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8'));
+      assert.deepEqual(capture.args, ['acp', '--model', 'swe-2-high'], 'повтор идёт на swe-2-high');
+      const errors = writer.messages.filter((m) => m.kind === 'error');
+      assert.equal(errors.length, 0, 'человек не видит красной ошибки');
+      const notice = writer.messages.find((m) => m.kind === 'status' && String(m.text).includes('не приняла запрос'));
+      assert.ok(notice, 'в чате строка о повторе на другой модели');
+      assert.match(String(notice.text), /adaptive/);
+      assert.ok(writer.messages.some((m) => JSON.stringify(m).includes('LIVE-REPLY')), 'ответ пришёл');
+    } finally {
+      delete process.env.DEVIN_REJECT_MODEL;
+    }
+  });
+});
+
+test('devin runtime: swe-2-high rejected with invalid_argument is not retried — the error is shown', async () => {
+  await withFakeDevin(async (tempRoot) => {
+    process.env.DEVIN_REJECT_MODEL = 'swe-2-high';
+    try {
+      const writer = makeWriter();
+      await assert.rejects(() => devinRuntime.run('Hi', {
+        cwd: tempRoot,
+        sessionId: 'app-model-reject-default',
+        model: 'swe-2-high',
+        permissionMode: 'default',
+      }, writer, runtimeContext));
+      assert.ok(writer.messages.some((m) => m.kind === 'error'), 'ошибка показана');
+    } finally {
+      delete process.env.DEVIN_REJECT_MODEL;
+    }
+  });
 });
 
 test('devin runtime: /model, /fusion and /adaptive inside the chat are refused without starting the agent', async () => {

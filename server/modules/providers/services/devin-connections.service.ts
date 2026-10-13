@@ -44,7 +44,7 @@ const HEALTH_CHECK_TIMEOUT_MS = 20_000;
  * 'session_locked' — сессию держит другой процесс devin (предыдущий ход чата
  * ещё жив): подписка ни при чём, перебор подписок ничего не даст.
  */
-export type DevinFailureClass = 'auth' | 'rate_limit' | 'session_locked' | 'transient';
+export type DevinFailureClass = 'auth' | 'rate_limit' | 'session_locked' | 'model' | 'transient';
 
 const DEVIN_CONNECTION_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 
@@ -104,6 +104,12 @@ export function classifyDevinFailure(message: string): DevinFailureClass {
   // errorKind session_locked. Проверка первой: в хвосте stderr бывают и «403».
   if (/already open in another process|session_locked/.test(message.toLowerCase())) {
     return 'session_locked';
+  }
+  // Живой текст 13.10.26 (adaptive в чате с историей SWE-2): «Protocol error (invalid_argument):
+  // There is an issue with this request, please try a different model». Подписка здорова —
+  // не принимает запрос сама модель; лечится повтором на другой модели, не сменой аккаунта.
+  if (/invalid_argument|please try a different model/.test(text)) {
+    return 'model';
   }
   if (
     /\b40[13]\b|unauthori[sz]ed|not authenticated|authentication required|invalid (service key|token|credential)|no credentials|devin auth login/.test(text)
@@ -553,8 +559,8 @@ export const devinConnectionsService = {
     }
     const cls = classifyDevinFailure(errorMessage ?? '');
     const clipped = (errorMessage ?? '').slice(0, 500);
-    if (cls === 'session_locked') {
-      return; // подписка здорова — занят чат, а не она
+    if (cls === 'session_locked' || cls === 'model') {
+      return; // подписка здорова — занят чат или модель не приняла запрос, а не она
     }
     if (cls === 'auth') {
       devinConnectionsDb.markHealth(id, 'auth_failed', { lastError: clipped });
