@@ -11,6 +11,7 @@ export { providerRuntimeService } from './services/provider-runtime.service.js';
 export {
   getSurvivorPhase,
   getSurvivorProvider,
+  isRecordedAgentAlive,
   isSurvivorRunning,
   listSurvivors,
   stopSurvivor,
@@ -19,6 +20,13 @@ export { getLiveLimits, recordRateLimitEvent } from './services/usage-limits.sto
 
 // providerModelsService: used by Commands to list models and resolve the active session model.
 export { providerModelsService } from './services/provider-models.service.js';
+
+// clampDevinModelForUser: модуль websocket приводит выбор модели Devin к
+// разрешённому пользователю перед запуском хода (chat-websocket.service).
+export { clampDevinModelForUser } from './services/devin-model-policy.js';
+// describeDevinFailureForUser: причина сбоя хода Devin словами человека —
+// журнал chat_runs и плашка в ленте (chat-websocket.service).
+export { describeDevinFailureForUser } from './services/devin-connections.service.js';
 
 // sessionsService: модуль обновлений (updates) создаёт через него чат-разбор.
 // resolveEffectiveProvider: the websocket gateway asks it before every run —

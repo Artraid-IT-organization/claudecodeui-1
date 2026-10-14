@@ -268,6 +268,24 @@ export const chatMessageQueueDb = {
   },
 
   /**
+   * Первая НЕзахваченная строка очереди БЕЗ захвата — посмотреть условия
+   * отправки до решения её везти (например, паузу `__notBefore` после
+   * неудачи доставки). Захват делает `claim(id)` — он атомарен сам по себе,
+   * гонка между просмотром и захватом проигрывается безболезненно.
+   */
+  peekFirst(sessionId: string): StoredQueuedChatMessage | null {
+    ensureTable();
+    const row = getConnection()
+      .prepare(
+        `SELECT * FROM chat_message_queue
+         WHERE session_id = ? AND claimed_at IS NULL AND delivery_state = 'queued'
+         ORDER BY position ASC, created_at ASC, id ASC LIMIT 1`,
+      )
+      .get(sessionId) as QueueRow | undefined;
+    return row ? toQueuedMessage(row) : null;
+  },
+
+  /**
    * Захватывает первую НЕзахваченную строку очереди — «талон»: кто захватил,
    * тот и отправляет. Захват и выбор идут одной сделкой, два одновременных
    * конца хода одну строку не заберут дважды. Строка остаётся в таблице:
@@ -303,7 +321,7 @@ export const chatMessageQueueDb = {
    * а не на «место занято — завести не вышло». После потолка попыток вместо
    * возврата зовут `markFailed`.
    */
-  releaseClaim(id: string, options?: { bumpAttempts?: boolean }): void {
+  releaseClaim(id: string, options?: { bumpAttempts?: boolean; notBefore?: number }): void {
     ensureTable();
     const db = getConnection();
     if (!options?.bumpAttempts) {
@@ -318,6 +336,9 @@ export const chatMessageQueueDb = {
     }
     const parsed = parseOptions(row.options_json);
     parsed.__redispatch = Number(parsed.__redispatch ?? 0) + 1;
+    if (options.notBefore) {
+      parsed.__notBefore = options.notBefore;
+    }
     db.prepare(
       'UPDATE chat_message_queue SET claimed_at = NULL, options_json = ? WHERE id = ?',
     ).run(JSON.stringify(parsed), id);

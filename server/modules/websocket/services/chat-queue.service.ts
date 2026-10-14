@@ -127,6 +127,14 @@ export function queueChatMessage(message: Omit<StoredQueuedChatMessage, 'created
 const MAX_DELIVERY_ATTEMPTS = 30;
 
 /**
+ * Пауза между возвратом недошедшего сообщения и следующей попыткой — равна
+ * периоду сторожа (минута). Без неё конец упавшего хода сам тут же дёргал бы
+ * обход, и попытки сгорали бы подряд, не дожидаясь временной причины — замок
+ * выжившего агента живёт порядка минуты.
+ */
+const REDELIVERY_BACKOFF_MS = 60_000;
+
+/**
  * Заведомо недоставимо: чат удалён, провайдер выключен, нет доступа — повтор
  * не поможет. Строка остаётся в базе помеченной `failed` и видна человеку в
  * доке с причиной — решение за ним (исправить, удалить, нажать «Сейчас»).
@@ -158,12 +166,13 @@ export function returnClaimedToQueue(
 ): 'requeued' | 'failed' {
   const attempts = Number((message.options as Record<string, unknown> | undefined)?.__redispatch ?? 0) + 1;
   if (attempts < MAX_DELIVERY_ATTEMPTS) {
+    const notBefore = Date.now() + REDELIVERY_BACKOFF_MS;
     if (chatMessageQueueDb.has(message.id)) {
-      chatMessageQueueDb.releaseClaim(message.id, { bumpAttempts: true });
+      chatMessageQueueDb.releaseClaim(message.id, { bumpAttempts: true, notBefore });
     } else {
       chatMessageQueueDb.insertFront({
         ...message,
-        options: { ...(message.options ?? {}), __redispatch: attempts },
+        options: { ...(message.options ?? {}), __redispatch: attempts, __notBefore: notBefore },
       });
     }
     broadcastChatQueue(message.sessionId);
@@ -199,11 +208,25 @@ async function dispatchSession(sessionId: string): Promise<void> {
     return;
   }
 
+  // Смотрим первую строку ДО захвата: вернувшееся из хода недошедшее
+  // сообщение несёт паузу `__notBefore`, и повторять её раньше отметки нельзя —
+  // иначе конец упавшего хода мгновенно дёргает обход, и попытки сгорают
+  // подряд, не дожидаясь временной причины (замок выжившего ~минуту).
+  const candidate = chatMessageQueueDb.peekFirst(sessionId);
+  if (!candidate) {
+    return;
+  }
+  const notBefore = Number((candidate.options as Record<string, unknown> | undefined)?.__notBefore ?? 0);
+  if (notBefore > Date.now()) {
+    return;
+  }
+
   // Захватываем, не удаляя: строка покидает таблицу только после подтверждённой
   // передачи prompt агенту (markDelivered на якоре). Пока она захвачена, обход
   // её не видит — одной строкой две отправки не случится.
-  const next = chatMessageQueueDb.claimFirst(sessionId);
+  const next = chatMessageQueueDb.claim(candidate.id) ? candidate : null;
   if (!next) {
+    // Строку увёл параллельный проход/«Сейчас» — её повезёт он.
     return;
   }
   broadcastChatQueue(sessionId);

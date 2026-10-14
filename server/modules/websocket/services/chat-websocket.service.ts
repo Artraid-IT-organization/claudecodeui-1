@@ -2,7 +2,7 @@ import path from 'node:path';
 
 import type { WebSocket } from 'ws';
 
-import { chatMessageQueueDb, sessionsDb, type StoredQueuedChatMessage } from '@/modules/database/index.js';
+import { chatMessageQueueDb, chatRunsDb, sessionsDb, type StoredQueuedChatMessage } from '@/modules/database/index.js';
 import {
   getSurvivorPhase,
   getSurvivorProvider,
@@ -10,8 +10,9 @@ import {
   providerModelsService,
   resolveEffectiveProvider,
   stopSurvivor,
+  clampDevinModelForUser,
+  describeDevinFailureForUser,
 } from '@/modules/providers/index.js';
-import { clampDevinModelForUser } from '@/modules/providers/services/devin-model-policy.js';
 import { chatRunRegistry, onChatRunCompleted } from '@/modules/websocket/services/chat-run-registry.service.js';
 import {
   broadcastChatQueue,
@@ -69,8 +70,6 @@ import {
  * person routinely keeps 3+ chats busy; 8 GB server has room).
  */
 const MAX_CONCURRENT_RUNS_PER_USER = 5;
-
-
 
 /**
  * Trust boundary for client-supplied image attachments: chat.send options come
@@ -470,6 +469,22 @@ async function steerIntoRunningTurn(input: {
 type StartedChatRun = NonNullable<ReturnType<typeof chatRunRegistry.startRun>>;
 
 /**
+ * Причина гибели хода словами человека. Devin-классы знают готовые
+ * формулировки (лимит, вход, замок); остальное обрезаем до первой строки —
+ * сырой хвост с trace id и журналом CLI человеку не помогает.
+ */
+function describeRunFailure(provider: LLMProvider, raw: string): string {
+  if (provider === 'devin') {
+    const human = describeDevinFailureForUser(raw);
+    if (human) {
+      return human;
+    }
+  }
+  const firstLine = raw.replace(/\(trace id:[\s\S]*$/i, '').split('\n').map((line) => line.trim()).filter(Boolean)[0] ?? '';
+  return (firstLine || 'Ход завершился ошибкой.').slice(0, 300);
+}
+
+/**
  * Ведёт один ход: разбирает настройки составителя, проверяет вложения и
  * отдаёт запрос провайдеру.
  *
@@ -586,6 +601,9 @@ async function runProviderTurn(input: {
   } catch (error) {
     turnError = error instanceof Error ? error.message : String(error);
     console.error(`[Chat] Provider runtime "${provider}" failed`, { sessionId, error: turnError });
+    // Причина — в журнал хода и в плашку человеку: без неё ход «просто
+    // перестал» и страница после перезагрузки не знает, чем он кончился.
+    chatRunRegistry.noteRunFailure(run, describeRunFailure(provider, turnError));
   } finally {
     // Строка очереди, которую вёз этот ход: доехала — снята с очереди на якоре
     // (markRunPromptAnchored → markDelivered). Не доехала — возвращаем со
@@ -755,9 +773,12 @@ async function runQueuedChatMessage(
     return false;
   }
 
+  // Копия: `message.options` — тот же объект, что у pendingMessage, а там
+  // живут служебные ключи доставки (__redispatch, __notBefore) — из копии
+  // их убираем, чтобы провайдеру служебное не уезжало, из записи — не стираем.
   const clientOptions = { ...((message.options ?? {}) as AnyRecord) };
-  // Служебный счётчик попыток доставки вниз по стеку не спускаем.
   delete clientOptions.__redispatch;
+  delete clientOptions.__notBefore;
   if (providerMigrated) {
     // Модель/усилие в сообщении выбраны под старый провайдер — Devin их не знает.
     delete clientOptions.model;
@@ -870,8 +891,8 @@ async function handleChatAbort(
 
   const run = chatRunRegistry.getRun(sessionId);
   // Человек нажал «остановить» ДО того, как prompt доехал до агента: сообщение
-  // не воскрешать — снимаем его и с хода, и со строки очереди, иначе обход
-  // отправил бы «отменённое» снова.
+  // не воскрешать — снимаем его и с хода, и со строки очереди, и из журнала
+  // хода, иначе обход отправил бы «отменённое» снова.
   if (run && run.status === 'running' && !run.promptAnchored && run.pendingMessage) {
     const cancelled = run.pendingMessage;
     run.pendingMessage = null;
@@ -880,6 +901,11 @@ async function handleChatAbort(
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       console.error(`[Chat] остановка хода ${sessionId}: не удалось снять сообщение ${cancelled.id} с очереди: ${text}`);
+    }
+    try {
+      chatRunsDb.clearPending(run.runId);
+    } catch {
+      // журнал не написался — сверка при старте подчистит
     }
   }
   // Агент пережил перезапуск сайта: канала к нему у сервера нет, остановить
@@ -987,6 +1013,27 @@ function handleChatSubscribe(
       ? getSurvivorPhase(sessionId)
       : null;
 
+    // Чем кончился последний ход — вкладке, открывшей чат после конца:
+    // живые события исхода ушли в сокет, которого могло уже не быть
+    // (iOS убивает страницу в фоне), а журнал chat_runs терминальный
+    // исход держит всегда. Показываем только неуспех — «завершился
+    // нормально» баннером не нужен.
+    let lastRun: Record<string, unknown> | null = null;
+    if (!isProcessing) {
+      try {
+        const finished = chatRunsDb.latestFinishedForSession(sessionId);
+        if (finished && finished.status !== 'completed') {
+          lastRun = {
+            status: finished.status,
+            error: finished.error,
+            finishedAt: finished.finishedAt,
+          };
+        }
+      } catch {
+        // журнал не читается — работе подписки это не мешает
+      }
+    }
+
     sendJson(ws, {
       kind: 'chat_subscribed',
       sessionId,
@@ -996,6 +1043,7 @@ function handleChatSubscribe(
       lastSeq: run?.lastSeq ?? 0,
       runStartedAt: run?.startedAt ?? null,
       pendingPermissions,
+      lastRun,
       // Очередь приходит вместе с состоянием чата: вкладка её только
       // показывает, хранит и отправляет сервер.
       queue: listChatQueue(sessionId),

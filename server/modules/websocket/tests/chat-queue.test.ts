@@ -159,6 +159,138 @@ test('вложения сообщения доезжают до очереди �
   });
 });
 
+test('ход, не доехавший до агента, возвращает захваченную строку — не сгорает', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('chat-loss', 'devin', '/workspace/demo');
+    queueChatMessage({ id: 'lost-1', sessionId: 'chat-loss', userId: '1', content: 'не доехало', options: {} });
+    const claimed = chatMessageQueueDb.claimFirst('chat-loss');
+    assert.ok(claimed);
+
+    // Так заканчивается ход, упавший до session/prompt (session_locked от
+    // выжившего процесса): finally хода возвращает захват — строка снова
+    // свободна, у неё счётчик попыток и пауза до следующей.
+    const outcome = returnClaimedToQueue(claimed, 'session_locked');
+    assert.equal(outcome, 'requeued');
+
+    const [item] = chatMessageQueueDb.list('chat-loss');
+    assert.equal(item?.content, 'не доехало');
+    assert.equal(item?.claimedAt, null);
+    assert.equal((item?.options as Record<string, unknown>).__redispatch, 1);
+    assert.ok(Number((item?.options as Record<string, unknown>).__notBefore) > Date.now());
+  });
+});
+
+test('возвращённое сообщение ждёт отметки не-раньше, а не крутится подряд', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('chat-hold', 'devin', '/workspace/demo');
+    sessionsDb.createAppSession('chat-hold-2', 'devin', '/workspace/demo');
+
+    const sent: string[] = [];
+    setQueuedChatMessageRunner(async (message) => {
+      sent.push(message.content);
+      return true;
+    });
+
+    queueChatMessage({
+      id: 'hold-1',
+      sessionId: 'chat-hold',
+      userId: '1',
+      content: 'рано ещё',
+      options: { __notBefore: Date.now() + 60_000 },
+    });
+    queueChatMessage({
+      id: 'go-1',
+      sessionId: 'chat-hold-2',
+      userId: '1',
+      content: 'пора',
+      options: { __notBefore: Date.now() - 1_000 },
+    });
+
+    dispatchChatQueues();
+    await settle();
+
+    // Отложенная строка осталась в очереди свободной и первой, прошедшая
+    // отметку — захвачена и ушла.
+    assert.deepEqual(sent, ['пора']);
+    const [held] = chatMessageQueueDb.list('chat-hold');
+    assert.equal(held?.content, 'рано ещё');
+    assert.equal(held?.claimedAt, null);
+  });
+});
+
+test('дошедшее до агента сообщение обратно в очередь не возвращается', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('chat-anchored', 'devin', '/workspace/demo');
+    queueChatMessage({ id: 'anch-1', sessionId: 'chat-anchored', userId: '1', content: 'у агента', options: {} });
+    const claimed = chatMessageQueueDb.claimFirst('chat-anchored');
+    assert.ok(claimed);
+    const run = chatRunRegistry.startRun({
+      appSessionId: 'chat-anchored',
+      provider: 'devin',
+      providerSessionId: null,
+      connection: new FakeConnection(),
+      userId: '1',
+      pendingMessage: { id: 'anch-1', userId: '1', content: 'у агента', options: {} },
+    });
+    assert.ok(run);
+    chatRunRegistry.markRunPromptAnchored(run);
+
+    // Якорь снял строку и забыл сообщение хода — возвращать нечего, дубля нет.
+    assert.equal(run.pendingMessage, null);
+    assert.equal(chatMessageQueueDb.list('chat-anchored').length, 0);
+  });
+});
+
+test('после предела повторов сообщение не исчезает — видимая ошибка в очереди', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('chat-tired', 'devin', '/workspace/demo');
+    queueChatMessage({
+      id: 'tired-1',
+      sessionId: 'chat-tired',
+      userId: '1',
+      content: 'уже пробовали',
+      options: { __redispatch: 29 },
+    });
+    const claimed = chatMessageQueueDb.claimFirst('chat-tired');
+    assert.ok(claimed);
+
+    const outcome = returnClaimedToQueue(claimed, 'session_locked');
+    assert.equal(outcome, 'failed');
+
+    // Строка остаётся и честно говорит «не дошло»: человек решает — повторить
+    // («Сейчас»), поправить или убрать. Тихого удаления нет.
+    const [item] = chatMessageQueueDb.list('chat-tired');
+    assert.equal(item?.state, 'failed');
+    assert.ok(item?.lastError?.includes('30'));
+    assert.deepEqual(chatMessageQueueDb.sessionsWithQueue(), []);
+  });
+});
+
+test('остановка до доставки снимает сообщение и со строки — повторной отправки нет', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('chat-abort', 'devin', '/workspace/demo');
+    // Прямая отправка: write-ahead строка захвачена ходом.
+    chatMessageQueueDb.appendClaimedLast({
+      id: 'stop-1', sessionId: 'chat-abort', userId: '1', content: 'отменено человеком', options: {},
+    });
+    const run = chatRunRegistry.startRun({
+      appSessionId: 'chat-abort',
+      provider: 'devin',
+      providerSessionId: null,
+      connection: new FakeConnection(),
+      userId: '1',
+      pendingMessage: { id: 'stop-1', userId: '1', content: 'отменено человеком', options: {} },
+    });
+    assert.ok(run);
+
+    // Так делает chat.abort: человек остановил доставку — ход и очередь её забыли.
+    run.pendingMessage = null;
+    chatMessageQueueDb.remove('chat-abort', 'stop-1');
+
+    assert.equal(chatMessageQueueDb.list('chat-abort').length, 0);
+  });
+});
+
 test('пустой обход не залипает: следующая очередь всё равно уходит', async () => {
   await withIsolatedDatabase(async () => {
     const sent: string[] = [];

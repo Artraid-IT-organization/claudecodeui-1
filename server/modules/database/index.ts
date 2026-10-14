@@ -6,6 +6,8 @@ export { appConfigDb } from '@/modules/database/repositories/app-config.js';
 export { chatGroupsDb } from '@/modules/database/repositories/chat-groups.js';
 // chatMessageQueueDb: used by WebSocket to keep the chat message queue server-side (survives restarts, dispatched without an open tab).
 export { chatMessageQueueDb, type StoredQueuedChatMessage } from '@/modules/database/repositories/chat-message-queue.js';
+// chatRunsDb: журнал ходов — терминальный исход каждого хода на диске (WebSocket: реестр, подписка; server/index.ts: сверка при старте).
+export { chatRunsDb, type StoredChatRun, type StoredRunPendingMessage } from '@/modules/database/repositories/chat-runs.js';
 export { credentialsDb } from '@/modules/database/repositories/credentials.js';
 export { githubTokensDb } from '@/modules/database/repositories/github-tokens.js';
 export { invitesDb } from '@/modules/database/repositories/invites.js';

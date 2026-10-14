@@ -150,6 +150,13 @@ const classifyHistoryError = (error: unknown): HistoryErrorKind => {
   return 'unknown';
 };
 
+/** Чем кончился последний ход чата — плашка под лентой, когда тишина. */
+export type RunOutcome = {
+  status: 'failed' | 'aborted' | 'interrupted' | 'completed';
+  error: string | null;
+  finishedAt: string | null;
+};
+
 export interface SessionSlot {
   serverMessages: NormalizedMessage[];
   realtimeMessages: NormalizedMessage[];
@@ -172,6 +179,11 @@ export interface SessionSlot {
   transcriptMissing: boolean;
   /** Категория последней ошибки загрузки истории (null — ошибок не было). */
   errorKind: HistoryErrorKind | null;
+  /**
+   * Исход последнего хода от сервера (chat_subscribed.lastRun / run_terminal):
+   * ход, оборвавшийся без результата, показывается плашкой, а не тишиной.
+   */
+  runOutcome: RunOutcome | null;
 }
 
 const EMPTY: NormalizedMessage[] = [];
@@ -196,6 +208,7 @@ function createEmptySlot(): SessionSlot {
     tokenUsage: null,
     transcriptMissing: false,
     errorKind: null,
+    runOutcome: null,
     _historyMutationQueue: Promise.resolve(),
   };
 }
@@ -674,6 +687,21 @@ export function useSessionStore() {
   }, [getSlot, notify]);
 
   /**
+   * Исход последнего хода чата (сервер: chat_subscribed.lastRun или живая
+   * рассылка run_terminal). Плашка «чем кончилось» читает его из слота.
+   */
+  const setRunOutcome = useCallback((sessionId: string, outcome: RunOutcome | null) => {
+    const slot = getSlot(sessionId);
+    if (slot.runOutcome?.status === outcome?.status
+      && slot.runOutcome?.error === outcome?.error
+      && slot.runOutcome?.finishedAt === outcome?.finishedAt) {
+      return;
+    }
+    slot.runOutcome = outcome;
+    notify(sessionId);
+  }, [getSlot, notify]);
+
+  /**
    * Check if a session's data is stale (>30s old).
    */
   const isStale = useCallback((sessionId: string) => {
@@ -834,6 +862,7 @@ export function useSessionStore() {
     refreshLatestFromServer,
     setActiveSession,
     setStatus,
+    setRunOutcome,
     isStale,
     updateStreaming,
     finalizeStreaming,
@@ -846,7 +875,7 @@ export function useSessionStore() {
   }), [
     getSlot, has, fetchFromServer, fetchMore,
     appendRealtime, appendRealtimeBatch, refreshLatestFromServer,
-    setActiveSession, setStatus, isStale, updateStreaming, finalizeStreaming,
+    setActiveSession, setStatus, setRunOutcome, isStale, updateStreaming, finalizeStreaming,
     updateThinkingStreaming, finalizeThinkingStreaming,
     clearRealtime, removeRealtimeWhere, getMessages, getSessionSlot,
   ]);

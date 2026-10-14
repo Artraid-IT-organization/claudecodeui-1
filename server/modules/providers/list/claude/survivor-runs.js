@@ -521,12 +521,14 @@ function refreshPhase(survivor) {
  * После старта сервера: найти агентов, переживших прошлый сервер, и следить
  * за ними. `onTranscriptChange(appSessionId)` — переписка изменилась,
  * `onPhase(appSessionId, phase)` — сменился этап работы (см. readTranscriptPhase),
- * `onGone(appSessionId)` — агент закончил.
+ * `onGone(appSessionId, provider, endedCleanly)` — агент закончил;
+`endedCleanly`: true — доехал до результата, false — умер посреди хода
+(claude/codex судят по хвосту переписки), null — неизвестно (devin).
  *
  * `onAdopted(record)` — подробная запись пережившего запуска (pid, socketPath
  * и т.п.): Devin по ней переподключается к супервизору живого хода.
  *
- * @param {{ onTranscriptChange?: (appSessionId: string, provider: string) => void, onPhase?: (appSessionId: string, phase: { phase: string, detail: string | null } | null, provider: string) => void, onGone?: (appSessionId: string, provider: string) => void, onProviderSession?: (appSessionId: string, providerSessionId: string, provider: 'claude' | 'codex', transcriptPath: string | null) => void, onAdopted?: (record: object) => void, pollMs?: number }} [options]
+ * @param {{ onTranscriptChange?: (appSessionId: string, provider: string) => void, onPhase?: (appSessionId: string, phase: { phase: string, detail: string | null } | null, provider: string) => void, onGone?: (appSessionId: string, provider: string, endedCleanly: boolean | null) => void, onProviderSession?: (appSessionId: string, providerSessionId: string, provider: 'claude' | 'codex', transcriptPath: string | null) => void, onAdopted?: (record: object) => void, pollMs?: number }} [options]
  */
 export function adoptSurvivors({ onTranscriptChange = (_id, _provider) => {}, onPhase = (_id, _phase, _provider) => {}, onGone = (_id, _provider) => {}, onProviderSession = (_id, _providerSessionId, _provider) => {}, onAdopted = (_record) => {}, pollMs = 3000 } = {}) {
   shuttingDown = false;
@@ -593,14 +595,79 @@ export function adoptSurvivors({ onTranscriptChange = (_id, _provider) => {}, on
 }
 
 /**
- * @param {{ onTranscriptChange?: (appSessionId: string, provider: string) => void, onPhase?: (appSessionId: string, phase: { phase: string, detail: string | null } | null, provider: string) => void, onGone?: (appSessionId: string, provider: string) => void, onProviderSession?: (appSessionId: string, providerSessionId: string, provider: 'claude' | 'codex', transcriptPath: string | null) => void }} [options]
+ * @param {{ onTranscriptChange?: (appSessionId: string, provider: string) => void, onPhase?: (appSessionId: string, phase: { phase: string, detail: string | null } | null, provider: string) => void, onGone?: (appSessionId: string, provider: string, endedCleanly: boolean | null) => void, onProviderSession?: (appSessionId: string, providerSessionId: string, provider: 'claude' | 'codex', transcriptPath: string | null) => void }} [options]
  */
+/**
+ * Хвост файла — для определения, дожил ли переживший агент до конца хода.
+ */
+function tailOfFile(filePath, bytes = 131072) {
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      const size = fs.fstatSync(fd).size;
+      const start = Math.max(0, size - bytes);
+      const buf = Buffer.alloc(size - start);
+      fs.readSync(fd, buf, 0, buf.length, start);
+      return buf.toString('utf8');
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Дожил ли переживший процесс до результата до своей смерти.
+ *
+ * «Нет процесса» снаружи одинаково выглядит у агента, ответившего и
+ * вышедшего, и у убитого посреди хода (обрыв пайпа при рестарте сайта —
+ * 15.10 тестовый claude-ход так и умер). Различает их переписка: у Claude
+ * ход завершает строка `{"type":"result"}`, у Codex — событие `result` в
+ * events.jsonl. `true` — доехал, `false` — оборвался, `null` — не судим
+ * (devin: финал виден только в ACP-сессии, файла под нас нет).
+ */
+function survivorEndedCleanly(survivor) {
+  const target = survivor.provider === 'codex' ? survivor.eventPath : survivor.transcriptPath;
+  if (!target) {
+    return null;
+  }
+  const tail = tailOfFile(target);
+  if (!tail) {
+    return null;
+  }
+  const lines = tail.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    let parsed;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue; // обрезанная/не-JSON строка хвоста — идём выше
+    }
+    if (survivor.provider === 'codex') {
+      if (parsed?.type === 'result' || parsed?.kind === 'result' || parsed?.msg?.type === 'task_complete') {
+        return true;
+      }
+      return false; // осмысленная последняя запись, а не финал
+    }
+    if (parsed?.type === 'result') {
+      return true;
+    }
+    if (parsed?.type === 'user' || parsed?.type === 'assistant' || parsed?.type === 'system') {
+      return false;
+    }
+  }
+  return null;
+}
+
 export function pollSurvivors({ onTranscriptChange = (_id, _provider) => {}, onPhase = (_id, _phase, _provider) => {}, onGone = (_id, _provider) => {}, onProviderSession = (_id, _providerSessionId, _provider) => {} } = {}) {
   for (const [appSessionId, survivor] of survivors) {
     if (!isAgentAlive(survivor)) {
       survivors.delete(appSessionId);
       removeRecord(survivor.pid);
-      onGone(appSessionId, survivor.provider || 'claude');
+      onGone(appSessionId, survivor.provider || 'claude', survivorEndedCleanly(survivor));
       continue;
     }
     if (survivor.provider === 'codex' && !survivor.providerSessionId) {
@@ -627,6 +694,39 @@ export function pollSurvivors({ onTranscriptChange = (_id, _provider) => {}, onP
 
 export function isSurvivorRunning(appSessionId) {
   return Boolean(appSessionId) && survivors.has(appSessionId);
+}
+
+/**
+ * Жив ли процесс агента, записавший себя в live-runs для этого чата.
+ *
+ * `true` — запись есть и процесс настоящий; `false` — запись есть, а
+ * процесс мёртв; `null` — записи нет (провайдер не регистрируется или
+ * запись уже снята при нормальном конце). Сторож ходов по этому отличает
+ * «умер молча» от «записи не было». Обход дешёвый: один readdir + kill(0).
+ */
+export function isRecordedAgentAlive(appSessionId) {
+  if (!appSessionId) return null;
+  const known = survivors.get(appSessionId);
+  if (known) {
+    return isAgentAlive(known);
+  }
+  let files;
+  try {
+    files = fs.readdirSync(liveRunsDir()).filter((name) => name.endsWith('.json'));
+  } catch {
+    return null;
+  }
+  for (const name of files) {
+    try {
+      const record = JSON.parse(fs.readFileSync(path.join(liveRunsDir(), name), 'utf8'));
+      if (record?.appSessionId === appSessionId) {
+        return isAgentAlive(record);
+      }
+    } catch {
+      // битая запись — не чья-то жизнь
+    }
+  }
+  return null;
 }
 
 /** Этап пережившего агента для ответа на подписку вкладки; null — неизвестен или не переживший. */

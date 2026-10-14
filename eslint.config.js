@@ -169,6 +169,7 @@ export default tseslint.config(
             "server/shared/devin-slots.ts",
             "server/shared/web-user-runtime.ts",
             "server/shared/session-scope.ts",
+            "server/shared/agent-rooms.ts", // комнаты агентов в отдельном slice — общий хелпер, импортируют провайдеры и точка входа
           ], // classify shared utility files so modules can depend on them explicitly
           mode: "file",
         },

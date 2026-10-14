@@ -181,6 +181,18 @@ export function useChatRealtimeHandlers({
             });
           }
 
+          // Исход прошлого хода из журнала сервера: ход, кончившийся, пока
+          // страница была мертва (iOS выгружает её в фоне), показываем
+          // плашкой «чем всё закончилось», а не мёртвой тишиной ленты.
+          const lastRun = msg.lastRun as { status?: string; error?: string | null; finishedAt?: string | null } | null | undefined;
+          sessionStore.setRunOutcome(sid, lastRun && lastRun.status && lastRun.status !== 'completed'
+            ? {
+              status: lastRun.status as 'failed' | 'aborted' | 'interrupted',
+              error: typeof lastRun.error === 'string' ? lastRun.error : null,
+              finishedAt: typeof lastRun.finishedAt === 'string' ? lastRun.finishedAt : null,
+            }
+            : null);
+
           if (msg.isProcessing) {
             // Этап приходит только для чата, пережившего перезапуск сайта
             // (сервер читает хвост переписки); у живого — из потока.
@@ -306,7 +318,25 @@ export function useChatRealtimeHandlers({
           streamSchedulerRef.current?.drop(sid);
           thinkingSchedulerRef.current?.drop(sid);
           thinkingStartedAtRef.current.delete(sid);
+          // Плашка исхода прошлого хода снимается новой работой.
+          sessionStore.setRunOutcome(sid, null);
           onSessionProcessing?.(sid);
+          return;
+        }
+
+        case 'run_terminal': {
+          // Терминальный исход хода — рассылка всем вкладкам (не только той,
+          // чей сокет держал поток). Плашка исхода: неуспех показываем,
+          // нормальный конец — снимаем.
+          if (!sid) return;
+          const status = typeof msg.status === 'string' ? msg.status : '';
+          sessionStore.setRunOutcome(sid, status && status !== 'completed'
+            ? {
+              status: status as 'failed' | 'aborted' | 'interrupted',
+              error: typeof msg.error === 'string' ? msg.error : null,
+              finishedAt: typeof msg.finishedAt === 'string' ? msg.finishedAt : null,
+            }
+            : null);
           return;
         }
 
