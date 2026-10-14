@@ -230,6 +230,13 @@ function decorateAndRecordEvent(run: ChatRun, message: NormalizedMessage): Norma
   run.lastSeq += 1;
   run.lastActivityAt = Date.now();
 
+  // Последний текст ошибки хода — причина для журнала и плашки, если ход
+  // оборвётся. mid-run «error» без complete не финален: статус останется
+  // 'completed', и записанная причина просто не покажется.
+  if (message.kind === 'error' && typeof message.content === 'string' && message.content.trim()) {
+    run.lastErrorText = message.content.slice(0, 2000);
+  }
+
   const outbound: NormalizedMessage = {
     ...message,
     sessionId: run.appSessionId,

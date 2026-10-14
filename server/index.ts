@@ -576,12 +576,32 @@ async function startServer() {
                     });
                     broadcastRealtimeEvent(event, provider || 'claude');
                 },
-                onGone: (appSessionId, provider) => {
+                onGone: (appSessionId, provider, endedCleanly) => {
                     // Ход вёл процесс прошлого сервера — его строка в
-                    // chat_runs наша, закрываем как нормальный конец.
+                    // chat_runs наша. «Нет процесса» ≠ «дожил»: убитый
+                    // обрывом пайпа/памяти агент — это обрыв, а не ответ.
+                    // endedCleanly: claude/codex судим по хвосту переписки,
+                    // devin финала снаружи не видно — считаем доехавшим.
+                    const endedStatus = endedCleanly === false ? 'interrupted' : 'completed';
+                    const endedError = endedCleanly === false
+                        ? 'Процесс агента оборвался до конца хода — результата не было.'
+                        : null;
                     try {
-                        chatRunsDb.finishRunningForSession(appSessionId, { status: 'completed' });
+                        chatRunsDb.finishRunningForSession(appSessionId, { status: endedStatus, error: endedError });
                     } catch { /* журнала может и не быть — старые ходы без строки */ }
+                    if (endedCleanly === false) {
+                        try {
+                            broadcastRealtimeEvent(JSON.stringify({
+                                kind: 'run_terminal',
+                                sessionId: appSessionId,
+                                provider,
+                                status: 'interrupted',
+                                error: endedError,
+                                finishedAt: new Date().toISOString(),
+                                timestamp: new Date().toISOString(),
+                            }), provider || 'claude');
+                        } catch { /* вкладок нет — подписка покажет из журнала */ }
+                    }
                     // Порядок важен: страница не перечитывает переписку, пока
                     // считает чат работающим. Сначала «чат свободен», потом
                     // «перечитай» — иначе последний ответ агента не появлялся
@@ -598,8 +618,8 @@ async function startServer() {
                         sessionId: appSessionId,
                         actualSessionId: appSessionId,
                         provider,
-                        exitCode: 0,
-                        success: true,
+                        exitCode: endedCleanly === false ? 1 : 0,
+                        success: endedCleanly !== false,
                         timestamp: new Date().toISOString(),
                     });
                     broadcastRealtimeEvent(idle, provider || 'claude');
