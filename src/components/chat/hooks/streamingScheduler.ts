@@ -18,8 +18,6 @@ export type StreamingScheduler = {
   schedule(id: string, delta: string): void;
   /** Force-flush accumulated text for `id`, if any. */
   flush(id: string): void;
-  /** Cancel any pending frame for `id` without flushing. */
-  cancel(id: string): void;
   /**
    * Close the block for `id`: cancel its pending frame AND drop the
    * accumulated text. Required at every block boundary (`stream_end`,
@@ -64,14 +62,6 @@ export function createStreamingScheduler(
         scheduled.delete(id);
       }
       doFlush(id);
-    },
-
-    cancel(id: string): void {
-      const handle = scheduled.get(id);
-      if (handle !== undefined) {
-        cancelAnimationFrame(handle);
-        scheduled.delete(id);
-      }
     },
 
     drop(id: string): void {

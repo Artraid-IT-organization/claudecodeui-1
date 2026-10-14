@@ -192,6 +192,12 @@ export function useChatRealtimeHandlers({
               }
               : undefined);
           } else {
+            // «Хода нет» по серверу — а буфер мог уцелеть от хода, умершего
+            // без complete (перезапуск сайта посреди стрима). Стираем, иначе
+            // первый блок следующего ответа начнётся с хвоста прошлого.
+            streamSchedulerRef.current?.drop(sid);
+            thinkingSchedulerRef.current?.drop(sid);
+            thinkingStartedAtRef.current.delete(sid);
             // Idle ack: ignore it if a newer request started after the
             // subscribe was sent — the ack describes the older state.
             onSessionIdle?.(sid, {
