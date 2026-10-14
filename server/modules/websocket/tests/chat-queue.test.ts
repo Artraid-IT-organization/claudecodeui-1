@@ -16,6 +16,7 @@ import {
   setQueuedChatMessageRunner,
 } from '@/modules/websocket/services/chat-queue.service.js';
 import { connectedClients } from '@/modules/websocket/services/websocket-state.service.js';
+import { requeueUnanchoredPendingMessage } from '@/modules/websocket/services/chat-websocket.service.js';
 
 /**
  * Очередь сообщений чата живёт на сервере и отправляется по концу хода —
@@ -155,6 +156,137 @@ test('вложения сообщения доезжают до очереди �
     const [item] = listChatQueue('chat-5');
     assert.equal(item?.content, 'со снимком');
     assert.equal(item?.attachments.length, 1);
+  });
+});
+
+test('ход, не доехавший до агента, возвращает сообщение в очередь — не сгорает', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('chat-loss', 'devin', '/workspace/demo');
+    const run = chatRunRegistry.startRun({
+      appSessionId: 'chat-loss',
+      provider: 'devin',
+      providerSessionId: null,
+      connection: new FakeConnection(),
+      userId: '1',
+      pendingMessage: { id: 'lost-1', userId: '1', content: 'не доехало', options: {} },
+    });
+    assert.ok(run);
+
+    // Так заканчивается ход, упавший до session/prompt (session_locked от
+    // выжившего процесса): сообщение обязано встать обратно в начало очереди.
+    requeueUnanchoredPendingMessage(run, 'chat-loss');
+
+    assert.equal(run.pendingMessage, null);
+    const [item] = chatMessageQueueDb.list('chat-loss');
+    assert.equal(item?.content, 'не доехало');
+    assert.equal((item?.options as Record<string, unknown>).__redispatch, 1);
+    assert.ok(Number((item?.options as Record<string, unknown>).__notBefore) > Date.now());
+
+    // Ход ещё завершается (статус running) — обход строку не трогает.
+    dispatchChatQueues();
+    await settle();
+    assert.equal(chatMessageQueueDb.list('chat-loss').length, 1);
+  });
+});
+
+test('возвращённое сообщение ждёт отметки не-раньше, а не крутится подряд', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('chat-hold', 'devin', '/workspace/demo');
+    sessionsDb.createAppSession('chat-hold-2', 'devin', '/workspace/demo');
+
+    const sent: string[] = [];
+    setQueuedChatMessageRunner(async (message) => {
+      sent.push(message.content);
+      return true;
+    });
+
+    queueChatMessage({
+      id: 'hold-1',
+      sessionId: 'chat-hold',
+      userId: '1',
+      content: 'рано ещё',
+      options: { __notBefore: Date.now() + 60_000 },
+    });
+    queueChatMessage({
+      id: 'go-1',
+      sessionId: 'chat-hold-2',
+      userId: '1',
+      content: 'пора',
+      options: { __notBefore: Date.now() - 1_000 },
+    });
+
+    dispatchChatQueues();
+    await settle();
+
+    // Отложенная строка осталась в очереди первой, прошедшая отметку — ушла.
+    assert.deepEqual(sent, ['пора']);
+    assert.deepEqual(chatMessageQueueDb.list('chat-hold').map((item) => item.content), ['рано ещё']);
+  });
+});
+
+test('дошедшее до агента сообщение обратно в очередь не возвращается', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('chat-anchored', 'devin', '/workspace/demo');
+    const run = chatRunRegistry.startRun({
+      appSessionId: 'chat-anchored',
+      provider: 'devin',
+      providerSessionId: null,
+      connection: new FakeConnection(),
+      userId: '1',
+      pendingMessage: { id: 'anch-1', userId: '1', content: 'у агента', options: {} },
+    });
+    assert.ok(run);
+    chatRunRegistry.markRunPromptAnchored(run);
+
+    requeueUnanchoredPendingMessage(run, 'chat-anchored');
+
+    assert.equal(chatMessageQueueDb.list('chat-anchored').length, 0);
+  });
+});
+
+test('после предела повторов сообщение больше не крутится в очереди', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('chat-tired', 'devin', '/workspace/demo');
+    const run = chatRunRegistry.startRun({
+      appSessionId: 'chat-tired',
+      provider: 'devin',
+      providerSessionId: null,
+      connection: new FakeConnection(),
+      userId: '1',
+      pendingMessage: {
+        id: 'tired-1',
+        userId: '1',
+        content: 'уже пробовали',
+        options: { __redispatch: 30 },
+      },
+    });
+    assert.ok(run);
+
+    requeueUnanchoredPendingMessage(run, 'chat-tired');
+
+    assert.equal(run.pendingMessage, null);
+    assert.equal(chatMessageQueueDb.list('chat-tired').length, 0);
+  });
+});
+
+test('остановка до доставки снимает сообщение с хода — повторной отправки нет', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('chat-abort', 'devin', '/workspace/demo');
+    const run = chatRunRegistry.startRun({
+      appSessionId: 'chat-abort',
+      provider: 'devin',
+      providerSessionId: null,
+      connection: new FakeConnection(),
+      userId: '1',
+      pendingMessage: { id: 'stop-1', userId: '1', content: 'отменено человеком', options: {} },
+    });
+    assert.ok(run);
+
+    // Так делает chat.abort: человек остановил доставку — ход её забыл.
+    run.pendingMessage = null;
+    requeueUnanchoredPendingMessage(run, 'chat-abort');
+
+    assert.equal(chatMessageQueueDb.list('chat-abort').length, 0);
   });
 });
 

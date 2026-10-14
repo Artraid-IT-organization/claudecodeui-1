@@ -136,6 +136,15 @@ async function dispatchSession(sessionId: string): Promise<void> {
   if (!next) {
     return;
   }
+
+  // Строка вернулась из хода, не доехавшего до агента: повтор пробуем не
+  // раньше отметки, иначе конец упавшего хода мгновенно дёргает обход и
+  // попытки сгорают подряд, не дожидаясь временной причины.
+  const notBefore = Number((next.options as Record<string, unknown> | undefined)?.__notBefore ?? 0);
+  if (notBefore > Date.now()) {
+    chatMessageQueueDb.pushFront(next);
+    return;
+  }
   broadcastChatQueue(sessionId);
 
   let started = false;

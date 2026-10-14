@@ -10,8 +10,8 @@ import {
   providerModelsService,
   resolveEffectiveProvider,
   stopSurvivor,
+  clampDevinModelForUser,
 } from '@/modules/providers/index.js';
-import { clampDevinModelForUser } from '@/modules/providers/services/devin-model-policy.js';
 import { chatRunRegistry, onChatRunCompleted } from '@/modules/websocket/services/chat-run-registry.service.js';
 import {
   broadcastChatQueue,
@@ -67,6 +67,65 @@ import {
  * person routinely keeps 3+ chats busy; 8 GB server has room).
  */
 const MAX_CONCURRENT_RUNS_PER_USER = 5;
+
+/**
+ * Сколько раз сообщение, чей ход не доехал до агента, возвращается в очередь
+ * и пробуется заново. Обход очередей — раз в минуту, поэтому 30 покрывает
+ * полчаса временной неготовности чата (выживший процесс дописывает прошлый
+ * ход). Дольше — значит причина не временная, и крутить запуски бесконечно
+ * дороже, чем честная ошибка в ленте.
+ */
+const MAX_UNANCHORED_REDISPATCH = 30;
+
+/**
+ * Пауза между возвратом недошедшего сообщения и следующей попыткой — равна
+ * периоду обхода очередей (сторож раз в минуту). Без неё конец упавшего хода
+ * сам тут же дёргал бы обход, и 30 попыток сгорали бы за секунды вместо
+ * получаса ожидания временной причины.
+ */
+const UNANCHORED_REDISPATCH_DELAY_MS = 60_000;
+
+/**
+ * Сообщение хода, не доехавшего до агента, возвращается в начало очереди.
+ * Строка снимается с очереди в момент запуска хода, поэтому падение сборки
+ * до session/prompt (14.10.26 — session_locked от выжившего процесса прошлого
+ * запуска сайта, подхват которого ещё не закончился) сжигало её молча.
+ * После предела попыток сообщение больше не крутится вечно — остаётся ошибка.
+ * Вызывают finally хода (этот файл) и проверка очереди (tests/chat-queue.test.ts).
+ */
+export function requeueUnanchoredPendingMessage(run: StartedChatRun, sessionId: string): void {
+  const pending = run.pendingMessage;
+  if (!pending || run.promptAnchored) {
+    return;
+  }
+  // Снимаем сообщение с хода до решения: и при возврате в очередь, и при
+  // исчерпании попыток путь гашения сервера не должен поднять его второй раз.
+  run.pendingMessage = null;
+  const attempts = Number((pending.options as AnyRecord | undefined)?.__redispatch ?? 0);
+  if (attempts >= MAX_UNANCHORED_REDISPATCH) {
+    console.error(`[Очередь чата] сообщение ${pending.id} чата ${sessionId} не дошло за ${attempts} попыток — оставляю ошибку в ленте, в очередь больше не возвращаю`);
+    return;
+  }
+  try {
+    chatMessageQueueDb.pushFront({
+      id: pending.id,
+      sessionId,
+      userId: pending.userId,
+      content: pending.content,
+      options: {
+        ...(pending.options ?? {}),
+        __redispatch: attempts + 1,
+        __notBefore: Date.now() + UNANCHORED_REDISPATCH_DELAY_MS,
+      },
+      createdAt: new Date().toISOString(),
+    });
+    broadcastChatQueue(sessionId);
+    console.warn(`[Очередь чата] ход не дошёл до агента — сообщение ${pending.id} возвращено в очередь (попытка ${attempts + 1}, чат ${sessionId})`);
+  } catch (error) {
+    const text = error instanceof Error ? error.message : String(error);
+    console.error('[Очередь чата] не удалось вернуть недошедшее сообщение в очередь', { sessionId, error: text });
+  }
+}
 
 
 
@@ -562,6 +621,7 @@ async function runProviderTurn(input: {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`[Chat] Provider runtime "${provider}" failed`, { sessionId, error: message });
   } finally {
+    requeueUnanchoredPendingMessage(run, sessionId);
     // Safety net: a runtime that crashed (or resolved) without emitting its
     // terminal `complete` would otherwise leave the session stuck in
     // "processing" forever on every connected client. Scoped to THIS run —
@@ -692,7 +752,12 @@ async function runQueuedChatMessage(
     return false;
   }
 
-  const clientOptions = (message.options ?? {}) as AnyRecord;
+  // Копия: `message.options` — тот же объект, что у pendingMessage, а там
+  // живёт счётчик возвратов «не дошло до агента» (__redispatch) — из копии
+  // его убираем, чтобы провайдеру служебное не уезжало, из записи — не стираем.
+  const clientOptions = { ...(message.options ?? {}) } as AnyRecord;
+  delete clientOptions.__redispatch;
+  delete clientOptions.__notBefore;
   if (providerMigrated) {
     // Модель/усилие в сообщении выбраны под старый провайдер — Devin их не знает.
     delete clientOptions.model;
@@ -767,9 +832,11 @@ export function initChatQueueDispatch(dependencies: ChatWebSocketDependencies): 
   onChatRunCompleted(() => {
     dispatchChatQueues();
   });
-  // Перезапуск сайта (выкатка, перезагрузка) не должен задерживать очередь:
-  // ход, за которым она стояла, к этому моменту уже оборван.
-  dispatchChatQueues();
+  // Перезапуск сайта (выкатка, перезагрузка) не должен задерживать очередь,
+  // но и подхват выживших агентов ещё не закончился: обход отсюда снимал
+  // строку до того, как isSurvivorRunning узнал о держателе сессии, — запуск
+  // упирался в session_locked и сообщение сгорало (потеря 14.10.26). Первый
+  // обход делает index.ts ПОСЛЕ adoptSurvivors, до него — раз в минуту сторож.
   startChatQueueHeartbeat();
 }
 
@@ -796,6 +863,12 @@ async function handleChatAbort(
   }
 
   const run = chatRunRegistry.getRun(sessionId);
+  // Человек нажал «остановить» ДО того, как prompt доехал до агента: сообщение
+  // не воскрешать — ни повторной отправкой из finally хода, ни возвратом в
+  // очередь при гашении сервера.
+  if (run && run.status === 'running' && !run.promptAnchored) {
+    run.pendingMessage = null;
+  }
   // Агент пережил перезапуск сайта: канала к нему у сервера нет, остановить
   // можно только сигналом процессу.
   if ((!run || run.status !== 'running') && isSurvivorRunning(sessionId)) {
