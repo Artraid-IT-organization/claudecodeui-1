@@ -70,6 +70,40 @@ test('flush forces immediate update and cancels pending frame', () => {
   assert.strictEqual(animationFrameQueue.length, 0);
 });
 
+test('drop clears the accumulated text so a closed block cannot leak into the next', () => {
+  const flushed: string[] = [];
+  const scheduler = createStreamingScheduler((_, text) => {
+    flushed.push(text);
+  });
+
+  // Первый блок: дельты → кадр → граница (stream_end) делает flush + drop.
+  scheduler.schedule('s1', 'Первый блок. ');
+  scheduler.flush('s1');
+  scheduler.drop('s1');
+
+  // Второй блок — только его текст, без хвоста первого. Раньше буфер
+  // переживал границу, и каждая финализация печатала нарастающую копию.
+  scheduler.schedule('s1', 'Второй блок.');
+  scheduler.flush('s1');
+  scheduler.drop('s1');
+
+  assert.deepStrictEqual(flushed, ['Первый блок. ', 'Второй блок.']);
+});
+
+test('drop cancels a pending frame without flushing', () => {
+  const flushed: string[] = [];
+  const scheduler = createStreamingScheduler((_, text) => {
+    flushed.push(text);
+  });
+
+  scheduler.schedule('s1', 'x');
+  scheduler.drop('s1');
+  runAnimationFrames();
+
+  assert.deepStrictEqual(flushed, []);
+  assert.strictEqual(animationFrameQueue.length, 0);
+});
+
 test('reset cancels pending frames and drops accumulated text', () => {
   const flushed: string[] = [];
   const scheduler = createStreamingScheduler((_, text) => {

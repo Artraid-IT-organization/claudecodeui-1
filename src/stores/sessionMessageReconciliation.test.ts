@@ -105,6 +105,29 @@ test('the same live row delivered twice stays one row', () => {
   assert.deepEqual(removeOptimisticUserEchoes([persisted], realtime).map((message) => message.id), ['a1']);
 });
 
+// Снимок Егора 14.10.26: вопрос «Срочно проанализируй чаты…» дважды — одна и та
+// же pending-запись нового чата нарисовала два пузыря (общая метка времени).
+test('a tab bubble of the same send rendered twice stays one row', () => {
+  const first = createUserMessage('local_1', '2026-10-14T18:53:45.000Z', {
+    content: 'Срочно проанализируй чаты',
+    images: [{ path: '/home/claude/.cloudcli/assets/shot.png' }],
+  });
+  const twin = createUserMessage('local_2', '2026-10-14T18:53:45.000Z', {
+    content: 'Срочно проанализируй чаты',
+    images: [{ path: '/home/claude/.cloudcli/assets/shot.png' }],
+  });
+
+  assert.deepEqual(appendRealtimeWithQueuedEcho([first], twin), [first]);
+});
+
+// Настоящий повторный «Отправить» — другое мгновение, вторая строка законна.
+test('a real second send of the same text is a separate row', () => {
+  const first = createUserMessage('local_1', '2026-10-14T18:53:45.000Z', { content: 'Жду' });
+  const resend = createUserMessage('local_2', '2026-10-14T18:54:10.000Z', { content: 'Жду' });
+
+  assert.deepEqual(appendRealtimeWithQueuedEcho([first], resend), [first, resend]);
+});
+
 test('queued echo is dropped once the transcript row lands, even after a long wait', () => {
   const local = createUserMessage('local_2', '2026-09-21T13:40:00.000Z', { content: '2' });
   const queued = createUserMessage('queued_q1', '2026-09-21T13:53:54.300Z', { content: '2' });
