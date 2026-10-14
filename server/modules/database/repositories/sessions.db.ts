@@ -173,7 +173,16 @@ function accountVisibilitySql(
     return ` AND (${prefix}provider IN ('codex', 'devin') OR ${currentAccount})`;
   }
   if (visibility === 'hide-codex') {
-    return ` AND ${prefix}provider NOT IN ('codex', 'devin') AND ${currentAccount}`;
+    // Гость видит свои же чаты Codex/Devin: через корпоративный слой Devin —
+    // помощник по умолчанию для всех, и гостевые чаты идут через него
+    // (initiated_by_user_id проставляется при создании). Прячутся только
+    // чужие строки хостовых входов — то же правило «свой чат» у
+    // assertSessionRowAllowed: initiated_by_user_id = я.
+    const initiatedBy = Number(getRequestRuntimeContext()?.userId);
+    const ownInitiated = Number.isFinite(initiatedBy)
+      ? ` OR ${prefix}initiated_by_user_id = ${initiatedBy}`
+      : '';
+    return ` AND (${prefix}provider NOT IN ('codex', 'devin')${ownInitiated}) AND ${currentAccount}`;
   }
   return ` AND ${currentAccount}`;
 }
