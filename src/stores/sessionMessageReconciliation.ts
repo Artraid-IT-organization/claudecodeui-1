@@ -119,6 +119,28 @@ export function appendRealtimeWithQueuedEcho(
     return next;
   }
 
+  // Пузырь одной и той же отправки, нарисованный дважды (запись очереди
+  // «нового чата» поднимается заново при перемонтировании экрана, пока
+  // сторож доставки ещё не снял её из localStorage — дубль вопроса на
+  // снимке Егора 14.10.26). У обеих копий один и тот же ChatMessage, поэтому
+  // метка времени совпадает ПОЛНОСТЬЮ — а у настоящего повторного нажатия
+  // «Отправить» она своя. Вторую такую строку не принимаем.
+  if (incoming.id.startsWith('local_')) {
+    const incomingFingerprint = userTurnFingerprint(incoming);
+    if (incomingFingerprint) {
+      const twin = realtimeMessages.find((message) => {
+        if (!message.id.startsWith('local_') && !isQueuedUserEcho(message)) return false;
+        if (message.timestamp !== incoming.timestamp) return false;
+        const existing = userTurnFingerprint(message);
+        return Boolean(existing)
+          && userTurnFingerprintsMatch(existing as UserTurnFingerprint, incomingFingerprint);
+      });
+      if (twin) {
+        return realtimeMessages;
+      }
+    }
+  }
+
   const fingerprint = isQueuedUserEcho(incoming) ? userTurnFingerprint(incoming) : null;
   const incomingTime = readMessageTime(incoming);
   if (fingerprint && incomingTime !== null) {

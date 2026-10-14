@@ -295,6 +295,11 @@ export function useChatRealtimeHandlers({
           // Ход, заведённый сервером из очереди: нажатия человека не было, и
           // узнать о начале работы странице больше неоткуда.
           if (!sid) return;
+          // Новый ход — новые буферы: уцелевший от нештатно оборванного хода
+          // текст не должен открывать первую строку свежего ответа.
+          streamSchedulerRef.current?.drop(sid);
+          thinkingSchedulerRef.current?.drop(sid);
+          thinkingStartedAtRef.current.delete(sid);
           onSessionProcessing?.(sid);
           return;
         }
@@ -333,7 +338,10 @@ export function useChatRealtimeHandlers({
           thinkingSchedulerRef.current?.flush(sid);
           sessionStore.finalizeThinkingStreaming(sid, durationSeconds);
         }
-        thinkingSchedulerRef.current?.cancel(sid);
+        // drop, не cancel: буфер размышления закрытого блока обязан уйти
+        // вместе с ним — иначе следующий блок начнётся со старого текста
+        // и каждая финализация напечатает всё более длинную копию.
+        thinkingSchedulerRef.current?.drop(sid);
         thinkingStartedAtRef.current.delete(sid);
       };
 
@@ -384,6 +392,11 @@ export function useChatRealtimeHandlers({
           if (buffered) {
             sessionStore.finalizeStreaming(sid);
           }
+          // Блок закрыт — буфер под него стираем целиком. Без этого следующий
+          // текстовый блок начинался со ВСЕГО уже показанного текста хода, и
+          // каждая граница (у Devin — каждый вызов инструмента) печатала ленту
+          // заново нарастающей копией (дубли 14.10.26).
+          streamSchedulerRef.current?.drop(sid);
         }
         flushThinking();
         return;
@@ -467,6 +480,9 @@ export function useChatRealtimeHandlers({
             if (buffered) {
               sessionStore.finalizeStreaming(sid);
             }
+            // Ход кончился — буфер не должен дожить до следующего: иначе
+            // первая строка нового ответа открывалась бы текстом прошлого.
+            streamSchedulerRef.current?.drop(sid);
           }
           flushThinking();
 
