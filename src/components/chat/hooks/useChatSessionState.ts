@@ -481,15 +481,19 @@ export function useChatSessionState({
 
   const chatMessages = useMemo(() => {
     const all = normalizedToChatMessages(storeMessages);
-    // Пузыри до появления сессии: на экране нового чата видны все отложенные,
-    // в открытом чате — привязанные к нему и непривязанные (прежнее поведение).
+    // Пузыри до появления сессии: ждущие свою сессию (awaitSessionId) видны на
+    // экране нового чата и в своём чате — в чужом пустом чате нет; обычные
+    // записи держат прежнее поведение.
     if (pendingFeedMessages.length > 0 && all.length === 0) {
       const visible = pendingFeedMessages
-        .filter(
-          (entry) =>
-            !activeSessionId ||
-            entry.sessionId === null ||
-            entry.sessionId === activeSessionId,
+        .filter((entry) =>
+          entry.awaitSessionId
+            ? entry.sessionId === null
+              ? !activeSessionId
+              : entry.sessionId === activeSessionId
+            : !activeSessionId ||
+              entry.sessionId === null ||
+              entry.sessionId === activeSessionId,
         )
         .map((entry) => entry.message);
       if (visible.length > 0) {

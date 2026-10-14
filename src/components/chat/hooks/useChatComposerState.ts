@@ -1629,7 +1629,9 @@ export function useChatComposerState({
     const newChatScope = draftScopeFor(selectedProjectId, null);
     clearDraftInput(newChatScope);
     clearAttachmentDraft(newChatScope);
-    pendingScopeSessionRef.current.delete(newChatScope);
+    if (newChatScope) {
+      pendingScopeSessionRef.current.delete(newChatScope);
+    }
     if (draftOwnerRef.current === newChatScope) {
       inputValueRef.current = '';
       setInput('');
