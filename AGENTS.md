@@ -503,8 +503,11 @@ CLI отдаёт модели отказ стоп-хука (`decision: block`) �
 проектов в панели нет; поиск фильтрует ленту по названию чата и папки
 (транслит — `sessionTitleMatches` в `utils.ts`).
 
-- Рендер — `SidebarRecentConversations` (тот же, что у старой вкладки
-  «conversations»): группы «Сейчас работает/Сегодня/…», догрузка по 40.
+- Рендер — `SidebarRecentConversations`: группы «Сейчас работает/Сегодня/…»,
+  догрузка по 40. Строки — обычный `SidebarSessionItem` (та же карточка с
+  точкой/иконкой/«…», что в папках и в «Промптах»; Егор 14.10.26 — «старый
+  формат внешне»): элемент собирается из урезанных полей ленты, проект строки
+  ищется по `projectId` в текущем списке папок.
 - Данные — `GET /api/providers/sessions/recent?limit&offset&serverScope&space`
   (`recentConversations` в `useSidebarController`). Лента грузится при
   входе в панель и обновляется с отсрочкой на `session_upserted` (порция

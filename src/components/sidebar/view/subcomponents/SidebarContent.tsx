@@ -612,6 +612,7 @@ export default function SidebarContent({
             )}
             <SidebarRecentConversations
               conversations={visibleConversations}
+              projects={projectListProps.projects}
               total={recentConversationsTotal}
               hasMore={recentConversationsHasMore && !searchFilter.trim()}
               isLoading={isRecentConversationsLoading}
@@ -619,8 +620,17 @@ export default function SidebarContent({
               hasError={recentConversationsError}
               selectedSession={projectListProps.selectedSession}
               activeSessions={projectListProps.activeSessions}
+              attentionSessionIds={projectListProps.attentionSessionIds}
               currentTime={projectListProps.currentTime}
-              onConversationSelect={onConversationResultClick}
+              editingSession={projectListProps.editingSession}
+              editingSessionName={projectListProps.editingSessionName}
+              onEditingSessionNameChange={projectListProps.onEditingSessionNameChange}
+              onStartEditingSession={projectListProps.onStartEditingSession}
+              onCancelEditingSession={projectListProps.onCancelEditingSession}
+              onSaveEditingSession={projectListProps.onSaveEditingSession}
+              onProjectSelect={projectListProps.onProjectSelect}
+              onSessionSelect={projectListProps.onSessionSelect}
+              onDeleteSession={projectListProps.onDeleteSession}
               onLoadMore={onLoadMoreRecentConversations}
               onRetry={onRetryRecentConversations}
               t={t}
