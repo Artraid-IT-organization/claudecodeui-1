@@ -10,6 +10,7 @@ import type { ChatInterfaceProps, ChatMessage, PermissionMode, Provider  } from 
 import { useChatProviderState } from '../hooks/useChatProviderState';
 import { useChatSessionState, chatMessageToNormalized } from '../hooks/useChatSessionState';
 import { useChatRealtimeHandlers } from '../hooks/useChatRealtimeHandlers';
+import { createStreamingScheduler } from '../hooks/streamingScheduler';
 import { useChatComposerState } from '../hooks/useChatComposerState';
 import { useSessionStore } from '../../../stores/useSessionStore';
 import { authenticatedFetch } from '../../../utils/api';
@@ -69,16 +70,9 @@ function ChatInterface({
   // Keyed by session id, NOT one buffer for the whole component. A client can
   // receive live deltas for more than one session at a time — watching a run
   // started elsewhere (another device, the CLI) while typing in your own is
-  // the ordinary case, not an edge case. With a single shared buffer those
+  // the ordinary case, not an edge case. With a single shared scheduler those
   // two streams concatenate into each other and both sessions render text
   // that belongs to the other one.
-  const streamTimerRef = useRef(new Map<string, number>());
-  const accumulatedStreamRef = useRef(new Map<string, string>());
-  // Mirrors streamTimerRef/accumulatedStreamRef for the live thinking block —
-  // a separate accumulator because thinking and reply text are independent
-  // live rows within one turn (see useChatRealtimeHandlers' flushThinking).
-  const thinkingStreamTimerRef = useRef(new Map<string, number>());
-  const accumulatedThinkingRef = useRef(new Map<string, string>());
   const thinkingStartedAtRef = useRef(new Map<string, number>());
   // When each session's `chat.subscribe` was last sent; idle acks older than
   // a later local request are discarded as stale.
@@ -87,16 +81,6 @@ function ChatInterface({
   // on every sequenced frame, read whenever a `chat.subscribe` is sent so the
   // server replays only the events this client actually missed.
   const lastSeqRef = useRef(new Map<string, number>());
-
-  const resetStreamingState = useCallback(() => {
-    for (const timer of streamTimerRef.current.values()) clearTimeout(timer);
-    for (const timer of thinkingStreamTimerRef.current.values()) clearTimeout(timer);
-    streamTimerRef.current.clear();
-    thinkingStreamTimerRef.current.clear();
-    accumulatedStreamRef.current.clear();
-    accumulatedThinkingRef.current.clear();
-    thinkingStartedAtRef.current.clear();
-  }, []);
 
   const {
     provider,
@@ -131,6 +115,24 @@ function ChatInterface({
     selectedSession,
     selectedProject,
   });
+
+  // Frame-coalesced schedulers for live text/thinking streams. The scheduler
+  // callback reads the provider from a ref so a mid-stream provider switch
+  // does not flush stale metadata.
+  const providerRef = useRef(provider);
+  providerRef.current = provider;
+  const streamSchedulerRef = useRef(createStreamingScheduler((sid, text) => {
+    sessionStore.updateStreaming(sid, text, providerRef.current);
+  }));
+  const thinkingSchedulerRef = useRef(createStreamingScheduler((sid, text) => {
+    sessionStore.updateThinkingStreaming(sid, text, providerRef.current);
+  }));
+
+  const resetStreamingState = useCallback(() => {
+    streamSchedulerRef.current?.reset();
+    thinkingSchedulerRef.current?.reset();
+    thinkingStartedAtRef.current.clear();
+  }, []);
 
   const {
     chatMessages,
@@ -465,11 +467,9 @@ function ChatInterface({
     setTokenBudget,
     pendingPermissionRequests,
     setPendingPermissionRequests,
-    streamTimerRef,
-    accumulatedStreamRef,
-    thinkingStreamTimerRef,
-    accumulatedThinkingRef,
     thinkingStartedAtRef,
+    streamSchedulerRef,
+    thinkingSchedulerRef,
     lastSeqRef,
     statusCheckSentAtRef,
     onSessionProcessing,
