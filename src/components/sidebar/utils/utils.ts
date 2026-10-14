@@ -88,6 +88,54 @@ export const groupByRecency = <T,>(
   }));
 };
 
+/*
+ * Совпадение по названию чата или папки для поисковой строки панели.
+ *
+ * Названия бывают и по-русски, и латиницей (папка «sozidateli-bot»), а Егор
+ * пишет голосом по-русски, поэтому сравнение идёт ещё и в транслите. Живёт
+ * здесь, а не в компоненте списка: матчит и строки ленты бесед
+ * (SidebarRecentConversations), и чаты внутри папки (SidebarProjectSessions).
+ */
+const TRANSLIT: Record<string, string> = {
+  а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i', й: 'y',
+  к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f',
+  х: 'h', ц: 'ts', ч: 'ch', ш: 'sh', щ: 'sch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya',
+};
+
+function normalizeForSearch(value: string): string {
+  return value.toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim();
+}
+
+function toLatin(value: string): string {
+  return [...value].map((ch) => TRANSLIT[ch] ?? ch).join('');
+}
+
+export function sessionTitleMatches(title: string, query: string): boolean {
+  const q = normalizeForSearch(query);
+  if (!q) return true;
+  const t = normalizeForSearch(title);
+  return t.includes(q) || toLatin(t).includes(toLatin(q));
+}
+
+const PROMPTS_PINNED_EXPANDED_KEY = 'sidebar-prompts-pinned-expanded';
+
+/** Запомненное состояние закреплённой секции «Промпты» над лентой чатов. */
+export const readPromptsPinnedExpanded = (): boolean => {
+  try {
+    return localStorage.getItem(PROMPTS_PINNED_EXPANDED_KEY) === '1';
+  } catch {
+    return false;
+  }
+};
+
+export const writePromptsPinnedExpanded = (expanded: boolean) => {
+  try {
+    localStorage.setItem(PROMPTS_PINNED_EXPANDED_KEY, expanded ? '1' : '0');
+  } catch {
+    // Приватный режим Safari — просто не запомнится.
+  }
+};
+
 export const readProjectSortOrder = (): ProjectSortOrder => {
   try {
     const rawSettings = localStorage.getItem('claude-settings');

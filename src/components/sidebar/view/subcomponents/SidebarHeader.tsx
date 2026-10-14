@@ -1,5 +1,4 @@
-import { Archive, Clock, Folder, FolderPlus, Plus, RefreshCw, Search, Server, X, PanelLeftClose } from 'lucide-react';
-import { useSessionListView } from '../../hooks/useSessionListView';
+import { Archive, Folder, FolderPlus, Plus, RefreshCw, Search, Server, X, PanelLeftClose } from 'lucide-react';
 import { useSecondServerLabel, useServerScope } from '../../hooks/useServerScope';
 import type { TFunction } from 'i18next';
 import type { ReactNode } from 'react';
@@ -29,13 +28,6 @@ type SidebarHeaderProps = {
   onSearchFilterChange: (value: string) => void;
   onClearSearchFilter: () => void;
   searchMode: SidebarSearchMode;
-  /**
-   * Кнопка «все папки», занявшая место убранной вкладки Conversations.
-   * Приходит слотом, а не собирается здесь: ей нужен список проектов и
-   * обработчик выбора, которые живут в SidebarContent, — тянуть их через
-   * шапку значило бы протащить пяток пропсов ради одной кнопки.
-   */
-  projectPickerSlot?: ReactNode;
   /**
    * Кнопка командной строки. Приходит слотом по той же причине, что и
    * выбор папки: ей нужна текущая вкладка и её переключение, а они живут
@@ -72,7 +64,6 @@ export default function SidebarHeader({
   onSearchFilterChange,
   onClearSearchFilter,
   searchMode,
-  projectPickerSlot,
   terminalSlot,
   onSearchModeChange,
   onRefresh,
@@ -93,35 +84,6 @@ export default function SidebarHeader({
   // их спрашивают и эта строка, и карточки чатов, и список папок.
   const secondServerLabel = useSecondServerLabel();
   const [serverScope, onServerScopeChange] = useServerScope();
-  // «Последние чаты»: нажата — все чаты по дням, отжата — по группам.
-  const [listView, setListView] = useSessionListView();
-  const recentToggle = (
-    <Tooltip content="Последние чаты" position="top">
-      <button
-        onClick={() => {
-          // Из архива кнопка ведёт к списку чатов сразу в виде «Последние».
-          if (searchMode === 'archived') {
-            onSearchModeChange('projects');
-            setListView('recent');
-            return;
-          }
-          setListView(listView === 'recent' ? 'groups' : 'recent');
-        }}
-        aria-pressed={searchMode !== 'archived' && listView === 'recent'}
-        aria-label="Последние чаты"
-        title={listView === 'recent' ? 'Показать по группам' : 'Последние чаты'}
-        className={cn(
-          "flex h-7 items-center justify-center rounded-md text-xs font-normal transition-all",
-          secondServerLabel ? "px-1.5" : "px-2.5",
-          searchMode !== 'archived' && listView === 'recent'
-            ? "bg-background shadow-sm text-foreground"
-            : "text-muted-foreground hover:text-foreground"
-        )}
-      >
-        <Clock className="h-3 w-3" />
-      </button>
-    </Tooltip>
-  );
   // Два блока в одной строке: слева дела этого сервера, справа — второго.
   // Егор 20.09.26 обвёл эту строку на снимке: «разделить её на 2 части».
   // Нажатие на блок переключает и список папок, и чаты, и то, где заведётся
@@ -169,7 +131,8 @@ export default function SidebarHeader({
   const showSearchTools = (projectsCount > 0 || pulseSessionsCount > 0 || archivedSessionsCount > 0 || isArchivedSessionsLoading) && !isLoading;
   const searchPlaceholder = searchMode === 'archived'
     ? t('search.archivedPlaceholder', 'Search archived sessions...')
-    : t('projects.searchPlaceholder');
+    // Лента показывает чаты, а не папки, поэтому и подсказка — про чаты.
+    : t('search.conversationsPlaceholder', 'Search in conversations...');
 
   const LogoBlock = () => (
     <div className="flex min-w-0 items-center gap-2.5">
@@ -266,7 +229,6 @@ export default function SidebarHeader({
             {/* Search mode toggle */}
             <div className="flex rounded-lg bg-muted/50 p-0.5">
               {scopeTabs}
-              {projectPickerSlot}
               <Tooltip content={t('search.archiveOnlyTooltip', 'Archive only')} position="top">
                 <button
                   onClick={() => onSearchModeChange('archived')}
@@ -284,7 +246,6 @@ export default function SidebarHeader({
                   <Archive className="h-3 w-3" />
                 </button>
               </Tooltip>
-              {recentToggle}
               {terminalSlot}
             </div>
             <div className="relative">
@@ -375,7 +336,6 @@ export default function SidebarHeader({
           <div className="mt-2.5 space-y-2">
             <div className="flex rounded-lg bg-muted/50 p-0.5">
               {scopeTabs}
-              {projectPickerSlot}
               <Tooltip content={t('search.archiveOnlyTooltip', 'Archive only')} position="top">
                 <button
                   onClick={() => onSearchModeChange('archived')}
@@ -393,7 +353,6 @@ export default function SidebarHeader({
                   <Archive className="h-3 w-3" />
                 </button>
               </Tooltip>
-              {recentToggle}
               {terminalSlot}
             </div>
             <div className="relative">

@@ -319,7 +319,7 @@ export function useSidebarController({
     }
   }, []);
 
-  const fetchRecentConversationsPage = useCallback(async (offset: number, append: boolean) => {
+  const fetchRecentConversationsPage = useCallback(async (offset: number, append: boolean, limit = 40) => {
     const requestSequence = ++recentConversationsSeqRef.current;
     if (append) {
       setIsLoadingMoreRecentConversations(true);
@@ -330,7 +330,7 @@ export function useSidebarController({
 
     try {
       // Лента отбирается сервером по открытому блоку верхней панели.
-      const response = await api.recentConversations({ limit: 40, offset, serverScope, providerSpace });
+      const response = await api.recentConversations({ limit, offset, serverScope, providerSpace });
       if (!response.ok) {
         throw new Error(`Failed to load recent conversations: ${response.status}`);
       }
@@ -386,6 +386,48 @@ export function useSidebarController({
     recentConversations.length,
     recentConversationsHasMore,
   ]);
+
+  /*
+   * Плоская лента чатов — основной вид панели (Егор 14.10.26). Грузится
+   * сразу при входе, переспросить при смене блока/помощника (срез в запросе
+   * меняет сам fetchRecentConversationsPage) и тихо освежается, когда
+   * projects меняются от session_upserted: во время ответа агента события
+   * идут пачками, поэтому переспрос с отсрочкой и одной страницей на весь
+   * уже показанный хвост — «Показать более ранние» не сбрасывается.
+   * Мёртвая ветка старого режима «conversations» ждала нажатия вкладки,
+   * теперь вкладки нет — тянем сами.
+   */
+  const recentCountRef = useRef(0);
+  useEffect(() => {
+    recentCountRef.current = recentConversations.length;
+  }, [recentConversations.length]);
+
+  const recentBootstrappedRef = useRef(false);
+  useEffect(() => {
+    if (searchMode !== 'projects') {
+      return;
+    }
+    if (!recentBootstrappedRef.current) {
+      recentBootstrappedRef.current = true;
+      void fetchRecentConversationsPage(0, false);
+      return;
+    }
+    const timer = setTimeout(() => {
+      void fetchRecentConversationsPage(
+        0,
+        false,
+        Math.min(100, Math.max(40, recentCountRef.current)),
+      );
+    }, 1200);
+    return () => clearTimeout(timer);
+  }, [projects, searchMode, fetchRecentConversationsPage]);
+
+  // При переключении блока или помощника старый срез стираем сразу, чтобы
+  // чужие чаты не висели в ленте, пока идёт новый запрос.
+  useEffect(() => {
+    setRecentConversations([]);
+    setRecentConversationsHasMore(false);
+  }, [serverScope, providerSpace]);
 
   useEffect(() => {
     if (migrationStartedRef.current) {
@@ -931,12 +973,12 @@ export function useSidebarController({
       await Promise.all([
         Promise.resolve(onRefresh()),
         fetchArchivedSessions(),
-
+        fetchRecentConversationsPage(0, false),
       ]);
     } finally {
       setIsRefreshing(false);
     }
-  }, [fetchArchivedSessions, fetchRecentConversationsPage, onRefresh, searchMode]);
+  }, [fetchArchivedSessions, fetchRecentConversationsPage, onRefresh]);
 
   const updateSessionSummary = useCallback(
     // `_projectId` and `_provider` are preserved for compatibility with
