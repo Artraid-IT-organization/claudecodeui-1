@@ -130,6 +130,32 @@ export function isFailoverableFailure(cls: DevinFailureClass): boolean {
 }
 
 /**
+ * Сбой хода Devin словами человека — для журнала chat_runs и плашки в ленте.
+ * Сырой текст Devin (trace id, журнальные строки ACP) наружу не годится:
+ * 14.10.26 лента показывала триста знаков журнала вместо «кончился лимит».
+ * null — готовой формулировки нет, показываем исходный текст как есть.
+ */
+export function describeDevinFailureForUser(message: string): string | null {
+  const cls = classifyDevinFailure(message);
+  if (cls === 'rate_limit') {
+    const resetMin = parseRateLimitResetMinutes(message);
+    return resetMin === null
+      ? 'У Devin кончился лимит бесплатной модели. Когда он обновится, отправьте сообщение снова.'
+      : `У Devin кончился лимит бесплатной модели — обновится примерно через ${resetMin} мин. Тогда отправьте сообщение снова.`;
+  }
+  if (cls === 'auth') {
+    return 'Devin не пустил по подписке — проверьте вход аккаунта в «Настройки → Агенты».';
+  }
+  if (cls === 'model') {
+    return 'Выбранная модель Devin не приняла запрос — попробуйте другую модель из списка чата.';
+  }
+  if (cls === 'session_locked') {
+    return 'Этот чат занят незавершённым прошлым ходом — подождите его конца и отправьте сообщение снова.';
+  }
+  return null;
+}
+
+/**
  * Минуты до сброса лимита из текста Devin: «Your limit will reset in 34
  * minutes (at 21:01 UTC)». Берётся «at HH:MM UTC» (оно точнее «in N»), время в
  * прошлом — значит завтра. null — в тексте срока нет.

@@ -2,7 +2,7 @@ import path from 'node:path';
 
 import type { WebSocket } from 'ws';
 
-import { chatMessageQueueDb, sessionsDb, type StoredQueuedChatMessage } from '@/modules/database/index.js';
+import { chatMessageQueueDb, chatRunsDb, sessionsDb, type StoredQueuedChatMessage } from '@/modules/database/index.js';
 import {
   getSurvivorPhase,
   getSurvivorProvider,
@@ -11,6 +11,7 @@ import {
   resolveEffectiveProvider,
   stopSurvivor,
   clampDevinModelForUser,
+  describeDevinFailureForUser,
 } from '@/modules/providers/index.js';
 import { chatRunRegistry, onChatRunCompleted } from '@/modules/websocket/services/chat-run-registry.service.js';
 import {
@@ -101,6 +102,11 @@ export function requeueUnanchoredPendingMessage(run: StartedChatRun, sessionId: 
   // Снимаем сообщение с хода до решения: и при возврате в очередь, и при
   // исчерпании попыток путь гашения сервера не должен поднять его второй раз.
   run.pendingMessage = null;
+  try {
+    chatRunsDb.clearPending(run.runId);
+  } catch {
+    // журнал подчистится сверкой при старте
+  }
   const attempts = Number((pending.options as AnyRecord | undefined)?.__redispatch ?? 0);
   if (attempts >= MAX_UNANCHORED_REDISPATCH) {
     console.error(`[Очередь чата] сообщение ${pending.id} чата ${sessionId} не дошло за ${attempts} попыток — оставляю ошибку в ленте, в очередь больше не возвращаю`);
@@ -505,6 +511,22 @@ async function steerIntoRunningTurn(input: {
 type StartedChatRun = NonNullable<ReturnType<typeof chatRunRegistry.startRun>>;
 
 /**
+ * Причина гибели хода словами человека. Devin-классы знают готовые
+ * формулировки (лимит, вход, замок); остальное обрезаем до первой строки —
+ * сырой хвост с trace id и журналом CLI человеку не помогает.
+ */
+function describeRunFailure(provider: LLMProvider, raw: string): string {
+  if (provider === 'devin') {
+    const human = describeDevinFailureForUser(raw);
+    if (human) {
+      return human;
+    }
+  }
+  const firstLine = raw.replace(/\(trace id:[\s\S]*$/i, '').split('\n').map((line) => line.trim()).filter(Boolean)[0] ?? '';
+  return (firstLine || 'Ход завершился ошибкой.').slice(0, 300);
+}
+
+/**
  * Ведёт один ход: разбирает настройки составителя, проверяет вложения и
  * отдаёт запрос провайдеру.
  *
@@ -620,6 +642,9 @@ async function runProviderTurn(input: {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`[Chat] Provider runtime "${provider}" failed`, { sessionId, error: message });
+    // Причина — в журнал хода и в плашку человеку: без неё ход «просто
+    // перестал» и страница после перезагрузки не знает, чем он кончился.
+    chatRunRegistry.noteRunFailure(run, describeRunFailure(provider, message));
   } finally {
     requeueUnanchoredPendingMessage(run, sessionId);
     // Safety net: a runtime that crashed (or resolved) without emitting its
@@ -868,6 +893,11 @@ async function handleChatAbort(
   // очередь при гашении сервера.
   if (run && run.status === 'running' && !run.promptAnchored) {
     run.pendingMessage = null;
+    try {
+      chatRunsDb.clearPending(run.runId);
+    } catch {
+      // журнал не написался — сверка при старте подчистит
+    }
   }
   // Агент пережил перезапуск сайта: канала к нему у сервера нет, остановить
   // можно только сигналом процессу.
@@ -974,6 +1004,27 @@ function handleChatSubscribe(
       ? getSurvivorPhase(sessionId)
       : null;
 
+    // Чем кончился последний ход — вкладке, открывшей чат после конца:
+    // живые события исхода ушли в сокет, которого могло уже не быть
+    // (iOS убивает страницу в фоне), а журнал chat_runs терминальный
+    // исход держит всегда. Показываем только неуспех — «завершился
+    // нормально» баннером не нужен.
+    let lastRun: Record<string, unknown> | null = null;
+    if (!isProcessing) {
+      try {
+        const finished = chatRunsDb.latestFinishedForSession(sessionId);
+        if (finished && finished.status !== 'completed') {
+          lastRun = {
+            status: finished.status,
+            error: finished.error,
+            finishedAt: finished.finishedAt,
+          };
+        }
+      } catch {
+        // журнал не читается — работе подписки это не мешает
+      }
+    }
+
     sendJson(ws, {
       kind: 'chat_subscribed',
       sessionId,
@@ -983,6 +1034,7 @@ function handleChatSubscribe(
       lastSeq: run?.lastSeq ?? 0,
       runStartedAt: run?.startedAt ?? null,
       pendingPermissions,
+      lastRun,
       // Очередь приходит вместе с состоянием чата: вкладка её только
       // показывает, хранит и отправляет сервер.
       queue: listChatQueue(sessionId),

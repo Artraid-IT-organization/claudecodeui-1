@@ -26,8 +26,8 @@ import {
     startSessionActivitySync,
     stopSessionActivitySync,
 } from '@/modules/providers/index.js';
-import { userDb, initializeDatabase, sessionsDb  } from '@/modules/database/index.js';
-import { chatRunRegistry, createWebSocketServer, dispatchChatQueues } from '@/modules/websocket/index.js';
+import { userDb, initializeDatabase, sessionsDb, chatRunsDb  } from '@/modules/database/index.js';
+import { chatRunRegistry, createWebSocketServer, dispatchChatQueues, reconcilePersistedRuns, startRunWatchdog } from '@/modules/websocket/index.js';
 
 import { getConnectableHost } from '../shared/networkHosts.js';
 
@@ -577,6 +577,11 @@ async function startServer() {
                     broadcastRealtimeEvent(event, provider || 'claude');
                 },
                 onGone: (appSessionId, provider) => {
+                    // Ход вёл процесс прошлого сервера — его строка в
+                    // chat_runs наша, закрываем как нормальный конец.
+                    try {
+                        chatRunsDb.finishRunningForSession(appSessionId, { status: 'completed' });
+                    } catch { /* журнала может и не быть — старые ходы без строки */ }
                     // Порядок важен: страница не перечитывает переписку, пока
                     // считает чат работающим. Сначала «чат свободен», потом
                     // «перечитай» — иначе последний ответ агента не появлялся
@@ -632,6 +637,20 @@ async function startServer() {
             });
             // Survivor map is now authoritative: queued messages cannot race
             // a still-running process from the previous server generation.
+
+            // Журнал chat_runs: строки «running», оставшиеся после усыновления
+            // без живого процесса, — оборванные ходы прошлого сервера (авария,
+            // OOM, kill). Закрываем их с причиной и возвращаем недошедшие
+            // сообщения в очередь — до обхода очередей.
+            try {
+                reconcilePersistedRuns();
+            } catch (error) {
+                console.warn('[run-reconcile] сверка журнала ходов не удалась:', error instanceof Error ? error.message : error);
+            }
+            // Сторож идущих ходов: «running» с мёртвым процессом получает
+            // видимый терминальный статус, а не вечное молчание ленты.
+            startRunWatchdog();
+
             dispatchChatQueues();
 
             // Выжимки переписки для поиска — заранее и не сразу после старта:

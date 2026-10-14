@@ -22,6 +22,7 @@ import ChatRequestBar from './subcomponents/ChatRequestBar';
 import ChatComposer from './subcomponents/ChatComposer';
 import CommandResultModal from './subcomponents/CommandResultModal';
 import RewindConfirmDialog from './subcomponents/RewindConfirmDialog';
+import { RunOutcomeBanner } from './subcomponents/RunOutcomeBanner';
 import { knownRunStartedAt } from '../utils/liveRunCursor';
 import { normalizedToChatMessages } from '../hooks/useChatMessages';
 import { waitForFreshTailAfterReconnect } from '../utils/reconnectVerdict';
@@ -614,6 +615,14 @@ function ChatInterface({
   // overlapping the last message.
   const hasActivityIndicator = Boolean(sessionActivity && pendingPermissionRequests.length === 0);
 
+  // Чем кончился последний ход — из слота стора (сервер: chat_subscribed
+  // .lastRun / рассылка run_terminal). Пока идёт ход — плашки нет, её
+  // место занимает индикатор работы.
+  const outcomeSessionId = currentSessionId || selectedSession?.id || null;
+  const runOutcome = !isProcessing && outcomeSessionId
+    ? (sessionStore.getSessionSlot(outcomeSessionId)?.runOutcome ?? null)
+    : null;
+
   const selectedProviderLabel =
     provider === 'cursor'
       ? t('messageTypes.cursor')
@@ -710,6 +719,8 @@ function ChatInterface({
             onConfirm={confirmRewind}
           />
         )}
+
+        {runOutcome && <RunOutcomeBanner outcome={runOutcome} />}
 
         <div className="relative flex-shrink-0">
           {isUserScrolledUp && chatMessages.length > 0 && (

@@ -629,6 +629,39 @@ export function isSurvivorRunning(appSessionId) {
   return Boolean(appSessionId) && survivors.has(appSessionId);
 }
 
+/**
+ * Жив ли процесс агента, записавший себя в live-runs для этого чата.
+ *
+ * `true` — запись есть и процесс настоящий; `false` — запись есть, а
+ * процесс мёртв; `null` — записи нет (провайдер не регистрируется или
+ * запись уже снята при нормальном конце). Сторож ходов по этому отличает
+ * «умер молча» от «записи не было». Обход дешёвый: один readdir + kill(0).
+ */
+export function isRecordedAgentAlive(appSessionId) {
+  if (!appSessionId) return null;
+  const known = survivors.get(appSessionId);
+  if (known) {
+    return isAgentAlive(known);
+  }
+  let files;
+  try {
+    files = fs.readdirSync(liveRunsDir()).filter((name) => name.endsWith('.json'));
+  } catch {
+    return null;
+  }
+  for (const name of files) {
+    try {
+      const record = JSON.parse(fs.readFileSync(path.join(liveRunsDir(), name), 'utf8'));
+      if (record?.appSessionId === appSessionId) {
+        return isAgentAlive(record);
+      }
+    } catch {
+      // битая запись — не чья-то жизнь
+    }
+  }
+  return null;
+}
+
 /** Этап пережившего агента для ответа на подписку вкладки; null — неизвестен или не переживший. */
 export function getSurvivorPhase(appSessionId) {
   return survivors.get(appSessionId)?.phase ?? null;
