@@ -18,8 +18,15 @@ export type StreamingScheduler = {
   schedule(id: string, delta: string): void;
   /** Force-flush accumulated text for `id`, if any. */
   flush(id: string): void;
-  /** Cancel any pending frame for `id` without flushing. */
-  cancel(id: string): void;
+  /**
+   * Close the block for `id`: cancel its pending frame AND drop the
+   * accumulated text. Required at every block boundary (`stream_end`,
+   * `complete`): `accumulated` holds the block's whole text, and leaving it
+   * behind makes the NEXT block start from the old content — every later
+   * finalize then prints a longer copy of the same message (the growing
+   * duplicate bubbles seen 14.10.26).
+   */
+  drop(id: string): void;
   /** Read the accumulated text for `id` without flushing. */
   read(id: string): string | undefined;
   /** Cancel all pending frames and drop all accumulated text. */
@@ -57,12 +64,13 @@ export function createStreamingScheduler(
       doFlush(id);
     },
 
-    cancel(id: string): void {
+    drop(id: string): void {
       const handle = scheduled.get(id);
       if (handle !== undefined) {
         cancelAnimationFrame(handle);
         scheduled.delete(id);
       }
+      accumulated.delete(id);
     },
 
     read(id: string): string | undefined {
