@@ -17,6 +17,7 @@ import {
   connectSupervisedDevin,
   spawnSupervisedDevin,
 } from '@/modules/providers/list/devin/devin-acp-client.js';
+import { wrapInAgentRoom } from '@/shared/agent-rooms.js';
 import { sessionsDb } from '@/modules/database/index.js';
 import {
   devinConnectionsService,
@@ -744,12 +745,15 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
       args,
       cwd: workingDirectory,
       env: childEnv,
+      appSessionId: sessionKey || null,
     });
   } catch (supervisorError) {
     console.warn('[Devin] supervisor unavailable, direct spawn:', supervisorError?.message || supervisorError);
-    child = spawn(devinCommand, args, {
+    // Запасной прямой запуск — тоже в своей комнате, иначе агент сидит в группе сайта.
+    const room = wrapInAgentRoom(devinCommand, args, childEnv, sessionKey);
+    child = spawn(room.command, room.args, {
       cwd: workingDirectory,
-      env: childEnv,
+      env: room.env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
   }

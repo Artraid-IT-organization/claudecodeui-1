@@ -31,7 +31,7 @@ import path from 'node:path';
 
 import Database from 'better-sqlite3';
 
-import { verifyAgentRoom, wrapInAgentRoom } from './agent-rooms.js';
+import { verifyAgentRoom, wrapInAgentRoom } from '@/shared/agent-rooms.js';
 
 let shuttingDown = false;
 /** appSessionId → { pid, provider, providerSessionId, configDir, eventPath, startedAt, transcriptPath, transcriptMtime } */
