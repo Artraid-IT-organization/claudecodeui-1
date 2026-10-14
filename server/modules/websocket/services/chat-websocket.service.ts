@@ -17,10 +17,12 @@ import {
   broadcastChatQueue,
   clearChatQueue,
   dispatchChatQueues,
+  failQueuedMessageNow,
   listChatQueue,
   queueChatMessage,
   removeChatQueueItem,
   reorderChatQueue,
+  returnClaimedToQueue,
   setQueuedChatMessageRunner,
   startChatQueueHeartbeat,
 } from '@/modules/websocket/services/chat-queue.service.js';
@@ -364,6 +366,28 @@ async function handleChatSend(
     return;
   }
 
+  // Строка в очереди как write-ahead: до подтверждённой передачи prompt
+  // агенту (якорь) сообщение лежит в базе захваченным — падение сервера или
+  // хода вернёт его обходом очередей, а не потеряет (14.10.26). Захваченные
+  // строки обход не трогает и док не показывает — внешне ничего не меняется.
+  const pendingForWriteAhead = run.pendingMessage;
+  if (pendingForWriteAhead) {
+    try {
+      chatMessageQueueDb.appendClaimedLast({
+        id: pendingForWriteAhead.id,
+        sessionId,
+        userId: pendingForWriteAhead.userId,
+        content: pendingForWriteAhead.content,
+        options: pendingForWriteAhead.options,
+      });
+    } catch (writeAheadError) {
+      // Без строки сообщение держит только память хода — не лучший вариант,
+      // но ход запускать всё равно надо: ошибка записи не отменяет отправку.
+      const text = writeAheadError instanceof Error ? writeAheadError.message : String(writeAheadError);
+      console.error(`[Chat] write-ahead очереди не записался (чат ${sessionId}): ${text}`);
+    }
+  }
+
   // Расписка в получении — сразу, до обращения к провайдеру, который может
   // думать минуту. Пока её нет, телефон держит сообщение в очереди и
   // досылает (src/contexts/chatOutbox.ts). Номер запоминается ДО расписки:
@@ -464,6 +488,7 @@ async function runProviderTurn(input: {
   dependencies: ChatWebSocketDependencies;
 }): Promise<void> {
   const { run, sessionId, provider, userId, projectPath, content, clientOptions, dependencies } = input;
+  let turnError: string | null = null;
   const runtimeContext = resolveWebUserRuntimeContext(userId);
   // Персональные белые списки (devin-model-policy): недопустимая для этого
   // аккаунта модель приводится к разрешённой до записи на сессию и до
@@ -559,9 +584,42 @@ async function runProviderTurn(input: {
       await dependencies.runtime.run(provider, content, runtimeOptions, run.writer);
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error(`[Chat] Provider runtime "${provider}" failed`, { sessionId, error: message });
+    turnError = error instanceof Error ? error.message : String(error);
+    console.error(`[Chat] Provider runtime "${provider}" failed`, { sessionId, error: turnError });
   } finally {
+    // Строка очереди, которую вёз этот ход: доехала — снята с очереди на якоре
+    // (markRunPromptAnchored → markDelivered). Не доехала — возвращаем со
+    // счётчиком попыток, после потолка — видимая ошибка, а не тихая пропажа
+    // (потеря 14.10.26, три сообщения чата 13fa2cd9). Отмена человеком уже
+    // обнулила pendingMessage — отменённое не воскресаем.
+    const pending = run.pendingMessage;
+    if (pending && !run.promptAnchored) {
+      run.pendingMessage = null;
+      const outcome = returnClaimedToQueue(
+        {
+          id: pending.id,
+          sessionId,
+          userId: pending.userId,
+          content: pending.content,
+          options: (pending.options ?? {}) as Record<string, unknown>,
+          createdAt: '',
+        },
+        turnError ?? 'ход завершился, не успев передать сообщение агенту',
+      );
+      if (outcome === 'requeued') {
+        console.warn(`[Chat] сообщение ${pending.id} чата ${sessionId} не дошло до агента (${turnError ?? '?'}) — вернул в очередь`);
+      } else {
+        // Открытая вкладка видит сбой и в ленте: строка в доке очереди уже
+        // помечена ошибкой, но лента — первое, куда смотрит человек.
+        broadcastJson({
+          kind: 'error',
+          sessionId,
+          provider,
+          content: 'Сервер не смог передать сообщение агенту — оно осталось в очереди с ошибкой.',
+          timestamp: new Date().toISOString(),
+        });
+      }
+    }
     // Safety net: a runtime that crashed (or resolved) without emitting its
     // terminal `complete` would otherwise leave the session stuck in
     // "processing" forever on every connected client. Scoped to THIS run —
@@ -635,12 +693,15 @@ async function runQueuedChatMessage(
   const session = sessionsDb.getSessionById(sessionId);
   if (!session) {
     console.warn(`[Очередь чата] чат ${sessionId} не найден — сообщение ${message.id} отброшено`);
+    // Чата нет — и док показывать некуда: строку просто снимаем.
+    chatMessageQueueDb.markDelivered(message.id);
     return true;
   }
 
   let provider = session.provider as LLMProvider;
   if (!dependencies.runtime.hasRuntime(provider)) {
-    console.warn(`[Очередь чата] провайдер "${provider}" недоступен — сообщение ${message.id} отброшено`);
+    console.warn(`[Очередь чата] провайдер "${provider}" недоступен — сообщение ${message.id} помечено ошибкой`);
+    failQueuedMessageNow(message, `провайдер "${provider}" недоступен`);
     return true;
   }
 
@@ -656,13 +717,15 @@ async function runQueuedChatMessage(
       providerMigrated = true;
       session.provider_session_id = null;
     } else {
-      console.warn(`[Очередь чата] пользователь ${String(userId)} не вошёл в Claude и не добавил ключ — сообщение ${message.id} отброшено`);
+      console.warn(`[Очередь чата] пользователь ${String(userId)} не вошёл в Claude и не добавил ключ — сообщение ${message.id} помечено ошибкой`);
+      failQueuedMessageNow(message, 'нет доступа к Claude (вход или ключ в «Настройки → Агенты»)');
       return true;
     }
   }
 
   if (provider === 'codex' && !isCodexAllowedForWebUser(userId)) {
-    console.warn(`[Очередь чата] Codex недоступен пользователю ${String(userId)} — сообщение ${message.id} отброшено`);
+    console.warn(`[Очередь чата] Codex недоступен пользователю ${String(userId)} — сообщение ${message.id} помечено ошибкой`);
+    failQueuedMessageNow(message, 'Codex недоступен этому пользователю');
     return true;
   }
 
@@ -692,7 +755,9 @@ async function runQueuedChatMessage(
     return false;
   }
 
-  const clientOptions = (message.options ?? {}) as AnyRecord;
+  const clientOptions = { ...((message.options ?? {}) as AnyRecord) };
+  // Служебный счётчик попыток доставки вниз по стеку не спускаем.
+  delete clientOptions.__redispatch;
   if (providerMigrated) {
     // Модель/усилие в сообщении выбраны под старый провайдер — Devin их не знает.
     delete clientOptions.model;
@@ -767,9 +832,17 @@ export function initChatQueueDispatch(dependencies: ChatWebSocketDependencies): 
   onChatRunCompleted(() => {
     dispatchChatQueues();
   });
-  // Перезапуск сайта (выкатка, перезагрузка) не должен задерживать очередь:
-  // ход, за которым она стояла, к этому моменту уже оборван.
-  dispatchChatQueues();
+  // Захваты прошлого процесса: его держатели мертвы, а строки обязаны доехать.
+  // Снимаем их до первого обхода — иначе строки висели бы невидимками.
+  const released = chatMessageQueueDb.releaseAllClaims();
+  if (released > 0) {
+    console.warn(`[Очередь чата] снято ${released} захват(а/ов) прошлого процесса — строки вернулись в очередь`);
+  }
+  // Перезапуск сайта (выкатка, перезагрузка) не должен задерживать очередь,
+  // но и подхват выживших агентов ещё не закончился: обход отсюда снимал
+  // строку до того, как isSurvivorRunning узнал о держателе сессии, — запуск
+  // упирался в session_locked и сообщение сгорало (потеря 14.10.26). Первый
+  // обход делает index.ts ПОСЛЕ adoptSurvivors, до него — раз в минуту сторож.
   startChatQueueHeartbeat();
 }
 
@@ -796,6 +869,19 @@ async function handleChatAbort(
   }
 
   const run = chatRunRegistry.getRun(sessionId);
+  // Человек нажал «остановить» ДО того, как prompt доехал до агента: сообщение
+  // не воскрешать — снимаем его и с хода, и со строки очереди, иначе обход
+  // отправил бы «отменённое» снова.
+  if (run && run.status === 'running' && !run.promptAnchored && run.pendingMessage) {
+    const cancelled = run.pendingMessage;
+    run.pendingMessage = null;
+    try {
+      chatMessageQueueDb.remove(sessionId, cancelled.id);
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      console.error(`[Chat] остановка хода ${sessionId}: не удалось снять сообщение ${cancelled.id} с очереди: ${text}`);
+    }
+  }
   // Агент пережил перезапуск сайта: канала к нему у сервера нет, остановить
   // можно только сигналом процессу.
   if ((!run || run.status !== 'running') && isSurvivorRunning(sessionId)) {
@@ -953,14 +1039,29 @@ async function handleChatQueueSendNow(
     // Уже ушло (второе нажатие, другое устройство, конец хода) — делать нечего.
     return;
   }
+  if (item.claimedAt) {
+    // Строку уже везёт ход — «Сейчас» не нужно, она и так в пути.
+    return;
+  }
+  if (item.state === 'failed') {
+    // «Сейчас» на отказавшей строке — это ручной повтор: ошибку стираем,
+    // строка снова обычная ждущая.
+    chatMessageQueueDb.markQueued(item.id);
+  }
 
   if (!chatRunRegistry.isProcessing(sessionId)) {
-    reorderChatQueue(sessionId, [id, ...queue.filter((entry) => entry.id !== id).map((entry) => entry.id)]);
+    reorderChatQueue(sessionId, [id, ...queue.filter((entry) => entry.id !== id && !entry.claimedAt).map((entry) => entry.id)]);
     dispatchChatQueues();
     return;
   }
 
-  removeChatQueueItem(sessionId, id);
+  // Захватываем строку ДО передачи: пока идёт передача, ход может закончиться,
+  // и обход очереди отправил бы ту же строку второй раз. Не получилось —
+  // захват возвращается, человеку объясняем.
+  if (!chatMessageQueueDb.claim(id)) {
+    return;
+  }
+  broadcastChatQueue(sessionId);
   let steered = false;
   try {
     steered = await steerIntoRunningTurn({
@@ -975,11 +1076,14 @@ async function handleChatQueueSendNow(
     console.error('[Очередь чата] «отправить сейчас» не удалось', { sessionId, error: message });
   }
   if (steered) {
+    // Сообщение уже в идущем ходе — та же подтверждённая доставка, что и якорь.
+    chatMessageQueueDb.markDelivered(id);
+    broadcastChatQueue(sessionId);
     console.log(`[Очередь чата] сообщение ${id} отправлено в идущий ход (чат ${sessionId})`);
     return;
   }
 
-  chatMessageQueueDb.pushFront(item);
+  chatMessageQueueDb.releaseClaim(id);
   broadcastChatQueue(sessionId);
   // Ход мог закончиться, пока шла попытка: тогда строка уйдёт обычным путём.
   dispatchChatQueues();

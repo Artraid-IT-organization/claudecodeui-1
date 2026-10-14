@@ -412,6 +412,7 @@ export default function ChatComposer({
           id: draft.id,
           content: draft.content,
           attachmentCount: draft.uploadedAttachments?.length ?? draft.attachments.length,
+          error: draft.error,
         }))}
         onEdit={onEditQueuedDraft}
         onDelete={onDeleteQueuedDraft}

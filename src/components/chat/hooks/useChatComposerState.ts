@@ -334,6 +334,12 @@ export type QueuedDraft = {
    * permission settings while another session is being viewed.
    */
   options?: QueuedSendOptions;
+  /**
+   * Сервер сдался передавать строку агенту за все попытки — причина, которую
+   * док показывает под текстом. Решение (повторить, поправить, убрать) — за
+   * человеком.
+   */
+  error?: string;
 };
 
 const newDraftId = (): string => {
@@ -467,6 +473,7 @@ export function useChatComposerState({
       content: item.content,
       attachments: queuedFilesRef.current.get(item.id) ?? [],
       uploadedAttachments: Array.isArray(item.attachments) ? item.attachments : [],
+      error: item.error,
     })),
     [serverQueue],
   );

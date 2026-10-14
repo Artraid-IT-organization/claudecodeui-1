@@ -414,8 +414,22 @@ export const chatRunRegistry = {
    * по новому.
    */
   markRunPromptAnchored(run: ChatRun): void {
-    if (runs.get(run.appSessionId) === run && run.status === 'running') {
-      run.promptAnchored = true;
+    if (runs.get(run.appSessionId) !== run || run.status !== 'running') {
+      return;
+    }
+    run.promptAnchored = true;
+    // Сообщение подтверждённо у агента — строка очереди (захваченная обходом
+    // или write-ahead прямой отправки) снимается здесь и только здесь:
+    // до этого момента её держала база, не память хода.
+    const pending = run.pendingMessage;
+    if (pending) {
+      run.pendingMessage = null;
+      try {
+        chatMessageQueueDb.markDelivered(pending.id);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`[Chat] якорь хода ${run.appSessionId}: не удалось снять сообщение ${pending.id} с очереди: ${message}`);
+      }
     }
   },
 
@@ -456,14 +470,22 @@ export const chatRunRegistry = {
       const pending = run.pendingMessage;
       run.pendingMessage = null;
       try {
-        chatMessageQueueDb.pushFront({
-          id: pending.id,
-          sessionId: run.appSessionId,
-          userId: pending.userId,
-          content: pending.content,
-          options: pending.options,
-          createdAt: new Date().toISOString(),
-        });
+        // Строка захвачена этим ходом и уже лежит в базе — просто снимаем
+        // захват, она уйдёт обходом после подъёма. Гашение — не неудача
+        // доставки, счётчик попыток не трогаем. Строки нет в базе (write-ahead
+        // не записался) — вставляем как новую в начало.
+        if (chatMessageQueueDb.has(pending.id)) {
+          chatMessageQueueDb.releaseClaim(pending.id);
+        } else {
+          chatMessageQueueDb.insertFront({
+            id: pending.id,
+            sessionId: run.appSessionId,
+            userId: pending.userId,
+            content: pending.content,
+            options: pending.options,
+            createdAt: new Date().toISOString(),
+          });
+        }
         requeued += 1;
         console.warn(
           `[shutdown-drain] сообщение ${pending.id} чата ${run.appSessionId} не дошло до агента — вернул в очередь, уйдёт после подъёма`,

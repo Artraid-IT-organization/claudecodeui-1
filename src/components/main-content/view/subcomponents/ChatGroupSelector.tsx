@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Archive, ArchiveRestore, Folder, FolderOpen, FolderPlus, FolderX } from 'lucide-react';
 
 import { ActionMenu, type ActionMenuItem } from '../../../../shared/view/ui';
@@ -50,6 +50,19 @@ export default function ChatGroupSelector({ sessionId, sessionGroupId, onArchive
   const [groupId, setGroupId] = useState<string | null>(null);
   const [isArchived, setIsArchived] = useState(false);
   const [busyKey, setBusyKey] = useState<string | null>(null);
+  // «В архив» — первый пункт меню и убирает чат из списка слева целиком:
+  // один промах пальцем (или Enter на сфокусированном первом пункте) уносил
+  // рабочий чат — так и пропал «Клод юай на мак» 14.10.26. Поэтому первый тап
+  // только переспрашивает и сам гаснет через три секунды — как «Очистить» у
+  // очереди сообщений (MessageQueueDock).
+  const [isArchiveArmed, setIsArchiveArmed] = useState(false);
+  const archiveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (archiveTimerRef.current) {
+      clearTimeout(archiveTimerRef.current);
+    }
+  }, []);
 
   const loadGroups = useCallback(async () => {
     try {
@@ -122,6 +135,20 @@ export default function ChatGroupSelector({ sessionId, sessionGroupId, onArchive
       onArchived?.(sessionId);
     });
 
+  const armOrArchive = () => {
+    if (archiveTimerRef.current) {
+      clearTimeout(archiveTimerRef.current);
+      archiveTimerRef.current = null;
+    }
+    if (isArchiveArmed) {
+      setIsArchiveArmed(false);
+      void archive();
+      return;
+    }
+    setIsArchiveArmed(true);
+    archiveTimerRef.current = setTimeout(() => setIsArchiveArmed(false), 3000);
+  };
+
   const restore = () =>
     run('__archive__', async () => {
       await readJson(await api.restoreSession(sessionId));
@@ -156,11 +183,15 @@ export default function ChatGroupSelector({ sessionId, sessionGroupId, onArchive
         }
       : {
           key: '__archive__',
-          label: 'В архив',
-          description: 'Убрать чат из списка слева',
+          label: isArchiveArmed ? 'Точно в архив?' : 'В архив',
+          description: isArchiveArmed ? 'Ещё раз — и чат уйдёт из списка слева' : 'Убрать чат из списка слева',
           icon: Archive,
           loading: busyKey === '__archive__',
-          onSelect: () => void archive(),
+          isDanger: isArchiveArmed,
+          // Первый тап только вооружает — меню должно остаться открытым для
+          // подтверждения; второй закрывает и архивирует.
+          closeOnSelect: isArchiveArmed,
+          onSelect: armOrArchive,
         },
     ...groups.map((group, index) => ({
       key: group.id,

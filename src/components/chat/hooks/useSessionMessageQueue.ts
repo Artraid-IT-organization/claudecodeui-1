@@ -3,12 +3,17 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useWebSocket } from '../../../contexts/WebSocketContext';
 import { clearQueuedMessages, readQueuedMessages } from '../utils/chatStorage';
 
-/** Строка очереди в том виде, в каком её присылает сервер. */
+/**
+ * Строка очереди в том виде, в каком её присылает сервер. `error` — строка,
+ * которую сервер так и не смог передать агенту за все попытки: показываем её
+ * человеку, решение (повторить/убрать) — за ним.
+ */
 export type ServerQueuedMessage = {
   id: string;
   content: string;
   attachments: unknown[];
   createdAt: string;
+  error?: string;
 };
 
 /**
