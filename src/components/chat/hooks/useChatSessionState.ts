@@ -244,7 +244,7 @@ export function useChatSessionState({
      *
      * Why this is essential:
      * - Chat keeps local state that is not fully derived from `selectedSession`:
-     *   `currentSessionId`, `pendingUserMessage`, streaming/status flags, message
+     *   `currentSessionId`, `pendingFeedMessages`, streaming/status flags, message
      *   pagination/scroll bookkeeping, and provider-specific sessionStorage keys.
      * - If the user clicks New Session while already on the same route with no
      *   selected session, parent state updates can be idempotent and this local
@@ -257,7 +257,7 @@ export function useChatSessionState({
      */
     resetStreamingState();
     setCurrentSessionId(null);
-    setPendingUserMessage(null);
+    setPendingFeedMessages([]);
     messagesOffsetRef.current = 0;
     setHasMoreMessages(false);
     setTotalMessages(0);
@@ -413,8 +413,23 @@ export function useChatSessionState({
   /* ---------------------------------------------------------------- */
   /*  Derive chatMessages from the store                              */
   /* ---------------------------------------------------------------- */
-  const [pendingUserMessage, setPendingUserMessage] = useState<ChatMessage | null>(null);
-  const flushedPendingUserMessageRef = useRef<ChatMessage | null>(null);
+  /**
+   * Пузыри сообщений, показанные до появления сессии (новый чат: пузырь
+   * рисуется при нажатии «Отправить», ещё до ответа POST /api/providers/sessions).
+   *
+   * `sessionId` — привязка к создаваемому чату. Пока POST в полёте, человек
+   * может открыть другой разговор: без привязки пузырь при первом же
+   * activeSessionId дописывался бы в чужую ленту. Записи с
+   * `awaitSessionId: true` ждут bindPendingMessages и переливаются только в
+   * созданную сессию; обычные записи (sessionId === null, awaitSessionId
+   * false) сохраняют прежнее поведение — уходят в первый открывшийся чат.
+   */
+  type PendingFeedEntry = {
+    message: ChatMessage;
+    sessionId: string | null;
+    awaitSessionId: boolean;
+  };
+  const [pendingFeedMessages, setPendingFeedMessages] = useState<PendingFeedEntry[]>([]);
 
   // Hidden Chat tabs keep collecting realtime rows without re-rendering the
   // CSS-hidden tree. Activation itself renders once and reads the latest cache.
@@ -426,28 +441,34 @@ export function useChatSessionState({
   }
 
   useEffect(() => {
-    if (!pendingUserMessage) {
-      flushedPendingUserMessageRef.current = null;
-      return;
-    }
-
-    if (!activeSessionId) {
-      return;
-    }
-
-    if (flushedPendingUserMessageRef.current === pendingUserMessage) {
+    if (pendingFeedMessages.length === 0 || !activeSessionId) {
       return;
     }
 
     const prov = (localStorage.getItem('selected-provider') as LLMProvider) || DEFAULT_PROVIDER;
-    const normalized = chatMessageToNormalized(pendingUserMessage, activeSessionId, prov);
-    if (normalized) {
-      sessionStore.appendRealtime(activeSessionId, normalized);
+    const flushable: NormalizedMessage[] = [];
+    const remaining: PendingFeedEntry[] = [];
+    for (const entry of pendingFeedMessages) {
+      const canFlush = entry.awaitSessionId
+        ? entry.sessionId !== null && entry.sessionId === activeSessionId
+        : entry.sessionId === null || entry.sessionId === activeSessionId;
+      if (!canFlush) {
+        remaining.push(entry);
+        continue;
+      }
+      const normalized = chatMessageToNormalized(entry.message, activeSessionId, prov);
+      if (normalized) {
+        flushable.push(normalized);
+      }
     }
 
-    flushedPendingUserMessageRef.current = pendingUserMessage;
-    setPendingUserMessage(null);
-  }, [activeSessionId, pendingUserMessage, sessionStore]);
+    if (flushable.length > 0) {
+      sessionStore.appendRealtimeBatch(activeSessionId, flushable);
+    }
+    if (remaining.length !== pendingFeedMessages.length) {
+      setPendingFeedMessages(remaining);
+    }
+  }, [activeSessionId, pendingFeedMessages, sessionStore]);
 
   const storeMessages = activeSessionId ? sessionStore.getMessages(activeSessionId) : [];
 
@@ -460,13 +481,24 @@ export function useChatSessionState({
 
   const chatMessages = useMemo(() => {
     const all = normalizedToChatMessages(storeMessages);
-    // Show pending user message when no session data exists yet (new session, pre-backend-response)
-    if (pendingUserMessage && all.length === 0) {
-      return [pendingUserMessage];
+    // Пузыри до появления сессии: на экране нового чата видны все отложенные,
+    // в открытом чате — привязанные к нему и непривязанные (прежнее поведение).
+    if (pendingFeedMessages.length > 0 && all.length === 0) {
+      const visible = pendingFeedMessages
+        .filter(
+          (entry) =>
+            !activeSessionId ||
+            entry.sessionId === null ||
+            entry.sessionId === activeSessionId,
+        )
+        .map((entry) => entry.message);
+      if (visible.length > 0) {
+        return visible;
+      }
     }
     if (viewHiddenCount > 0 && viewHiddenCount < all.length) return all.slice(0, -viewHiddenCount);
     return all;
-  }, [storeMessages, viewHiddenCount, pendingUserMessage]);
+  }, [storeMessages, viewHiddenCount, pendingFeedMessages, activeSessionId]);
 
   /* ---------------------------------------------------------------- */
   /*  addMessage / clearMessages / rewindMessages                     */
@@ -475,7 +507,10 @@ export function useChatSessionState({
   const addMessage = useCallback((msg: ChatMessage) => {
     if (!activeSessionId) {
       // No session yet — show as pending until the backend creates one
-      setPendingUserMessage(msg);
+      setPendingFeedMessages((prev) => [
+        ...prev,
+        { message: msg, sessionId: null, awaitSessionId: false },
+      ]);
       return;
     }
     const prov = (localStorage.getItem('selected-provider') as LLMProvider) || DEFAULT_PROVIDER;
@@ -484,6 +519,35 @@ export function useChatSessionState({
       sessionStore.appendRealtime(activeSessionId, normalized);
     }
   }, [activeSessionId, sessionStore]);
+
+  /**
+   * Пузырь сообщения, отправленного в ещё не созданный чат. Отличается от
+   * addMessage тем, что ждёт именно СВОЮ сессию (bindPendingMessages), а не
+   * переливается в первый открывшийся разговор.
+   */
+  const addPendingSendMessage = useCallback((msg: ChatMessage) => {
+    setPendingFeedMessages((prev) => [
+      ...prev,
+      { message: msg, sessionId: null, awaitSessionId: true },
+    ]);
+  }, []);
+
+  /** Сессия создана — ждущие её пузыри закрепляются за ней. Уже привязанные
+   * (чужая партия, например предыдущий «новый чат» той же папки) не трогаем. */
+  const bindPendingMessages = useCallback((sessionId: string) => {
+    setPendingFeedMessages((prev) =>
+      prev.map((entry) =>
+        entry.awaitSessionId && entry.sessionId === null
+          ? { ...entry, sessionId }
+          : entry,
+      ),
+    );
+  }, []);
+
+  /** Доставка не состоялась — убрать ждавшие сессию пузыри из ленты. */
+  const discardPendingSendMessages = useCallback(() => {
+    setPendingFeedMessages((prev) => prev.filter((entry) => !entry.awaitSessionId));
+  }, []);
 
   const clearMessages = useCallback(() => {
     if (!activeSessionId) return;
@@ -1366,6 +1430,9 @@ export function useChatSessionState({
   return {
     chatMessages,
     addMessage,
+    addPendingSendMessage,
+    bindPendingMessages,
+    discardPendingSendMessages,
     clearMessages,
     rewindMessages,
     sessionActivity,
