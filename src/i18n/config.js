@@ -160,19 +160,20 @@ i18n
 const languageLoads = new Map();
 const ensureLanguage = (lng) => {
   const loader = lazyLanguageLoaders[lng];
-  if (!loader || i18n.hasResourceBundle(lng, 'common')) return Promise.resolve();
+  if (!loader || i18n.hasResourceBundle(lng, 'common')) return Promise.resolve(false);
   let task = languageLoads.get(lng);
   if (!task) {
     task = loader().then((modules) => {
       modules.forEach((mod, index) => {
         i18n.addResourceBundle(lng, LAZY_NAMESPACES[index], mod.default ?? mod, true, true);
       });
+      return true;
     }).finally(() => {
       languageLoads.delete(lng);
     });
     languageLoads.set(lng, task);
   }
-  return task;
+  return task.then(() => true);
 };
 
 // Save language preference when it changes
@@ -182,10 +183,11 @@ i18n.on('languageChanged', (lng) => {
   } catch (error) {
     console.error('Failed to save language preference:', error);
   }
-  void ensureLanguage(lng).then(() => {
-    // Ресурсы приехали после фактической смены — переизбираем язык, чтобы
-    // интерфейс перерисовался уже переведённым, а не fallback-текстами.
-    if (i18n.language === lng && lazyLanguageLoaders[lng]) {
+  void ensureLanguage(lng).then((loaded) => {
+    // Переизбираем язык только если бандл реально догрузился — иначе
+    // changeLanguage на уже выбранный язык снова эмитит languageChanged
+    // и цикл не останавливается никогда.
+    if (loaded && i18n.language === lng) {
       void i18n.changeLanguage(lng);
     }
   });

@@ -377,6 +377,7 @@ async function scanClaudeTranscriptTail(filePath: string): Promise<ClaudeScanSta
       const { bytesRead } = await handle.read(buffer, 0, length, start);
       if (bytesRead <= 0) break;
       scanned += bytesRead;
+      const appendedBytes = pending ? Buffer.byteLength(pending) : 0;
       let text = buffer.subarray(0, bytesRead).toString('utf8') + pending;
       if (start > 0) {
         const firstNl = text.indexOf('\n');
@@ -391,10 +392,14 @@ async function scanClaudeTranscriptTail(filePath: string): Promise<ClaudeScanSta
       } else {
         pending = '';
       }
+      // Якорь позиций — файловый КОНЕЦ этого блока текста: старый end плюс
+      // байты доклеенного pending (фрагмент головы ПРОШЛОГО куска живёт в
+      // файле сразу за концом свежего куска, не перед ним).
+      const blockEnd = end + appendedBytes;
       end = start;
       const lines = text.split('\n');
       // Приблизительная позиция строки в файле — хватает для сравнения порядка.
-      let lineEnd = end;
+      let lineEnd = blockEnd;
       for (let i = lines.length - 1; i >= 0; i--) {
         const line = lines[i];
         lineEnd -= line.length + 1;

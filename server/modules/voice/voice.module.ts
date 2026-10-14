@@ -117,8 +117,9 @@ const audioArchive = createAudioArchiveService({
       { detached: true, stdio: 'ignore' },
     );
     const killGroup = (signal: NodeJS.Signals) => {
+      if (!child.pid) return;
       try {
-        process.kill(-(child.pid ?? 0), signal);
+        process.kill(-child.pid, signal);
       } catch {
         // Группа уже ушла — значит, процесс завершился сам.
       }

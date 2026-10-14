@@ -1020,7 +1020,8 @@ export const sessionsDb = {
            WHERE s.project_path IN (${normalized.map(() => '?').join(',')})
              AND s.isArchived = 0` + visibilitySql + scopeSql.sql + `
          )
-         WHERE __rn > ? AND __rn <= ?`
+         WHERE __rn > ? AND __rn <= ?
+         ORDER BY project_path, __rn`
       )
       .all(...params) as Array<SessionRow & { __rn: number }>;
 

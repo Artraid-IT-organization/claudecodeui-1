@@ -392,7 +392,7 @@ export async function getProjectsWithSessions(
     const sessRows = sessionsPages.get(normalizeProjectPath(projectPath)) ?? [];
     const sessionsPage = {
       sessions: sessRows.map(mapSessionRowToSummary),
-      hasMore: (sessionCounts.get(normalizeProjectPath(projectPath)) ?? 0) > sessRows.length,
+      hasMore: (sessionCounts.get(normalizeProjectPath(projectPath)) ?? 0) > pagination.offset + sessRows.length,
       total: sessionCounts.get(normalizeProjectPath(projectPath)) ?? 0,
       scopeTotals: scopeTotalsForProject(
         sessionScopeTotals.get(normalizeProjectPath(projectPath)) ?? [],

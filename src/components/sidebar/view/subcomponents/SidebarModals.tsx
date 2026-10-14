@@ -223,16 +223,18 @@ export default function SidebarModals({
           document.body,
         )}
 
-      <Suspense fallback={null}>
-        <VersionUpgradeModal
-          isOpen={showVersionModal}
-          onClose={onCloseVersionModal}
-          releaseInfo={releaseInfo}
-          currentVersion={currentVersion}
-          latestVersion={latestVersion}
-          installMode={installMode}
-        />
-      </Suspense>
+      {showVersionModal && (
+        <Suspense fallback={null}>
+          <VersionUpgradeModal
+            isOpen={showVersionModal}
+            onClose={onCloseVersionModal}
+            releaseInfo={releaseInfo}
+            currentVersion={currentVersion}
+            latestVersion={latestVersion}
+            installMode={installMode}
+          />
+        </Suspense>
+      )}
     </>
   );
 }
