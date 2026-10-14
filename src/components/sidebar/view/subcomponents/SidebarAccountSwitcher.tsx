@@ -10,6 +10,7 @@ import {
   type DevinConnectionOption,
 } from '../../../../hooks/useDevinConnectionPicker';
 import { useOwnerAccountSettings } from '../../../settings/hooks/useOwnerAccountSettings';
+import { scrollMovesAnchor } from '../../../../shared/scrollMovesAnchor';
 
 /** Короткая отметка канала Devin в меню: норма — «Devin», иначе — что мешает ходу. */
 function devinConnectionStatus(connection: DevinConnectionOption): string {
@@ -87,13 +88,20 @@ export default function SidebarAccountSwitcher({
       if (triggerRef.current?.contains(target ?? null)) return;
       setIsOpen(false);
     };
+    // Закрываться только от прокрутки, которая двигает саму кнопку (страница,
+    // панель). Прокрутка ленты чата рядом кнопку не сдвигает, а закрывала меню
+    // за миг до щелчка — щелчок падал в папку под меню и открывал там «Новый
+    // сеанс» (Егор 14.10.26, Mac: «нажимаю аккаунт — перебрасывает в другой чат»).
+    const onScroll = (event: Event) => {
+      if (scrollMovesAnchor(event, triggerRef.current)) setIsOpen(false);
+    };
     document.addEventListener('pointerdown', onPointerDown);
     window.addEventListener('resize', close);
-    window.addEventListener('scroll', close, true);
+    window.addEventListener('scroll', onScroll, true);
     return () => {
       document.removeEventListener('pointerdown', onPointerDown);
       window.removeEventListener('resize', close);
-      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('scroll', onScroll, true);
     };
   }, [isOpen]);
 
