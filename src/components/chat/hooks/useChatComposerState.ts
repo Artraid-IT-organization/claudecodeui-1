@@ -27,6 +27,14 @@ import {
   writeDraftInput,
 } from '../utils/chatStorage';
 import { clearAttachmentDraft, stashAttachmentDraft, takeAttachmentDraft } from '../utils/attachmentDrafts';
+import {
+  appendPendingSend,
+  clearPendingSends,
+  listPendingSends,
+  removePendingSend,
+  stampPendingSession,
+  type PendingSessionSend,
+} from '../utils/pendingSessionSends';
 import type {
   ChatAttachment,
   ChatMessage,
@@ -124,6 +132,14 @@ interface UseChatComposerStateArgs {
    * /session/:id and records it as the current session.
    */
   onSessionEstablished?: (sessionId: string, context: SessionEstablishedContext) => void;
+  /**
+   * Пузыри отправленных в ещё не созданный чат сообщений: показ сразу
+   * (addPendingSendMessage), привязка к готовой сессии (bindPendingMessages),
+   * уборка при полном отказе доставки (discardPendingSendMessages).
+   */
+  addPendingSendMessage?: (msg: ChatMessage) => void;
+  bindPendingMessages?: (sessionId: string) => void;
+  discardPendingSendMessages?: () => void;
   onInputFocusChange?: (focused: boolean) => void;
   onFileOpen?: (filePath: string, diffInfo?: unknown) => void;
   onShowSettings?: () => void;
@@ -218,6 +234,51 @@ const createFakeSubmitEvent = () => {
 const MAX_ATTACHMENT_COUNT = 10;
 /** Сколько держать засов отправки, если запуск так и не начался (обрыв, отказ сервера). */
 const SUBMIT_LOCK_FAILSAFE_MS = 20_000;
+/**
+ * Один запрос создания сессии не должен висеть вечно: на просевшем сервере
+ * fetch молчал бы минутами. Полный отказ — после PENDING_SEND_GIVE_UP_MS
+ * повторов (просадки боя доходили до ~90 секунд, запас кратный).
+ */
+const SESSION_CREATE_TIMEOUT_MS = 30_000;
+const PENDING_SEND_GIVE_UP_MS = 10 * 60_000;
+
+/**
+ * POST /api/providers/sessions для очереди «нового чата» — с потолком
+ * ожидания, чтобы зависший запрос отпускал сторожа на следующий повтор.
+ */
+const createSessionForPendingSend = async (
+  record: PendingSessionSend,
+): Promise<{ sessionId: string; sessionName: string | null }> => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SESSION_CREATE_TIMEOUT_MS);
+  try {
+    const response = await authenticatedFetch('/api/providers/sessions', {
+      method: 'POST',
+      signal: controller.signal,
+      body: JSON.stringify({
+        provider: record.provider,
+        projectPath: record.projectPath,
+        initialMessage: record.content,
+      }),
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to create session (${response.status})`);
+    }
+    const body = await response.json();
+    const sessionId = body?.data?.sessionId || null;
+    if (!sessionId) {
+      throw new Error('Session creation returned no session id');
+    }
+    // Пустое имя с сервера не затирает локальную выжимку — см. прежний путь.
+    const sessionName =
+      typeof body?.data?.sessionName === 'string' && body.data.sessionName.trim()
+        ? body.data.sessionName.trim()
+        : null;
+    return { sessionId, sessionName };
+  } finally {
+    clearTimeout(timer);
+  }
+};
 // Потолок на одно вложение. 10 МБ отсекали ровно тот случай, ради которого
 // вложения и нужны: скриншот экрана 2560x1440 весит около 11 МБ, и человек
 // получал отказ на самом обычном действии. Сервер принимает до 50 МБ
@@ -323,6 +384,9 @@ export function useChatComposerState({
   onStartNewChat,
   onSessionProcessing,
   onSessionEstablished,
+  addPendingSendMessage,
+  bindPendingMessages,
+  discardPendingSendMessages,
   onInputFocusChange,
   onFileOpen,
   onShowSettings,
@@ -906,6 +970,227 @@ export function useChatComposerState({
 
   useEffect(() => releaseSubmitLock, [releaseSubmitLock]);
 
+  /*
+    Доставка сообщений «нового чата», отправленных до создания сессии.
+
+    Раньше нажатие «Отправить» на пустом чате ждало POST /api/providers/sessions
+    и только потом рисовало пузырь и чистило поле. На перегруженном сервере или
+    при рвущейся мобильной связи человек смотрел в неизменный экран десятки
+    секунд и жал ещё раз — а при обрыве запроса сообщение терялось молча.
+    Егор 14.10.26: «максимально быстрый отклик, чтобы я знал, что сообщение
+    отправилось, и оно сохраняется и ждёт своей очереди вне зависимости от сети».
+
+    Теперь пузырь и запись в localStorage (utils/pendingSessionSends.ts)
+    появляются в момент нажатия. Дальше этот сторож создаёт сессию с повторами
+    (серверные паузы доходили до полутора минут — даём десять), прикрепляет
+    пузыри к созданной сессии и отправляет каждое сообщение через outbox
+    сокета, который сам ждёт расписки. Записи переживают перезагрузку страницы:
+    эффект ниже поднимает их заново.
+  */
+  const pendingSendInFlightRef = useRef(new Set<string>());
+  /**
+   * «Сессия области уже создана, до подстановки её id в пропсы». Окно между
+   * onSessionEstablished и перерисовкой: отправка в этот зазор должна уйти в
+   * созданную сессию, а не породить вторую. На новый «Новый сеанс» маркер
+   * сбрасывается — свежий чат той же папки обязан получить свою сессию.
+   */
+  const pendingScopeSessionRef = useRef(new Map<string, string>());
+
+  const failPendingSends = useCallback(
+    (scope: string) => {
+      const records = listPendingSends(scope);
+      clearPendingSends(scope);
+      discardPendingSendMessages?.();
+      const restored = records.map((rec) => rec.content).filter(Boolean).join('\n\n');
+      if (restored) {
+        writeDraftInput(scope, restored);
+        if (draftScopeRef.current === scope) {
+          setInput(restored);
+          inputValueRef.current = restored;
+        }
+      }
+      addMessage({
+        type: 'error',
+        content:
+          'Сообщение не ушло: сервер долго не отвечал. Текст возвращён в поле ввода — отправьте ещё раз, когда связь восстановится.',
+        timestamp: new Date(),
+      });
+    },
+    [addMessage, discardPendingSendMessages],
+  );
+
+  const deliverPendingSessionSends = useCallback(
+    async (scope: string) => {
+      if (!scope || pendingSendInFlightRef.current.has(scope)) {
+        return;
+      }
+      pendingSendInFlightRef.current.add(scope);
+      try {
+        let backoffMs = 2_000;
+        const giveUpAt = Date.now() + PENDING_SEND_GIVE_UP_MS;
+        for (;;) {
+          // Сначала записи с уже созданной сессией — прямо в outbox.
+          for (const rec of listPendingSends(scope)) {
+            if (!rec.sessionId) continue;
+            sendMessage({
+              type: 'chat.send',
+              clientMessageId: rec.id,
+              sessionId: rec.sessionId,
+              content: rec.content,
+              options: { ...(rec.options ?? {}), attachments: rec.attachments ?? [] },
+            });
+            onSessionProcessing?.(rec.sessionId, {
+              statusText: null,
+              phase: 'starting',
+              detail: null,
+              canInterrupt: true,
+            });
+            removePendingSend(scope, rec.id);
+          }
+
+          const sessionless = listPendingSends(scope).filter((rec) => !rec.sessionId);
+          if (sessionless.length === 0) return;
+
+          let created: { sessionId: string; sessionName: string | null };
+          try {
+            created = await createSessionForPendingSend(sessionless[0]);
+          } catch (error) {
+            console.error('[pending-send] session creation failed:', error);
+            if (Date.now() >= giveUpAt) {
+              failPendingSends(scope);
+              return;
+            }
+            await new Promise((resolve) => setTimeout(resolve, backoffMs));
+            backoffMs = Math.min(Math.round(backoffMs * 1.7), 30_000);
+            continue;
+          }
+
+          const sessionId = created.sessionId;
+          // Проставляем id только записям без него: соседняя партия того же
+          // «нового чата» могла получить свою сессию раньше.
+          stampPendingSession(scope, sessionId);
+          pendingScopeSessionRef.current.set(scope, sessionId);
+          bindPendingMessages?.(sessionId);
+          const first = sessionless[0];
+          onSessionEstablished?.(sessionId, {
+            provider: first.provider,
+            project: selectedProject as Project,
+            summary: created.sessionName ?? first.summary ?? undefined,
+          });
+        }
+      } finally {
+        pendingSendInFlightRef.current.delete(scope);
+      }
+    },
+    [
+      bindPendingMessages,
+      failPendingSends,
+      onSessionEstablished,
+      onSessionProcessing,
+      selectedProject,
+      sendMessage,
+    ],
+  );
+
+  /**
+   * Общее для «первой отправки нового чата» и «ещё одного сообщения, пока
+   * сессия создаётся»: пузырь на экран, поле чистится, запись — в очередь.
+   */
+  const queuePendingSessionSend = useCallback(
+    async (
+      scope: string,
+      content: string,
+      uploadedAttachments: unknown[],
+    ) => {
+      const attachments = uploadedAttachments as ChatAttachment[];
+      const userMessage: ChatMessage = {
+        type: 'user',
+        content,
+        images: attachments.filter(isImageAttachment),
+        files: attachments.filter((attachment) => !isImageAttachment(attachment)),
+        timestamp: new Date(),
+      };
+      (addPendingSendMessage ?? addMessage)(userMessage);
+      appendPendingSend(scope, {
+        id: newDraftId(),
+        content,
+        attachments: uploadedAttachments,
+        options: buildSendOptions(content),
+        provider,
+        projectPath: (selectedProject?.fullPath || selectedProject?.path || '') as string,
+        summary: getNotificationSessionSummary(null, content),
+        sessionId: null,
+        createdAt: Date.now(),
+      });
+      void deliverPendingSessionSends(scope);
+
+      clearDraftInput(scope);
+      if (draftScopeRef.current !== scope) {
+        clearAttachmentDraft(scope);
+        return;
+      }
+      setInput('');
+      inputValueRef.current = '';
+      setAttachedFiles([]);
+      carriedUploadedRef.current = [];
+      setUploadingFiles(new Map());
+      setFileErrors(new Map());
+      resetCommandMenuState();
+      setIsTextareaExpanded(false);
+      if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto';
+      }
+      setIsUserScrolledUp(false);
+      setTimeout(() => scrollToBottom(), 100);
+    },
+    [
+      addMessage,
+      addPendingSendMessage,
+      buildSendOptions,
+      deliverPendingSessionSends,
+      provider,
+      resetCommandMenuState,
+      scrollToBottom,
+      selectedProject,
+      setIsUserScrolledUp,
+    ],
+  );
+
+  // Пережившие перезагрузку записи очереди «нового чата» поднимаются, когда
+  // композер снова показывает тот самый экран нового чата (та же область).
+  const resumedPendingScopesRef = useRef(new Set<string>());
+  useEffect(() => {
+    const scope = draftScope;
+    if (!scope || sessionKey) return;
+    const records = listPendingSends(scope);
+    if (records.length === 0) return;
+    if (!resumedPendingScopesRef.current.has(scope)) {
+      resumedPendingScopesRef.current.add(scope);
+      for (const rec of records) {
+        const attachments = (rec.attachments ?? []) as ChatAttachment[];
+        (addPendingSendMessage ?? addMessage)({
+          type: 'user',
+          content: rec.content,
+          images: attachments.filter(isImageAttachment),
+          files: attachments.filter((attachment) => !isImageAttachment(attachment)),
+          timestamp: new Date(rec.createdAt),
+        });
+      }
+      const knownSessionId = records.find((rec) => rec.sessionId)?.sessionId;
+      if (knownSessionId) {
+        bindPendingMessages?.(knownSessionId);
+      }
+    }
+    void deliverPendingSessionSends(scope);
+  }, [
+    draftScope,
+    sessionKey,
+    addMessage,
+    addPendingSendMessage,
+    bindPendingMessages,
+    deliverPendingSessionSends,
+  ]);
+
   const handleSubmit = useCallback(
     async (
       event: FormEvent<HTMLFormElement> | MouseEvent | TouchEvent | KeyboardEvent<HTMLTextAreaElement>,
@@ -1039,6 +1324,32 @@ export function useChatComposerState({
         }
       }
 
+      // Сессия нового чата ещё создаётся (очередь pendingSessionSends не
+      // пуста) — следующее сообщение ложится туда же и уйдёт следом за первым.
+      if (submitDraftScope && listPendingSends(submitDraftScope).length > 0) {
+        let queuedAttachments = previouslyUploadedAttachments;
+        if (queuedAttachments.length === 0 && currentAttachments.length > 0) {
+          try {
+            queuedAttachments = await uploadAttachmentFiles(currentAttachments);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : 'Unknown error';
+            console.error('Queued file upload failed:', error);
+            addMessage({
+              type: 'error',
+              content: `Failed to upload files: ${message}`,
+              timestamp: new Date(),
+            });
+            return;
+          }
+        }
+        await queuePendingSessionSend(
+          submitDraftScope,
+          currentInput,
+          queuedAttachments,
+        );
+        return;
+      }
+
       // Засов берётся здесь, а не выше: пока идёт ответ, сообщения кладутся в
       // очередь, и копить их подряд — нормально. Охранять нужно только
       // настоящую отправку.
@@ -1067,63 +1378,45 @@ export function useChatComposerState({
         }
       }
 
-      const resolvedProjectPath = selectedProject.fullPath || selectedProject.path || '';
-      const sessionSummary = getNotificationSessionSummary(selectedSession, currentInput);
-
       // The conversation always has a stable backend-allocated session id
-      // BEFORE the first websocket send: brand-new chats allocate one here
-      // via the session gateway. There is no client-visible session-id
-      // handoff later — this id stays valid for the conversation's lifetime.
+      // BEFORE the first websocket send. Brand-new chats used to block the
+      // whole submit on that POST — the feed stayed frozen until the server
+      // answered, and on a busy server or a flapping mobile link the press
+      // looked dead. Now the bubble and a durable record land first
+      // (utils/pendingSessionSends.ts), and deliverPendingSessionSends creates
+      // the session in the background with retries, then sends via the socket
+      // outbox like everywhere else.
       let targetSessionId = selectedSession?.id || currentSessionId || null;
+      // Сессия области уже создана сторожом, но её id ещё не доехал в пропсы
+      // — отправка уходит в неё, а не порождает дубль чата.
+      if (!targetSessionId && submitDraftScope) {
+        targetSessionId = pendingScopeSessionRef.current.get(submitDraftScope) ?? null;
+      }
       if (!targetSessionId) {
-        let createdSessionName = sessionSummary;
+        if (!submitDraftScope) {
+          return;
+        }
         try {
-          const response = await authenticatedFetch('/api/providers/sessions', {
-            method: 'POST',
-            body: JSON.stringify({
-              provider,
-              projectPath: resolvedProjectPath,
-              initialMessage: messageContent,
-            }),
-          });
-          if (!response.ok) {
-            throw new Error(`Failed to create session (${response.status})`);
-          }
-          const body = await response.json();
-          targetSessionId = body?.data?.sessionId || null;
-          // A blank server name would leave the session unlabeled, so the local
-          // summary stays the fallback unless a real name comes back.
-          const returnedSessionName = typeof body?.data?.sessionName === 'string'
-            ? body.data.sessionName.trim()
-            : '';
-          if (returnedSessionName) {
-            createdSessionName = returnedSessionName;
-          }
+          await queuePendingSessionSend(
+            submitDraftScope,
+            messageContent,
+            uploadedAttachments,
+          );
         } catch (error) {
           const message = error instanceof Error ? error.message : 'Unknown error';
-          console.error('Session creation failed:', error);
+          console.error('Queued new-session send failed:', error);
           addMessage({
             type: 'error',
-            content: `Failed to start a new session: ${message}`,
+            content: `Failed to send: ${message}`,
             timestamp: new Date(),
           });
           return;
         }
-
-        if (!targetSessionId) {
-          addMessage({
-            type: 'error',
-            content: 'Failed to start a new session: no session id returned.',
-            timestamp: new Date(),
-          });
-          return;
-        }
-
-        onSessionEstablished?.(targetSessionId, {
-          provider,
-          project: selectedProject,
-          summary: createdSessionName,
-        });
+        // Засов снимаем сами: запуск начнётся с задержкой, isLoading-эффект
+        // ждать нечего, а второе сообщение должно лечь в ту же очередь выше,
+        // а не отшибаться.
+        releaseSubmitLock();
+        return;
       }
 
       const attachmentRecords = uploadedAttachments as ChatAttachment[];
@@ -1205,6 +1498,8 @@ export function useChatComposerState({
       addMessage,
       setIsUserScrolledUp,
       slashCommands,
+      queuePendingSessionSend,
+      releaseSubmitLock,
     ],
   );
 
@@ -1334,6 +1629,9 @@ export function useChatComposerState({
     const newChatScope = draftScopeFor(selectedProjectId, null);
     clearDraftInput(newChatScope);
     clearAttachmentDraft(newChatScope);
+    if (newChatScope) {
+      pendingScopeSessionRef.current.delete(newChatScope);
+    }
     if (draftOwnerRef.current === newChatScope) {
       inputValueRef.current = '';
       setInput('');

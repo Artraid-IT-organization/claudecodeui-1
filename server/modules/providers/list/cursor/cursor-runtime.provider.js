@@ -7,6 +7,7 @@ import {
 } from '@/shared/image-attachments.js';
 import { notifyRunFailed, notifyRunStopped } from '@/modules/notifications/index.js';
 import { createCompleteMessage, createNormalizedMessage, flattenPromptForWindowsShell } from '@/shared/utils.js';
+import { wrapInAgentRoom } from '@/shared/agent-rooms.js';
 
 // cross-spawn resolves .cmd shims/PATHEXT on Windows and delegates to
 // child_process.spawn everywhere else.
@@ -154,10 +155,12 @@ async function spawnCursor(command, options = {}, ws, context) {
         console.log('Retrying Cursor CLI with --trust after workspace trust prompt');
       }
 
-      const cursorProcess = spawnFunction('cursor-agent', args, {
+      // Своя комната (agent-rooms): агент не делит потолок памяти с сайтом.
+      const room = wrapInAgentRoom('cursor-agent', args, process.env, processKey);
+      const cursorProcess = spawnFunction(room.command, room.args, {
         cwd: workingDir,
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env } // Inherit all environment variables
+        env: room.env
       });
 
       activeCursorProcesses.set(processKey, cursorProcess);
