@@ -276,8 +276,10 @@ export const sessionsService = {
     const requestContext = getRequestRuntimeContext();
     const canUseCodex = requestContext === undefined
       || isCodexAllowedForWebUser(requestContext.userId);
-    if ((providerSpace === 'codex' || providerSpace === 'devin') && !canUseCodex) {
-      // Codex and Devin share one owner boundary (isCodexAllowedForWebUser).
+    if (providerSpace === 'codex' && !canUseCodex) {
+      // У гостя нет хостового входа Codex, а Devin — корпоративный помощник
+      // для всех: свои Devin-чаты гость получает отбором initiated_by_user_id
+      // внутри hide-codex (sessions.db.ts), пустоту отдавать нельзя.
       return { conversations: [], total: 0, hasMore: false };
     }
     const accountVisibility = canUseCodex ? 'shared-codex' : 'hide-codex';
