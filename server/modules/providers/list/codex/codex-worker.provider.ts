@@ -19,6 +19,7 @@ import {
   forgetSurvivableProcess,
   registerSurvivableProcess,
 } from '@/modules/providers/list/claude/survivor-runs.js';
+import { verifyAgentRoom, wrapInAgentRoom } from '@/shared/agent-rooms.js';
 
 export type CodexWorkerJob = {
   appSessionId: string;
@@ -174,13 +175,16 @@ export async function launchCodexWorker(job: Omit<CodexWorkerJob, 'eventPath'>):
   await writeFile(eventPath, '', { encoding: 'utf8', mode: 0o600 });
 
   const launch = workerLaunchArgs();
-  const child = spawn(launch.command, launch.args, {
+  // Своя комната (agent-rooms): воркер Codex не делит потолок памяти с сайтом.
+  const room = wrapInAgentRoom(launch.command, launch.args, process.env, job.appSessionId);
+  const child = spawn(room.command, room.args, {
     cwd: job.workingDirectory,
-    env: process.env,
+    env: room.env,
     detached: true,
     stdio: ['pipe', 'ignore', 'ignore'],
     windowsHide: true,
   });
+  verifyAgentRoom(child.pid ?? undefined, room.room);
   if (!child.pid) {
     throw new Error('Codex worker did not return a PID.');
   }

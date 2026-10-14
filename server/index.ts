@@ -13,6 +13,7 @@ import cors from 'cors';
 
 import { installProcessGuards } from '@/shared/process-guards.js';
 import { adoptSurvivors, markShuttingDown } from '@/modules/providers/list/claude/survivor-runs.js';
+import { agentRoomsAvailable } from '@/shared/agent-rooms.js';
 import { warmSearchIndexes } from '@/modules/providers/services/session-conversations-search.service.js';
 import { broadcastRealtimeEvent } from '@/modules/websocket/services/websocket-state.service.js';
 import { AppError, findApplicationRoot, getClaudeJsonPath, getModuleDirectory, IS_PLATFORM, OPEN_REGISTRATION, terminalTextStyles } from '@/shared/utils.js';
@@ -206,6 +207,8 @@ app.get('/health', (req, res) => {
         activeRuns: activeRuns.length,
         restartBlockingRuns: restartBlockingRuns.length,
         draining: chatRunRegistry.isShutdownDraining(),
+        // Комнаты агентов живы — сторожи (~/self-heal) читают это без разбора журнала.
+        agentRooms: agentRoomsAvailable(),
     });
 });
 

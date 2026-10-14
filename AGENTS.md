@@ -216,12 +216,13 @@ DATABASE_PATH=/tmp/… OPEN_REGISTRATION=true SERVER_PORT=…`), гость по
 Старые черновики по проекту один раз переезжают в открытый чат
 (`adoptLegacyProjectDraft`).
 
-## Агенты — в своих комнатах, не в группе сайта (22.09.26)
+## Агенты — в своих комнатах, не в группе сайта (22.09.26, закрыты все пути 14.10.26)
 
-- Агент запускается через `agent-rooms.js`: `systemd-run --user --scope --slice=ccui-agents.slice -p MemoryHigh=2G -- claude …` (обёртка в `spawnSurvivableClaude`). `--scope` делает exec — PID, каналы, «Стоп», live-runs те же. Образец — jupyterhub/systemdspawner.
+- Агент запускается через `shared/agent-rooms.ts` → `wrapInAgentRoom(command, args, env, appSessionId)`: `systemd-run --user --scope --slice=ccui-agents.slice -p MemoryHigh=2G -- <cmd> …`. `--scope` делает exec — PID, каналы, «Стоп», live-runs те же. Образец — jupyterhub/systemdspawner.
+- **Инвариант: КАЖДОЕ место рождения агента или тяжёлого дочернего процесса обязано пройти через `wrapInAgentRoom`.** Обёрнуты: claude (`survivor-runs.spawnSurvivableClaude`), devin (супервизор в `devin-acp-client` и запасной прямой spawn в `devin-runtime`), codex (`codex-worker`), cursor (`cursor-runtime`), opencode (`opencode-runtime`), терминал (`shell-websocket.service` — pty + `systemd-run --scope` совместимы, проба 14.10.26). До 14.10 комната была только у claude — Devin-чаты и терминал рождались прямо в группе сайта и душили его.
 - Зачем: 22.09 агенты + их ffmpeg/сборки заняли 2,73 ГБ группы службы при MemoryHigh 2,5 ГБ, ядро душило всю группу вместе с сервером (memory.pressure full ~90%), новый сервер после перезапуска 15+ мин не открывал порт → «Секунду, обновляюсь».
 - Срез `~/.config/systemd/user/ccui-agents.slice` (копия `deploy/ccui-agents.slice`): MemoryHigh 4G, MemoryMax 5G, MemorySwapMax 1G, CPUWeight 40. Пользовательскому менеджеру делегированы только cpu/memory/pids — IOWeight там не работает.
-- Проба на старте и раз в 10 мин (раз в минуту после неудачи) создаёт пустую комнату; не прошла — агенты запускаются напрямую, как раньше, и уходит оповещение в TG (не чаще раза в час). Каждый агент через 3 с сверяется по /proc/<pid>/cgroup — не в своей комнате → тоже оповещение. Выключить: `CLOUDCLI_AGENT_ROOMS=off`. Проверка: `cat /proc/<pid агента>/cgroup` → `…/ccui-agents.slice/ccui-agent-….scope`.
+- Проба на старте и раз в 10 мин (раз в минуту после неудачи) создаёт пустую комнату, таймаут 15 с; «недоступны» ставится только после ДВУХ подряд провалов (раньше один таймаут 5 с под нагрузкой выключал комнаты на минуту — журнал 12:11 и 13:17 14.10.26). В отказе агенты запускаются напрямую (чат важнее комнаты) + оповещение в TG (не чаще раза в час), а сторож `~/self-heal` (рецепт site-strays) выносит стреев из группы сайта. Каждый агент через 3 с сверяется по /proc/<pid>/cgroup. Выключить: `CLOUDCLI_AGENT_ROOMS=off`. Проверка: `cat /proc/<pid агента>/cgroup` → `…/ccui-agents.slice/ccui-agent-….scope`; в `/health` — поле `agentRooms`.
 
 ## Чаты переживают перезапуск сайта (13.09.26)
 
