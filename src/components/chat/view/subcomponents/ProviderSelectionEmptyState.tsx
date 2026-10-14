@@ -10,7 +10,9 @@ import type {
   ProviderModelsDefinition,
 } from "../../../../types/app";
 import LLMProviderLogo from "../../../llm-provider-logo/LLMProviderLogo";
-import { NextTaskBanner } from "../../../task-master";
+// Прямой импорт, а не бочка `task-master`: index.ts рядом тащит TaskMasterPanel
+// → PRDEditor → CodeMirror в стартовую загрузку каждой страницы (14.10.26).
+import NextTaskBanner from "../../../task-master/view/NextTaskBanner";
 import {
   Dialog,
   DialogTrigger,

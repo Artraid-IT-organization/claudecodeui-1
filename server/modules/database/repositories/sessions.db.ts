@@ -976,6 +976,149 @@ export const sessionsDb = {
   },
 
   /**
+   * Порции чатов сразу для всех папок списка проектов: одна выборка с
+   * нумерацией строк внутри каждой папки вместо отдельного запроса на папку.
+   * Отбор и порядок — ровно как у getSessionsByProjectPathPage (перенесённые
+   * в другой блок чаты первыми, дальше по дате). 14.10.26 список проектов
+   * делал ~3 запроса на каждую из ~110 папок — на занятом процессоре это
+   * стоило больше секунды на запрос списка.
+   */
+  getSessionsByProjectPathsPage(
+    projectPaths: string[],
+    limit: number,
+    offset: number,
+    accountVisibility: SessionAccountVisibility = 'current',
+    scope?: SessionListScope,
+  ): Map<string, SessionRow[]> {
+    const result = new Map<string, SessionRow[]>();
+    if (projectPaths.length === 0) return result;
+    const db = getConnection();
+    const normalized = projectPaths.map((p) => normalizeProjectPath(p));
+    const visibilitySql = accountVisibilitySql(accountVisibility, 's');
+    const scopeSql = sessionListScopeSql(scope, 's');
+    const params: unknown[] = [...normalized];
+    if (visibilitySql.includes('?')) params.push(getActiveAccountDir());
+    params.push(...scopeSql.params, offset, offset + limit);
+    const columns = SESSION_ROW_COLUMNS.split(', ').map((c) => `s.${c}`).join(', ');
+    const rows = db
+      .prepare(
+        `SELECT * FROM (
+           SELECT ${columns},
+             ROW_NUMBER() OVER (
+               PARTITION BY s.project_path
+               ORDER BY (
+                 s.server_scope IS NOT NULL
+                 AND s.server_scope <> COALESCE(
+                   (SELECT projects.server_scope FROM projects WHERE projects.project_path = s.project_path),
+                   'main'
+                 )
+               ) DESC,
+               datetime(COALESCE(s.updated_at, s.created_at)) DESC,
+               s.session_id DESC
+             ) AS __rn
+           FROM sessions s
+           WHERE s.project_path IN (${normalized.map(() => '?').join(',')})
+             AND s.isArchived = 0` + visibilitySql + scopeSql.sql + `
+         )
+         WHERE __rn > ? AND __rn <= ?`
+      )
+      .all(...params) as Array<SessionRow & { __rn: number }>;
+
+    for (const row of rows) {
+      const key = normalizeProjectPath(row.project_path ?? '');
+      const list = result.get(key) ?? [];
+      list.push(row);
+      result.set(key, list);
+    }
+    for (const [key, list] of result) {
+      result.set(key, normalizeSessionRows(list));
+    }
+    return result;
+  },
+
+  /**
+   * «Сколько чатов» для всех папок одним GROUP BY — пара к
+   * getSessionsByProjectPathsPage.
+   */
+  countSessionsByProjectPaths(
+    projectPaths: string[],
+    accountVisibility: SessionAccountVisibility = 'current',
+    scope?: SessionListScope,
+  ): Map<string, number> {
+    const result = new Map<string, number>();
+    if (projectPaths.length === 0) return result;
+    const db = getConnection();
+    const normalized = projectPaths.map((p) => normalizeProjectPath(p));
+    const visibilitySql = accountVisibilitySql(accountVisibility, 's');
+    const scopeSql = sessionListScopeSql(scope, 's');
+    const params: unknown[] = [...normalized];
+    if (visibilitySql.includes('?')) params.push(getActiveAccountDir());
+    params.push(...scopeSql.params);
+    const rows = db
+      .prepare(
+        `SELECT s.project_path AS project_path, COUNT(*) AS count
+         FROM sessions s
+         WHERE s.project_path IN (${normalized.map(() => '?').join(',')})
+           AND s.isArchived = 0` + visibilitySql + scopeSql.sql + `
+         GROUP BY s.project_path`
+      )
+      .all(...params) as Array<{ project_path: string; count: number }>;
+
+    for (const row of rows) {
+      result.set(normalizeProjectPath(row.project_path), Number(row.count));
+    }
+    return result;
+  },
+
+  /**
+   * Раскладка чатов по помощнику и блоку для всех папок одним запросом —
+   * пакетная версия countSessionsByProjectPathGrouped.
+   */
+  countSessionsByProjectPathsGrouped(
+    projectPaths: string[],
+    accountVisibility: SessionAccountVisibility = 'current',
+  ): Map<string, Array<{ provider: string; serverScope: ServerScope; count: number }>> {
+    const result = new Map<string, Array<{ provider: string; serverScope: ServerScope; count: number }>>();
+    if (projectPaths.length === 0) return result;
+    const db = getConnection();
+    const normalized = projectPaths.map((p) => normalizeProjectPath(p));
+    const visibilitySql = accountVisibilitySql(accountVisibility, 's');
+    const params: unknown[] = [...normalized];
+    if (visibilitySql.includes('?')) params.push(getActiveAccountDir());
+    const rows = db
+      .prepare(
+        `SELECT s.project_path AS project_path,
+                s.provider AS provider,
+                COALESCE(s.server_scope,
+                  (SELECT projects.server_scope FROM projects WHERE projects.project_path = s.project_path),
+                  'main') AS effective_scope,
+                COUNT(*) AS count
+         FROM sessions s
+         WHERE s.project_path IN (${normalized.map(() => '?').join(',')})
+           AND s.isArchived = 0` + visibilitySql + `
+         GROUP BY s.project_path, s.provider, effective_scope`
+      )
+      .all(...params) as Array<{
+        project_path: string;
+        provider: string;
+        effective_scope: ServerScope;
+        count: number;
+      }>;
+
+    for (const row of rows) {
+      const key = normalizeProjectPath(row.project_path);
+      const list = result.get(key) ?? [];
+      list.push({
+        provider: row.provider,
+        serverScope: row.effective_scope,
+        count: Number(row.count),
+      });
+      result.set(key, list);
+    }
+    return result;
+  },
+
+  /**
    * Moves this account's script-launched sessions into the archive - once.
    *
    * New `auto` sessions are archived as they are inserted, but rows indexed

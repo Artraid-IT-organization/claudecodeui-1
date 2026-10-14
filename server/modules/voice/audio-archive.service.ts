@@ -232,7 +232,10 @@ export function createAudioArchiveService(dependencies: AudioArchiveDependencies
    * own recording started instead of racing it: the transcript is usually
    * ready before a multi-megabyte upload finishes.
    */
-  const inFlightSends = new Map<string, Promise<SendResult>>();
+  // Отправка записи, которая ещё идёт (ffmpeg + загрузка в Telegram).
+  // done=true после завершения: результат нужен publishOutcome как `previous`,
+  // а resumePending такую запись обрабатывает обычным путём.
+  const inFlightSends = new Map<string, { task: Promise<SendResult>; done: boolean }>();
 
   async function readState(audioPath: string): Promise<DeliveryState> {
     try {
@@ -276,6 +279,25 @@ export function createAudioArchiveService(dependencies: AudioArchiveDependencies
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Одна отправка записи в полёте на файл: повторный вызов (пробуждение после
+   * перезапуска, повторная доставка) делит один ffmpeg и один upload, а не
+   * запускает копии. На 14.10.26 видели три параллельных ffmpeg над одним
+   * файлом — по экземпляру на каждый перезапуск службы.
+   */
+  function sendRecordingOnce(audioPath: string, caption: string): Promise<SendResult> {
+    const existing = inFlightSends.get(audioPath);
+    if (existing && !existing.done) return existing.task;
+    const task = sendRecording(audioPath, caption);
+    const entry = { task, done: false };
+    inFlightSends.set(audioPath, entry);
+    task.then(
+      () => { entry.done = true; },
+      () => { entry.done = true; },
+    );
+    return task;
   }
 
   /** Uploads the recording itself. Returns whether it landed and under which message id. */
@@ -359,7 +381,7 @@ export function createAudioArchiveService(dependencies: AudioArchiveDependencies
     }
 
     // Первая отправка не удалась - вторая попытка, уже с готовой подписью.
-    const retry = await sendRecording(audioPath, caption);
+    const retry = await sendRecordingOnce(audioPath, caption);
     await writeState(audioPath, {
       sent: retry.sent,
       captionDone: retry.sent,
@@ -412,7 +434,7 @@ export function createAudioArchiveService(dependencies: AudioArchiveDependencies
         return Promise.resolve();
       }
       const { audioPath, recordedAt } = recording;
-      const task = sendRecording(audioPath, pendingCaption(recordedAt))
+      const task = sendRecordingOnce(audioPath, pendingCaption(recordedAt))
         .then(async (result) => {
           await writeState(audioPath, {
             sent: result.sent,
@@ -424,7 +446,12 @@ export function createAudioArchiveService(dependencies: AudioArchiveDependencies
           dependencies.log.warn(`[Voice] Could not send recording to Telegram: ${describeError(error)}`);
           return { sent: false, messageId: null } as SendResult;
         });
-      inFlightSends.set(audioPath, task);
+      const entry = { task, done: false };
+      inFlightSends.set(audioPath, entry);
+      task.then(
+        () => { entry.done = true; },
+        () => { entry.done = true; },
+      );
       return task.then(() => undefined);
     },
 
@@ -447,7 +474,7 @@ export function createAudioArchiveService(dependencies: AudioArchiveDependencies
         if (!telegramEnabled) {
           return;
         }
-        const previous = await (inFlightSends.get(audioPath) ?? Promise.resolve({ sent: false, messageId: null }));
+        const previous = await (inFlightSends.get(audioPath)?.task ?? Promise.resolve({ sent: false, messageId: null }));
         inFlightSends.delete(audioPath);
         await deliverOutcomeText(audioPath, buildCaption(outcome, recordedAt), previous);
       })().catch((error: unknown) => {
@@ -494,6 +521,13 @@ export function createAudioArchiveService(dependencies: AudioArchiveDependencies
           break;
         }
         const audioPath = path.join(dependencies.archiveDir, name);
+        // Отправка уже идёт (свежая запись или прошлый прогон) — не плодим
+        // параллельную конвертацию и загрузку того же файла. Завершившаяся —
+        // не помеха: она и есть тот результат, с которым продолжаем.
+        const inFlight = inFlightSends.get(audioPath);
+        if (inFlight && !inFlight.done) {
+          continue;
+        }
         const state = await readState(audioPath);
         if (state.legacy || state.captionDone) {
           continue;
