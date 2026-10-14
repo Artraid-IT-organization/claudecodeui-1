@@ -29,7 +29,7 @@
  *    directory.
  */
 
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -237,6 +237,18 @@ export function createAudioArchiveService(dependencies: AudioArchiveDependencies
   // а resumePending такую запись обрабатывает обычным путём.
   const inFlightSends = new Map<string, { task: Promise<SendResult>; done: boolean }>();
 
+  /**
+   * Телефон пересылает запись, пока не увидит ответ сервера (очередь в
+   * IndexedDB, повтор каждые ~30 с). Дедуп по содержимому: одни и те же байты
+   * — одна запись на диске и одна отправка в Telegram, сколько бы раз её ни
+   * принесли. 12–14.10.26 одна 366-с диктовка, отвергнутая voice-bridge,
+   * всплыла в группе ~380 раз: каждый повтор писал новый файл и новое
+   * голосовое. Хеш живёт в памяти процесса — перезапуск создаёт самое большее
+   * одну копию, не лавину.
+   */
+  const keptByContentHash = new Map<string, KeptRecording>();
+  const MAX_KEPT_HASHES = 128;
+
   async function readState(audioPath: string): Promise<DeliveryState> {
     try {
       const raw = await fs.readFile(statePathFor(audioPath), 'utf8');
@@ -289,7 +301,11 @@ export function createAudioArchiveService(dependencies: AudioArchiveDependencies
    */
   function sendRecordingOnce(audioPath: string, caption: string): Promise<SendResult> {
     const existing = inFlightSends.get(audioPath);
-    if (existing && !existing.done) return existing.task;
+    // Уже отправленная (done) запись не шлём повторно: publishAudio повторной
+    // загрузки иначе ставил бы второе голосовое на те же байты. Явная повторная
+    // попытка после провала есть в deliverOutcomeText — она снимает запись
+    // из карты и получает свежую отправку.
+    if (existing) return existing.task;
     const task = sendRecording(audioPath, caption);
     const entry = { task, done: false };
     inFlightSends.set(audioPath, entry);
@@ -364,13 +380,20 @@ export function createAudioArchiveService(dependencies: AudioArchiveDependencies
     caption: string,
     previous: SendResult,
   ): Promise<void> {
-    if (previous.messageId !== null) {
-      await editCaption(previous.messageId, caption);
+    // На повторной загрузке той же записи (дедуп по хешу) локальный `previous`
+    // может ничего не знать про уже доставленное — сверяемся с сохранённым
+    // состоянием: голосовое в группе есть — правим его подпись, а не шлём второе.
+    const persisted = await readState(audioPath);
+    const messageId = previous.messageId ?? persisted.messageId ?? null;
+    const delivered = previous.sent || persisted.sent === true;
+
+    if (messageId !== null) {
+      await editCaption(messageId, caption);
       await writeState(audioPath, { captionDone: true });
       return;
     }
 
-    if (previous.sent) {
+    if (delivered) {
       // Аудио у владельца, но подпись править не по чему - шлём текст следом.
       const form = new FormData();
       form.append('chat_id', dependencies.chatId);
@@ -381,6 +404,9 @@ export function createAudioArchiveService(dependencies: AudioArchiveDependencies
     }
 
     // Первая отправка не удалась - вторая попытка, уже с готовой подписью.
+    // Запись в карте отправок держит завершённую (неудачную) задачу — снимаем,
+    // иначе sendRecordingOnce вернёт тот же провал вместо свежей попытки.
+    inFlightSends.delete(audioPath);
     const retry = await sendRecordingOnce(audioPath, caption);
     await writeState(audioPath, {
       sent: retry.sent,
@@ -407,6 +433,12 @@ export function createAudioArchiveService(dependencies: AudioArchiveDependencies
       if (!enabled) {
         return null;
       }
+      // Повтор тех же байт (ретрай телефона) — та же запись: не второй файл.
+      const contentHash = createHash('sha256').update(audio.bytes).digest('hex');
+      const seen = keptByContentHash.get(contentHash);
+      if (seen) {
+        return seen;
+      }
       const recordedAt = dependencies.now();
       const audioPath = path.join(
         dependencies.archiveDir,
@@ -417,7 +449,13 @@ export function createAudioArchiveService(dependencies: AudioArchiveDependencies
         // mode у mkdir не действует на уже существующую папку — записи личные.
         await fs.chmod(dependencies.archiveDir, 0o700);
         await fs.writeFile(audioPath, audio.bytes, { mode: 0o600 });
-        return { audioPath, recordedAt, byteLength: audio.bytes.byteLength };
+        const kept = { audioPath, recordedAt, byteLength: audio.bytes.byteLength };
+        if (keptByContentHash.size >= MAX_KEPT_HASHES) {
+          const oldest = keptByContentHash.keys().next().value;
+          if (oldest !== undefined) keptByContentHash.delete(oldest);
+        }
+        keptByContentHash.set(contentHash, kept);
+        return kept;
       } catch (error) {
         dependencies.log.warn(`[Voice] Could not keep recording on disk: ${describeError(error)}`);
         return null;
@@ -434,7 +472,17 @@ export function createAudioArchiveService(dependencies: AudioArchiveDependencies
         return Promise.resolve();
       }
       const { audioPath, recordedAt } = recording;
-      const task = sendRecordingOnce(audioPath, pendingCaption(recordedAt))
+      // Запись в inFlightSends ставит только sendRecordingOnce: вложенный в
+      // эту обёртку вызов иначе находил бы в карте саму обёртку и ждал сам себя.
+      const task = (async (): Promise<SendResult> => {
+        // Повтор той же записи после перезапуска: уже доставленное голосовое
+        // не отправляем заново — состояние переживает рестарт службы.
+        const persisted = await readState(audioPath);
+        if (persisted.sent) {
+          return { sent: true, messageId: persisted.messageId ?? null };
+        }
+        return sendRecordingOnce(audioPath, pendingCaption(recordedAt));
+      })()
         .then(async (result) => {
           await writeState(audioPath, {
             sent: result.sent,
@@ -446,12 +494,6 @@ export function createAudioArchiveService(dependencies: AudioArchiveDependencies
           dependencies.log.warn(`[Voice] Could not send recording to Telegram: ${describeError(error)}`);
           return { sent: false, messageId: null } as SendResult;
         });
-      const entry = { task, done: false };
-      inFlightSends.set(audioPath, entry);
-      task.then(
-        () => { entry.done = true; },
-        () => { entry.done = true; },
-      );
       return task.then(() => undefined);
     },
 
@@ -474,7 +516,8 @@ export function createAudioArchiveService(dependencies: AudioArchiveDependencies
         if (!telegramEnabled) {
           return;
         }
-        const previous = await (inFlightSends.get(audioPath)?.task ?? Promise.resolve({ sent: false, messageId: null }));
+        const previous = await (inFlightSends.get(audioPath)?.task ?? Promise.resolve({ sent: false, messageId: null } as SendResult))
+          .catch(() => ({ sent: false, messageId: null } as SendResult));
         inFlightSends.delete(audioPath);
         await deliverOutcomeText(audioPath, buildCaption(outcome, recordedAt), previous);
       })().catch((error: unknown) => {

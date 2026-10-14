@@ -18,11 +18,19 @@ import { deliverTranscript, type VoiceTarget } from './voiceDelivery';
 
 const DB_NAME = 'voice-outbox';
 const CHUNKS = 'chunks'; // { id: `${recId}:${seq}`, recId, seq, at, blob, sessionId?, scope? }
-const PENDING = 'pending'; // { id, at, type, blob, sessionId?, scope?, send? }
+const PENDING = 'pending'; // { id, at, type, blob, sessionId?, scope?, send?, fails?, nextAt? }
 const ORPHAN_AFTER_MS = 30_000;
 const RETRY_EVERY_MS = 30_000;
 const UPLOAD_TIMEOUT_MS = 12 * 60 * 1000;
 const MIN_BLOB_BYTES = 800;
+/**
+ * Верхняя граница отсрочки записи после повторных отказов сервера. Запись,
+ * которую сервер отвечает отказом (например, длиннее предела распознавания),
+ * не должна уходить каждые 30 с: она жжёт расшифровку на стороне сервера и,
+ * стоя первой, не даёт пройти свежим записям. 14.10.26 одна запись, не
+ * принятая бэкендом, крутилась в очереди и плодила голосовые в группе ~2 дня.
+ */
+const OUTBOX_RETRY_CAP_MS = 15 * 60 * 1000;
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -168,6 +176,26 @@ export function markRecordingActive(recId: string | null): void {
   activeRecId = recId;
 }
 
+type PendingRow = {
+  id: string; at: number; type: string; blob: Blob;
+  sessionId?: string | null; scope?: string | null; send?: boolean;
+  fails?: number; nextAt?: number;
+};
+
+/** Отказ сервера: считаем попытки и откладываем следующую с нарастающей паузой (максимум — OUTBOX_RETRY_CAP_MS). */
+async function markOutboxFailure(item: PendingRow): Promise<void> {
+  try {
+    const s = await store(PENDING, 'readwrite');
+    const row = (await done(s.get(item.id))) as PendingRow | undefined;
+    if (!row) return;
+    const fails = (row.fails ?? 0) + 1;
+    const delay = Math.min(RETRY_EVERY_MS * 2 ** fails, OUTBOX_RETRY_CAP_MS);
+    await done(s.put({ ...row, fails, nextAt: Date.now() + delay }));
+  } catch {
+    /* учёт не должен ломать отправку */
+  }
+}
+
 /** Куски записи, которую убило вместе со страницей, - в очередь. */
 async function adoptOrphans(): Promise<void> {
   const s = await store(CHUNKS, 'readonly');
@@ -191,10 +219,11 @@ export async function flushOutbox(): Promise<void> {
   try {
     await adoptOrphans();
     const s = await store(PENDING, 'readonly');
-    const items = (await done(s.getAll())) as { id: string; at: number; type: string; blob: Blob; sessionId?: string | null; scope?: string | null; send?: boolean }[];
+    const items = (await done(s.getAll())) as PendingRow[];
     for (const item of items.sort((a, b) => a.at - b.at)) {
       if (navigator.onLine === false) break;
       if (uploadingNow.has(item.id)) continue;
+      if (item.nextAt && item.nextAt > Date.now()) continue; // отсрочена после отказов
       const abort = new AbortController();
       const timeout = setTimeout(() => abort.abort(), UPLOAD_TIMEOUT_MS);
       try {
@@ -205,7 +234,12 @@ export async function flushOutbox(): Promise<void> {
           send: item.send,
         });
         // Любой ответ сервера, кроме обрыва на пути, значит: запись принята.
-        if (isConnectionFailure(null, res)) break;
+        if (isConnectionFailure(null, res)) {
+          // Сервер ОТВЕТИЛ — связь есть, к следующей записи можно. Отказ
+          // считаем: повторный отказ откладывает запись всё дальше.
+          await markOutboxFailure(item);
+          continue;
+        }
         if (res.ok) {
           try {
             const data = (await res.json()) as { text?: unknown };
