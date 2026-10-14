@@ -25,6 +25,7 @@ import RewindConfirmDialog from './subcomponents/RewindConfirmDialog';
 import { knownRunStartedAt } from '../utils/liveRunCursor';
 import { normalizedToChatMessages } from '../hooks/useChatMessages';
 import { waitForFreshTailAfterReconnect } from '../utils/reconnectVerdict';
+import { readSelectedProviderRaw } from '../../../utils/selectedProvider';
 
 /**
  * Сколько ждать после восстановления связи, прежде чем признать ответ
@@ -396,7 +397,7 @@ function ChatInterface({
         if (armedSid) {
           // Плашка принадлежит чату, где ждали ответ: addMessage целился бы
           // в открытый к этому моменту чат, а снятие ниже ищет в armedSid.
-          const prov = (localStorage.getItem('selected-provider') as Provider) || 'claude';
+          const prov = (readSelectedProviderRaw() as Provider) || 'claude';
           const normalized = chatMessageToNormalized(
             { type: 'error', clientNotice: 'connection-lost', content, timestamp: new Date() },
             armedSid,

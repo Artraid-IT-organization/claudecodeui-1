@@ -19,6 +19,7 @@ import {
   toProviderEffortOptions,
 } from '../constants/providerEffort';
 import { reportProviderProbe } from '../../../hooks/providerProbe';
+import { readSelectedProviderRaw, writeSelectedProvider } from '../../../utils/selectedProvider';
 
 const FALLBACK_DEFAULT_MODEL: Record<LLMProvider, string> = {
   claude: 'default',
@@ -31,7 +32,7 @@ const FALLBACK_DEFAULT_MODEL: Record<LLMProvider, string> = {
 const PROVIDERS: LLMProvider[] = ['claude', 'cursor', 'codex', 'opencode', 'devin'];
 
 const readStoredProvider = (): LLMProvider => {
-  const storedProvider = localStorage.getItem('selected-provider');
+  const storedProvider = readSelectedProviderRaw();
   return PROVIDERS.includes(storedProvider as LLMProvider)
     ? storedProvider as LLMProvider
     : DEFAULT_PROVIDER;
@@ -508,7 +509,7 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
 
     reportProviderProbe('prov-sync-session', { to: selectedSession.__provider, was: provider, session: String(selectedSession.id).slice(0, 8) });
     setProvider(selectedSession.__provider);
-    localStorage.setItem('selected-provider', selectedSession.__provider);
+    writeSelectedProvider(selectedSession.__provider);
     // Отметка «кто выбран» в меню аккаунтов живёт на том же ключе.
     window.dispatchEvent(new CustomEvent(SELECT_PROVIDER_EVENT, { detail: selectedSession.__provider }));
   }, [provider, selectedSession]);

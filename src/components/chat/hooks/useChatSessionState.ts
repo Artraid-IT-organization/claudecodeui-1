@@ -18,6 +18,7 @@ import { useScrollAnchor } from './useScrollAnchor';
 import { useRowPrewarm } from './useRowPrewarm';
 import { useRowHeightRecorder } from './useRowHeightRecorder';
 import { knownRunStartedAt } from '../utils/liveRunCursor';
+import { readSelectedProviderRaw } from '../../../utils/selectedProvider';
 
 /**
  * Сколько загруженных сообщений показывать сразу.
@@ -445,7 +446,7 @@ export function useChatSessionState({
       return;
     }
 
-    const prov = (localStorage.getItem('selected-provider') as LLMProvider) || DEFAULT_PROVIDER;
+    const prov = (readSelectedProviderRaw() as LLMProvider) || DEFAULT_PROVIDER;
     const flushable: NormalizedMessage[] = [];
     const remaining: PendingFeedEntry[] = [];
     for (const entry of pendingFeedMessages) {
@@ -517,7 +518,7 @@ export function useChatSessionState({
       ]);
       return;
     }
-    const prov = (localStorage.getItem('selected-provider') as LLMProvider) || DEFAULT_PROVIDER;
+    const prov = (readSelectedProviderRaw() as LLMProvider) || DEFAULT_PROVIDER;
     const normalized = chatMessageToNormalized(msg, activeSessionId, prov);
     if (normalized) {
       sessionStore.appendRealtime(activeSessionId, normalized);

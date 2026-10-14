@@ -19,6 +19,7 @@ import { ensureLatestBuild, watchServiceWorkerUpdates } from '../../lib/appUpdat
 import { api, authenticatedFetch } from '../../utils/api';
 import type { AppTab, Project } from '../../types/app';
 import { effectiveScope, useServerScope, type ServerScope } from '../sidebar/hooks/useServerScope';
+import { writeSelectedProvider } from '../../utils/selectedProvider';
 
 type RunningSessionApiItem = {
   sessionId?: unknown;
@@ -365,7 +366,7 @@ function AppContentInner() {
       }
 
       if (typeof message.provider === 'string' && message.provider.trim()) {
-        localStorage.setItem('selected-provider', message.provider);
+        writeSelectedProvider(message.provider);
       }
 
       setActiveTab('chat');

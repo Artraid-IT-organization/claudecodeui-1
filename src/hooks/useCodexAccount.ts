@@ -4,6 +4,7 @@ import { api } from '../utils/api';
 
 import { SELECT_PROVIDER_EVENT } from './providerSelection';
 import { reportProviderProbe } from './providerProbe';
+import { readSelectedProviderRaw } from '../utils/selectedProvider';
 
 export {
   CONTINUE_IN_PROVIDER_EVENT,
@@ -34,12 +35,12 @@ const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 
 /** Какой помощник выбран сейчас и его смена — для отметки в меню аккаунтов. */
 export function useSelectedChatProvider(): string {
-  const [provider, setProvider] = useState(() => localStorage.getItem('selected-provider') || 'claude');
+  const [provider, setProvider] = useState(() => readSelectedProviderRaw() || 'claude');
   useEffect(() => {
     const onSelect = (event: Event) => setProvider(String((event as CustomEvent).detail || 'claude'));
     const onStorage = (event: StorageEvent) => {
       if (event.key === 'selected-provider') reportProviderProbe('prov-storage', { to: String(event.newValue), was: String(event.oldValue) });
-      setProvider(localStorage.getItem('selected-provider') || 'claude');
+      setProvider(readSelectedProviderRaw() || 'claude');
     };
     window.addEventListener(SELECT_PROVIDER_EVENT, onSelect);
     window.addEventListener('storage', onStorage);
