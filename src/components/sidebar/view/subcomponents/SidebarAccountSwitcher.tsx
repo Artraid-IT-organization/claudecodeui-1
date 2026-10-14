@@ -11,6 +11,7 @@ import {
 } from '../../../../hooks/useDevinConnectionPicker';
 import { useOwnerAccountSettings } from '../../../settings/hooks/useOwnerAccountSettings';
 import { scrollMovesAnchor } from '../../../../shared/scrollMovesAnchor';
+import { reportProviderProbe } from '../../../../hooks/providerProbe';
 
 /** Короткая отметка канала Devin в меню: норма — «Devin», иначе — что мешает ходу. */
 function devinConnectionStatus(connection: DevinConnectionOption): string {
@@ -220,6 +221,7 @@ export default function SidebarAccountSwitcher({
                       type="button"
                       role="menuitem"
                       onClick={() => {
+                        reportProviderProbe('prov-menu', { to: 'devin', conn: connection.id, cur: selectedProvider });
                         selectDevinConnection(connection.id);
                         setIsOpen(false);
                       }}

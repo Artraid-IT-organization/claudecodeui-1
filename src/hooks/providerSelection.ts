@@ -1,3 +1,5 @@
+import { reportProviderProbe } from './providerProbe';
+
 /** Событие выбора помощника для нового чата: из меню аккаунтов в поле ввода. */
 export const SELECT_PROVIDER_EVENT = 'ccui:select-provider';
 
@@ -24,6 +26,7 @@ const SELECTED_DEVIN_CONNECTION_KEY = 'selected-devin-connection';
  * для уже открытого поля ввода.
  */
 export function selectChatProvider(provider: ChatProviderChoice): void {
+  reportProviderProbe('prov-select', { to: provider, was: localStorage.getItem('selected-provider') ?? '' });
   localStorage.setItem('selected-provider', provider);
   window.dispatchEvent(new CustomEvent(SELECT_PROVIDER_EVENT, { detail: provider }));
 }

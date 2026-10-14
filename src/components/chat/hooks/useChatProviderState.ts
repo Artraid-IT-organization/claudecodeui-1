@@ -18,6 +18,7 @@ import {
   FALLBACK_PROVIDER_EFFORT_VALUES,
   toProviderEffortOptions,
 } from '../constants/providerEffort';
+import { reportProviderProbe } from '../../../hooks/providerProbe';
 
 const FALLBACK_DEFAULT_MODEL: Record<LLMProvider, string> = {
   claude: 'default',
@@ -505,6 +506,7 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
       return;
     }
 
+    reportProviderProbe('prov-sync-session', { to: selectedSession.__provider, was: provider, session: String(selectedSession.id).slice(0, 8) });
     setProvider(selectedSession.__provider);
     localStorage.setItem('selected-provider', selectedSession.__provider);
     // Отметка «кто выбран» в меню аккаунтов живёт на том же ключе.

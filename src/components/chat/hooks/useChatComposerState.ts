@@ -51,6 +51,7 @@ import { prepareStep } from '../utils/contextLevel';
 
 import { useFileMentions } from './useFileMentions';
 import { type SlashCommand, useSlashCommands } from './useSlashCommands';
+import { reportProviderProbe } from '../../../hooks/providerProbe';
 
 // Полоска ленты, которая остаётся видимой над полем ввода, и нижний предел
 // высоты поля (четыре строки), см. updateComposerRoom.
@@ -1801,7 +1802,12 @@ export function useChatComposerState({
     const onContinue = (event: Event) => {
       const target = (event as CustomEvent).detail;
       const sourceSessionId = sessionKeyRef.current;
-      if (!sourceSessionId || !selectedProject || !onStartNewChat || target === providerRef.current) return;
+      const fired = Boolean(sourceSessionId && selectedProject && onStartNewChat && target !== providerRef.current);
+      reportProviderProbe('prov-continue', {
+        to: String(target), cur: String(providerRef.current), fired,
+        session: String(sourceSessionId ?? '').slice(0, 8), project: String(selectedProject?.displayName ?? '').slice(0, 30),
+      });
+      if (!fired || !selectedProject || !onStartNewChat) return;
       onStartNewChat(selectedProject);
     };
     window.addEventListener(CONTINUE_IN_PROVIDER_EVENT, onContinue);
