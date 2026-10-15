@@ -115,7 +115,7 @@ export const doorFetch = async (path, options = {}, { gate = false } = {}) => {
       const response = await fetch(getDoorBase() + path, options);
       markDoorWorked();
       return response;
-    } catch (error) {
+    } catch {
       // Меняем вход, только если его ещё не сменил параллельный запрос —
       // иначе два сбоя вернули бы всех на тот же мёртвый адрес.
       if (useReserve === startedOnReserve) {
