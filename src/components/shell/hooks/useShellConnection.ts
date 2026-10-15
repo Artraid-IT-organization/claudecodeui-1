@@ -60,6 +60,30 @@ export function useShellConnection({
   const connectingRef = useRef(false);
   const forceRestartOnInitRef = useRef(false);
   const suppressAutoConnectRef = useRef(false);
+  /**
+   * Повторное подключение терминала после обрыва: пауза растёт с каждой
+   * неудачей (1 → 2 → 4 → 8 с, ±30%), чтобы вкладки не стучались в мёртвый
+   * сервер в один темп. Без этого закрытый сокет терминала не
+   * переподключался вообще — после обрыва оставался мёртвым до действия
+   * человека (тот же класс, что у чатового сокета).
+   */
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dropCountRef = useRef(0);
+  const autoConnectRef = useRef(autoConnect);
+  autoConnectRef.current = autoConnect;
+
+  // Размонтирование глушит повтор: иначе закрытый при уходе со страницы
+  // сокет назначил бы переподключение, которое открыло бы терминал в пустоту.
+  useEffect(
+    () => () => {
+      suppressAutoConnectRef.current = true;
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+    },
+    [],
+  );
 
   const handleProcessCompletion = useCallback(
     (output: string) => {
@@ -145,6 +169,7 @@ export function useShellConnection({
           setIsConnected(true);
           setIsConnecting(false);
           connectingRef.current = false;
+          dropCountRef.current = 0;
 
           window.setTimeout(() => {
             const currentTerminal = terminalRef.current;
@@ -184,6 +209,21 @@ export function useShellConnection({
           setIsConnecting(false);
           connectingRef.current = false;
           clearTerminalScreen();
+
+          // Непрошеный обрыв (не disconnect человеком): переподключаемся сами
+          // — сервер хранит PTY и вернёт снапшот экрана, прерванная работа
+          // терминала не теряется.
+          if (!suppressAutoConnectRef.current && autoConnectRef.current) {
+            dropCountRef.current += 1;
+            const delay = Math.round(
+              Math.min(8_000, 1_000 * 2 ** Math.min(dropCountRef.current - 1, 3)) * (0.7 + Math.random() * 0.6),
+            );
+            if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+            reconnectTimerRef.current = setTimeout(() => {
+              reconnectTimerRef.current = null;
+              connectWebSocketRef.current();
+            }, delay);
+          }
         };
 
         socket.onerror = () => {
@@ -213,6 +253,10 @@ export function useShellConnection({
       wsRef,
     ],
   );
+  // Ссылка для повтора из `onclose`: обработчик сокета снимается с замыкания
+  // в момент создания, поэтому зовём всегда свежую версию.
+  const connectWebSocketRef = useRef(connectWebSocket);
+  connectWebSocketRef.current = connectWebSocket;
 
   const connectToShell = useCallback((options?: { forceRestart?: boolean }) => {
     if (!isInitialized || isConnected || isConnecting || connectingRef.current) {
@@ -229,6 +273,10 @@ export function useShellConnection({
   const disconnectFromShell = useCallback((options?: { suppressAutoConnect?: boolean }) => {
     if (options?.suppressAutoConnect) {
       suppressAutoConnectRef.current = true;
+    }
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
     }
 
     closeSocket();

@@ -176,6 +176,18 @@ function sendProtocolError(
 
 /** Метка страницы, понимающей расписки и `server_capabilities` (src/contexts/WebSocketContext.tsx). */
 const CHAT_SEND_ACK_CAP = 'send-ack-1';
+/**
+ * Метка страницы, принимающей прикладной пинг `server_ping` (15.10.26).
+ *
+ * Протокольный ping/pong (heartbeat в websocket-server.service) для страницы
+ * невидим: браузер отвечает на него сам, JS кадра не получает. Поэтому живой
+ * с виду сокет на замёрзшем пути (смена сети, ТСПУ-«заморозка») страница не
+ * замечала, пока сама что-то не отправляла. Прикладной кадр раз в
+ * SERVER_PING_MS — это сигнал «путь жив», по которому сторож связи в
+ * WebSocketContext считает молчание.
+ */
+const SERVER_PING_CAP = 'server-ping-1';
+const SERVER_PING_MS = 25_000;
 
 function readSocketCaps(request: AuthenticatedWebSocketRequest): string[] {
   const rawUrl = (request as { url?: string }).url || '';
@@ -1241,8 +1253,25 @@ export function handleChatConnection(
   // Шлём только странице, которая сама сказала, что понимает это событие
   // (`caps` в адресе подключения): старая страница вывела бы незнакомое
   // событие в ленту строкой.
-  if (readSocketCaps(request).includes(CHAT_SEND_ACK_CAP)) {
-    sendJson(ws, { kind: 'server_capabilities', chatSendAck: true });
+  const socketCaps = readSocketCaps(request);
+  if (socketCaps.includes(CHAT_SEND_ACK_CAP)) {
+    sendJson(ws, { kind: 'server_capabilities', chatSendAck: true, serverPingMs: SERVER_PING_MS });
+  }
+
+  // Прикладной пинг, видимый странице — только ей (кадр `server_ping`):
+  // протокольный ping браузер проглатывает молча, и страница не может
+  // отличить живой сокет от замёрзшего в пути. Шлём только заявившим
+  // `server-ping-1`: старая страница показала бы кадр в ленте строкой.
+  let appPingTimer: ReturnType<typeof setInterval> | null = null;
+  if (socketCaps.includes(SERVER_PING_CAP)) {
+    appPingTimer = setInterval(() => {
+      try {
+        sendJson(ws, { kind: 'server_ping', timestamp: new Date().toISOString() });
+      } catch {
+        // сокет умер между проверкой состояния и отправкой — сторож приберёт
+      }
+    }, SERVER_PING_MS);
+    appPingTimer.unref?.();
   }
 
   const userId = readRequestUserId(request);
@@ -1281,6 +1310,11 @@ export function handleChatConnection(
         case 'chat.queue.sendNow':
           await handleChatQueueSendNow(ws, data, dependencies);
           return;
+        case 'ping':
+          // Проба связи от сторожа страницы: любой ответ доказывает, что
+          // сокет жив. `server_pong` — чтобы отличать от других кадров.
+          sendJson(ws, { kind: 'server_pong', timestamp: new Date().toISOString() });
+          return;
         default:
           sendProtocolError(ws, 'UNKNOWN_MESSAGE_TYPE', `Unknown message type "${messageType}".`);
           return;
@@ -1298,6 +1332,10 @@ export function handleChatConnection(
   const openedAt = Date.now();
   ws.on('close', (code: number) => {
     console.log(`[INFO] Chat client disconnected code=${code} livedSec=${Math.round((Date.now() - openedAt) / 1000)}`);
+    if (appPingTimer) {
+      clearInterval(appPingTimer);
+      appPingTimer = null;
+    }
     connectedClients.delete(ws);
   });
 }
