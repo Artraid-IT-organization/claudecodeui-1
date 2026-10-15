@@ -272,6 +272,7 @@ export const sessionsService = {
     offset: number,
     serverScope?: ServerScope,
     providerSpace?: 'codex' | 'devin' | 'claude',
+    includeInternal = false,
   ): RecentSessionsPage {
     const requestContext = getRequestRuntimeContext();
     const canUseCodex = requestContext === undefined
@@ -289,6 +290,7 @@ export const sessionsService = {
       serverScope,
       providerSpace,
       accountVisibility,
+      includeInternal,
     );
     const projectCache = new Map<string, ReturnType<typeof projectsDb.getProjectPath>>();
     const conversations = page.sessions.map((session) => {

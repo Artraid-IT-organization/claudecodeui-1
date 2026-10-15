@@ -167,6 +167,9 @@ export function useSidebarController({
   const [isRecentConversationsLoading, setIsRecentConversationsLoading] = useState(false);
   const [isLoadingMoreRecentConversations, setIsLoadingMoreRecentConversations] = useState(false);
   const [recentConversationsError, setRecentConversationsError] = useState(false);
+  // Лента по умолчанию прячет служебные чаты (auto-запуски, /tmp, «Промпты»);
+  // кнопка внизу списка показывает их обратно (Егор 15.10.26).
+  const [showInternalChats, setShowInternalChats] = useState(false);
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
   const [optimisticStarByProjectId, setOptimisticStarByProjectId] = useState<Map<string, boolean>>(new Map());
   const [loadingMoreProjects, setLoadingMoreProjects] = useState<Set<string>>(new Set());
@@ -330,7 +333,7 @@ export function useSidebarController({
 
     try {
       // Лента отбирается сервером по открытому блоку верхней панели.
-      const response = await api.recentConversations({ limit, offset, serverScope, providerSpace });
+      const response = await api.recentConversations({ limit, offset, serverScope, providerSpace, includeInternal: showInternalChats });
       if (!response.ok) {
         throw new Error(`Failed to load recent conversations: ${response.status}`);
       }
@@ -369,7 +372,7 @@ export function useSidebarController({
         setIsLoadingMoreRecentConversations(false);
       }
     }
-  }, [serverScope, providerSpace]);
+  }, [serverScope, providerSpace, showInternalChats]);
 
   const reloadRecentConversations = useCallback(() => {
     void fetchRecentConversationsPage(0, false);
@@ -427,7 +430,7 @@ export function useSidebarController({
   useEffect(() => {
     setRecentConversations([]);
     setRecentConversationsHasMore(false);
-  }, [serverScope, providerSpace]);
+  }, [serverScope, providerSpace, showInternalChats]);
 
   useEffect(() => {
     if (migrationStartedRef.current) {
@@ -1046,6 +1049,8 @@ export function useSidebarController({
     isRecentConversationsLoading,
     isLoadingMoreRecentConversations,
     recentConversationsError,
+    showInternalChats,
+    toggleInternalChats: useCallback(() => setShowInternalChats((v) => !v), []),
     reloadRecentConversations,
     loadMoreRecentConversations,
     toggleProject,

@@ -39,6 +39,9 @@ type SidebarRecentConversationsProps = {
   ) => void;
   onLoadMore: () => void;
   onRetry: () => void;
+  /** Служебные чаты (auto-запуски, «Промпты») скрыты; кнопка их возвращает. */
+  internalShown?: boolean;
+  onToggleInternal?: () => void;
   t: TFunction;
 };
 
@@ -81,6 +84,8 @@ export default function SidebarRecentConversations({
   onDeleteSession,
   onLoadMore,
   onRetry,
+  internalShown = false,
+  onToggleInternal,
   t,
 }: SidebarRecentConversationsProps) {
   /*
@@ -238,6 +243,16 @@ export default function SidebarRecentConversations({
             ? t('recent.loadingMore', 'Loading more...')
             : t('recent.loadMore', 'Load older conversations')}
         </Button>
+      )}
+
+      {onToggleInternal && (
+        <button
+          type="button"
+          onClick={onToggleInternal}
+          className="mt-1 w-full rounded-md px-2 py-1 text-center text-[10px] text-muted-foreground/50 transition-colors hover:bg-accent/40 hover:text-muted-foreground"
+        >
+          {internalShown ? 'Скрыть служебные чаты' : 'Показать служебные чаты'}
+        </button>
       )}
     </div>
   );

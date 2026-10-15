@@ -105,6 +105,8 @@ type SidebarContentProps = {
   archivedSessionsCount: number;
   isArchivedSessionsLoading: boolean;
   recentConversations: RecentConversationListItem[];
+  showInternalChats: boolean;
+  onToggleInternalChats: () => void;
   recentConversationsTotal: number;
   recentConversationsHasMore: boolean;
   isRecentConversationsLoading: boolean;
@@ -160,6 +162,8 @@ export default function SidebarContent({
   archivedSessionsCount,
   isArchivedSessionsLoading,
   recentConversations,
+  showInternalChats,
+  onToggleInternalChats,
   recentConversationsTotal,
   recentConversationsHasMore,
   isRecentConversationsLoading,
@@ -615,6 +619,8 @@ export default function SidebarContent({
             )}
             <SidebarRecentConversations
               conversations={visibleConversations}
+              internalShown={showInternalChats}
+              onToggleInternal={onToggleInternalChats}
               projects={projectListProps.projects}
               total={recentConversationsTotal}
               hasMore={recentConversationsHasMore && !searchFilter.trim()}

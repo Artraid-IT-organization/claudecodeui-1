@@ -957,7 +957,9 @@ router.get(
     const providerSpace = req.query.space === 'codex' || req.query.space === 'devin' || req.query.space === 'claude'
       ? req.query.space
       : undefined;
-    const page = sessionsService.listRecentSessions(limit, offset, serverScope, providerSpace);
+    // includeInternal — показать служебные чаты (auto-запуски, /tmp, «Промпты»).
+    const includeInternal = req.query.includeInternal === '1' || req.query.includeInternal === 'true';
+    const page = sessionsService.listRecentSessions(limit, offset, serverScope, providerSpace, includeInternal);
     res.json(createApiSuccessResponse(page));
   }),
 );
