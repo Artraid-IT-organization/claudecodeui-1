@@ -39,6 +39,24 @@
  */
 const RELOAD_GUARD_KEY = 'app-update-reload-target';
 const SW_RELOAD_GUARD_KEY = 'app-update-sw-reloaded';
+/**
+ * Потолок перезагрузок за жизнь вкладки (15.10.26): сторож может чередовать
+ * старый и новый index (сеть ↔ кэш), guard «та же сборка» такой цикл не
+ * останавливал — страница перезагружалась бесконечно и рвала сокеты.
+ */
+const RELOADS_TOTAL_KEY = 'app-update-reloads-total';
+const RELOADS_TOTAL_MAX = 2;
+
+function reloadBudgetLeft(storage: ReloadGuardStorage): boolean {
+  try {
+    const used = Number(storage.getItem(RELOADS_TOTAL_KEY) ?? '0');
+    if (used >= RELOADS_TOTAL_MAX) return false;
+    storage.setItem(RELOADS_TOTAL_KEY, String(used + 1));
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Сборка, ожидающая решения человека на видимой странице. Лежит в
@@ -80,7 +98,7 @@ export function reloadOrMarkPending(
   reload: () => void,
   markPending: (target: string) => void,
 ): void {
-  if (claimReloadTarget(storage, key, target)) {
+  if (claimReloadTarget(storage, key, target) && reloadBudgetLeft(storage)) {
     reload();
     return;
   }

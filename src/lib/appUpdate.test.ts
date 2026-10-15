@@ -48,6 +48,27 @@ test('reloads only after persisting the bundle guard', () => {
   assert.deepEqual(pending, []);
 });
 
+test('stops a reload loop when cached and network index alternate', () => {
+  const values = new Map<string, string>();
+  const storage = {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => { values.set(key, value); },
+  };
+  let reloads = 0;
+  const pending: string[] = [];
+  const reload = () => { reloads += 1; };
+  const mark = (target: string) => pending.push(target);
+
+  // Сторож чередует старый/новый index: «та же сборка»-guard цикл не ловит.
+  reloadOrMarkPending(storage, 'bundle-target', 'index-a.js', reload, mark);
+  reloadOrMarkPending(storage, 'bundle-target', 'index-b.js', reload, mark);
+  reloadOrMarkPending(storage, 'bundle-target', 'index-a.js', reload, mark);
+  reloadOrMarkPending(storage, 'bundle-target', 'index-b.js', reload, mark);
+
+  assert.equal(reloads, 2, 'не больше потолка перезагрузок за сессию вкладки');
+  assert.deepEqual(pending, ['index-a.js', 'index-b.js']);
+});
+
 test('shows the update instead of reloading when storage is blocked', () => {
   const blockedStorage = {
     getItem: () => { throw new Error('Access denied'); },
