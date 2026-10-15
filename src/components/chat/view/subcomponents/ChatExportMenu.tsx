@@ -41,6 +41,24 @@ async function waitUntilSettled(getCount: () => number): Promise<void> {
   }
 }
 
+/** Кусок названия для имени файла: без служебных символов и не длиннее 60 знаков. */
+const toFilenamePart = (value: string): string =>
+  value
+    .replace(/[\\/:*?"<>|\r\n]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 60)
+    .trim();
+
+/** Штамп «гггг-мм-дд-чч-мм» — по нему видно и день, и минуту выгрузки. */
+const formatExportStamp = (date: Date): string => {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+    `-${pad(date.getHours())}-${pad(date.getMinutes())}`
+  );
+};
+
 export default function ChatExportMenu({
   loadedCount,
   totalCount,
@@ -70,8 +88,10 @@ export default function ChatExportMenu({
       await waitUntilSettled(() => getMessages().length);
 
       const messages = getMessages();
-      const timestamp = new Date().toISOString().split('T')[0];
-      const filename = `${sessionTitle || 'chat'}-${timestamp}`;
+      const firstUserText = messages.find((msg) => msg.type === 'user')?.content;
+      const fallbackName = typeof firstUserText === 'string' ? firstUserText : '';
+      const namePart = toFilenamePart(sessionTitle || fallbackName || 'chat') || 'chat';
+      const filename = `${namePart}-${formatExportStamp(new Date())}`;
 
       switch (format) {
         case 'markdown':
