@@ -1,5 +1,5 @@
 import { type ReactNode, useMemo, useState } from 'react';
-import { Archive, Folder, RotateCcw, Terminal, Trash2 } from 'lucide-react';
+import { Archive, Folder, Plus, RotateCcw, Terminal, Trash2 } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
 import { ScrollArea, Tooltip } from '../../../../shared/view/ui';
@@ -228,6 +228,17 @@ export default function SidebarContent({
       candidate.fullPath === '/home/claude/prompts' || candidate.displayName === 'Промпты');
     return project && (project.serverScope ?? 'main') === serverScope ? project : null;
   }, [projectListProps.projects, serverScope]);
+
+  // Кнопка «Новый чат» создаёт обычный чат вне «Промптов»: основная папка —
+  // домашняя (/home/claude), на другом срезе — папка с наибольшим числом
+  // чатов. До плоской ленты такой кнопкой был «Новый сеанс» в карточке
+  // каждой папки; с уходом папок пропала и кнопка (Егор 15.10.26).
+  const newChatProject = useMemo(() => {
+    const scoped = projectListProps.projects.filter((p) => (p.serverScope ?? 'main') === serverScope);
+    return scoped.find((p) => p.fullPath === '/home/claude')
+      ?? [...scoped].sort((a, b) => (b.sessions?.length ?? 0) - (a.sessions?.length ?? 0))[0]
+      ?? null;
+  }, [projectListProps.projects, serverScope]);
   const [promptsExpanded, setPromptsExpanded] = useState(readPromptsPinnedExpanded);
   const togglePromptsExpanded = () => {
     setPromptsExpanded((previous) => {
@@ -315,6 +326,22 @@ export default function SidebarContent({
           expanded={promptsExpanded}
           onToggle={togglePromptsExpanded}
         />
+      )}
+
+      {searchMode === 'projects' && newChatProject && (
+        <div className="flex-shrink-0 px-2 pb-1.5 pt-1.5 md:px-2.5">
+          <button
+            type="button"
+            onClick={() => {
+              projectListProps.onProjectSelect(newChatProject);
+              projectListProps.onNewSession(newChatProject);
+            }}
+            className="flex h-8 w-full items-center justify-center gap-2 rounded-md bg-primary text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90 active:scale-[0.98]"
+          >
+            <Plus className="h-3 w-3" />
+            {t('sidebar.newChat', 'Новый чат')}
+          </button>
+        </div>
       )}
 
       <ScrollArea className="flex-1 overflow-y-auto overscroll-contain md:px-1.5 md:py-2">
