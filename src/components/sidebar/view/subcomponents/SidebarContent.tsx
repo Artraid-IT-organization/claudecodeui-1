@@ -581,7 +581,10 @@ export default function SidebarContent({
           // областью прокрутки, строкой выше).
           <div className="pb-safe-area-inset-bottom">
             {promptsExpanded && promptsProject && (
-              <div className="border-b border-border/50">
+              /* Раскрытая панель «Промптов» отделена янтарной рамкой в цвет
+                 звёздочки: чаты внутри такие же карточки, как общая лента,
+                 и без обводки панель сливалась с ней (Егор 15.10.26). */
+              <div className="mx-1 mb-1 rounded-lg border border-amber-500/30 bg-amber-500/[0.04]">
                 <SidebarProjectSessions
                   flat
                   project={promptsProject}

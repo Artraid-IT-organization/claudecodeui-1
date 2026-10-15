@@ -32,7 +32,13 @@ export default function SidebarPromptsPinned({
   const sessionCount = Number(project.sessionMeta?.total ?? 0);
 
   return (
-    <div className="flex-shrink-0 border-b border-border/60" data-testid="prompts-pinned">
+    <div
+      className={cn(
+        'flex-shrink-0 border-b transition-colors',
+        expanded ? 'border-amber-500/30 bg-amber-500/[0.07]' : 'border-border/60',
+      )}
+      data-testid="prompts-pinned"
+    >
       <button
         type="button"
         onClick={onToggle}
