@@ -111,6 +111,13 @@ export interface NormalizedMessage {
    */
   clientNotice?: string;
   /**
+   * Номер одной отправки, придуманный вкладкой до ухода в сокет. Он же —
+   * id строки серверной очереди и середина id эха `queued_<номер>`, поэтому
+   * по нему сверка узнаёт копии одной отправки независимо от меток времени
+   * (локальный пузырь ставит время нажатия, эхо — время доставки из очереди).
+   */
+  clientMessageId?: string;
+  /**
    * Measured seconds a live thinking block streamed for, set once by
    * `finalizeThinkingStreaming` when the block closes. Lets the Reasoning
    * header show an accurate "Thought for Ns" without relying on the

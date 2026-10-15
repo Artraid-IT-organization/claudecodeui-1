@@ -74,6 +74,8 @@ export interface ChatMessage {
   parentToolUseId?: string;
   /** Пометка локальной служебной строки ('connection-lost') — снимается через sessionStore.removeRealtimeWhere. */
   clientNotice?: string;
+  /** Номер этой отправки: по нему серверное эхо `queued_<номер>` встаёт на место пузыря вместо второй строки. */
+  clientMessageId?: string;
   isSubagentContainer?: boolean;
   subagentState?: {
     childTools: SubagentChildTool[];

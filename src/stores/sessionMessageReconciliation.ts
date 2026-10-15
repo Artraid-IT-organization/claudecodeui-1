@@ -119,6 +119,36 @@ export function appendRealtimeWithQueuedEcho(
     return next;
   }
 
+  // Точная сверка по номеру отправки: пузырь и эхо очереди делят один
+  // clientMessageId (`queued_<номер>` — серверная копия). Метки времени у
+  // копий РАЗНЫЕ — пузырь ставит момент нажатия, эхо — момент доставки из
+  // очереди, — поэтому совпадение по времени такую пару не ловило, и при
+  // быстрой доставке (эхо раньше переливки пузыря из pendingFeedMessages)
+  // в ленте вставали две строки (снимок Егора 15.10.26). Совпадение по
+  // номеру — строгое: две разные отправки одного текста носят разные
+  // номера и остаются двумя строками.
+  const incomingClientId = isQueuedUserEcho(incoming)
+    ? incoming.id.slice('queued_'.length)
+    : incoming.id.startsWith('local_') && typeof incoming.clientMessageId === 'string'
+      ? incoming.clientMessageId
+      : null;
+  if (incomingClientId) {
+    const twinIndex = realtimeMessages.findIndex((message) =>
+      message.id === `queued_${incomingClientId}`
+      || message.clientMessageId === incomingClientId);
+    if (twinIndex !== -1) {
+      // Серверная копия замещает локальную; вторая локальная копия той же
+      // отправки не встаёт. Эхо очереди считается более настоящим — его
+      // потом снимет removeOptimisticUserEchoes, когда доедет запись на диске.
+      if (isQueuedUserEcho(incoming) && !isQueuedUserEcho(realtimeMessages[twinIndex])) {
+        const next = realtimeMessages.slice();
+        next[twinIndex] = incoming;
+        return next;
+      }
+      return realtimeMessages;
+    }
+  }
+
   // Пузырь одной и той же отправки, нарисованный дважды (запись очереди
   // «нового чата» поднимается заново при перемонтировании экрана, пока
   // сторож доставки ещё не снял её из localStorage — дубль вопроса на
