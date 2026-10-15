@@ -4,6 +4,10 @@
 
 For every task that creates, modifies, refactors, or reviews backend code under `server/`, load and follow `$backend-module-standards` from `.agents/skills/backend-module-standards/SKILL.md`. Apply it only to backend code; do not impose those architecture rules on the frontend.
 
+## Живучесть соединения (`WebSocketContext`)
+
+Короткое открытие WebSocket не доказывает восстановление связи: при смене VPN провайдер может пропустить handshake и оборвать поток через 0–6 секунд. Счётчики неудач и нарастающая пауза сбрасываются только после штатного `server_ping`; два соединения подряд без него переключают вход. Для старого сервера без прикладного heartbeat устойчивость подтверждает завершившийся `HELLO_GRACE_MS`.
+
 ## Потоковая выдача (`useChatRealtimeHandlers`)
 
 Мелкие фрагменты `stream_delta` / `thinking_delta` от WebSocket накапливаются

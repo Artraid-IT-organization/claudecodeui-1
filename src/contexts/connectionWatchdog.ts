@@ -17,6 +17,9 @@
  */
 export type ConnectionAction = 'ok' | 'connect' | 'recreate' | 'wait' | 'probe';
 
+export const isConnectionStableFrame = (kind: string | undefined, serverPingMs: number | null) =>
+  serverPingMs !== null && kind === 'server_ping';
+
 /** Состояния сокета — числами, чтобы функция не зависела от DOM. */
 export const SOCKET_STATE = {
   connecting: 0,

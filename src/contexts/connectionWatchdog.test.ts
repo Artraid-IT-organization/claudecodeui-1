@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { decideConnectionAction, SOCKET_STATE } from './connectionWatchdog';
+import { decideConnectionAction, isConnectionStableFrame, SOCKET_STATE } from './connectionWatchdog';
 
 const snapshot = (over: Partial<Parameters<typeof decideConnectionAction>[0]> = {}) => ({
   readyState: SOCKET_STATE.open as number | null,
@@ -13,6 +13,16 @@ const snapshot = (over: Partial<Parameters<typeof decideConnectionAction>[0]> = 
 
 test('открытое соединение не трогаем', () => {
   assert.equal(decideConnectionAction(snapshot()), 'ok');
+});
+
+test('рукопожатие и служебные кадры не подтверждают устойчивость соединения', () => {
+  assert.equal(isConnectionStableFrame('server_capabilities', 25_000), false);
+  assert.equal(isConnectionStableFrame('chat_subscribed', 25_000), false);
+  assert.equal(isConnectionStableFrame('server_ping', null), false);
+});
+
+test('плановый heartbeat подтверждает устойчивость соединения', () => {
+  assert.equal(isConnectionStableFrame('server_ping', 25_000), true);
 });
 
 test('сокета нет — подключаемся', () => {
