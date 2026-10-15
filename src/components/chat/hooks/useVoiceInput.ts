@@ -132,6 +132,9 @@ export function useVoiceInput(
   // Тап «стоп», пока getUserMedia ещё в полёте: рекордера нет — запоминаем и
   // гасим запись сразу после его создания.
   const stopRequestedRef = useRef(false);
+  // Счётчик авто-перезапусков захвата (мертвый трек iOS): сбрасывается на
+  // каждое действие человека — тап старт/стоп.
+  const micRestartRef = useRef(0);
   // Whether the in-progress stop should auto-send the transcript (vs just fill the box).
   const sendRef = useRef(false);
   const wakeLockRef = useRef<WakeLockSentinelLike | null>(null);
@@ -279,7 +282,32 @@ export function useVoiceInput(
         void onStopped();
       };
       if (micTrack) {
-        micTrack.onended = () => finalize();
+        micTrack.onended = () => {
+          // iOS отдаёт мёртвый трек сразу после предыдущей диктовки: 'ended'
+          // за миллисекунды, без единого куска — человек запись не останавливал.
+          // Перезапускаем захват сами (до двух раз), а не роняем её в
+          // «слишком короткую». Егор 15.10.26: микрофон «перестал работать».
+          if (
+            !stopRequestedRef.current
+            && !cancelledRef.current
+            && chunkCountRef.current === 0
+            && Date.now() - startedAtRef.current < 2000
+            && micRestartRef.current < 2
+          ) {
+            micRestartRef.current += 1;
+            stoppedHandled = true; // старый onStopped не должен кричать «too-short»
+            recorderRef.current = null;
+            streamRef.current = null;
+            if (silenceWatchRef.current) {
+              clearInterval(silenceWatchRef.current);
+              silenceWatchRef.current = null;
+            }
+            markRecordingActive(null);
+            void start();
+            return;
+          }
+          finalize();
+        };
         micTrack.onmute = () => {
           // Трек приглушён системой: сторож тишины и так это покажет,
           // а здесь только фиксируем начало паузы без ожидания тика.
@@ -460,6 +488,7 @@ export function useVoiceInput(
   // Guard on the recorder's own state (not React state) so a double tap, or the mic
   // and Send buttons both firing, can't call stop() on an already-inactive recorder.
   const stop = useCallback((opts?: { send?: boolean }) => {
+    micRestartRef.current = 2; // тап-стоп: авто-перезапуск мёртвого трека не нужен
     const rec = recorderRef.current;
     if (rec && rec.state !== 'inactive') {
       sendRef.current = opts?.send ?? false;
@@ -487,7 +516,10 @@ export function useVoiceInput(
       // Пока микрофон открывается state ещё 'idle' — тап должен отменять запуск,
       // а не молча упираться в startingRef внутри start().
       if (startingRef.current) stop();
-      else void start();
+      else {
+        micRestartRef.current = 0; // новый тап — новый зачёт автоповторов
+        void start();
+      }
     }
   }, [state, start, stop]);
 
