@@ -10,6 +10,8 @@ For every task that creates, modifies, refactors, or reviews backend code under 
 
 Самообновление не перезагружает рабочую вкладку автоматически: расхождение сборок, обновление service worker и 404 протухшего asset только очищают старый fallback и показывают «Обновить». Аварийная страница после 4-секундного таймаута тоже не опрашивает сервер и не перезагружается циклом. Перезагрузка — лишь по явному нажатию человека. Лимит в `sessionStorage` недостаточен: `client.navigate()` и fallback-таймер живут вне страницы и на Mac без VPN создавали бесконечные сбросы (инцидент 15.10.26).
 
+Повторная проверка авторизации (`checkAuthStatus`) не демонтирует рабочее приложение: `isLoading` ставится только при первой загрузке (когда `user` ещё нет). Retry при сетевом сбое и token refresh работают в фоне — `ProtectedRoute` продолжает показывать приложение. `checkAuthStatus` стабилизирован через `tokenRef`: refresh токена не пересоздаёт колбэк и не перезапускает effect, иначе каждый refresh демонтировал всё дерево через `isLoading → AuthLoadingScreen` (инцидент 15.10.26, Mac без VPN).
+
 ## Потоковая выдача (`useChatRealtimeHandlers`)
 
 Мелкие фрагменты `stream_delta` / `thinking_delta` от WebSocket накапливаются

@@ -1245,7 +1245,9 @@ export function handleChatConnection(
   request: AuthenticatedWebSocketRequest,
   dependencies: ChatWebSocketDependencies
 ): void {
-  console.log('[INFO] Chat WebSocket connected');
+  const ua = String(request.headers?.['user-agent'] ?? '');
+  const uaShort = /iPhone/.test(ua) ? 'iPhone' : /Mac/.test(ua) ? 'Mac' : /Android/.test(ua) ? 'Android' : ua.slice(0, 40) || '?';
+  console.log(`[INFO] Chat WebSocket connected ua=${uaShort}`);
   connectedClients.add(ws);
   // Первым делом — что умеет этот сервер. Страница досылает сообщения только
   // серверу, который расписывается в получении и узнаёт повторы; со старым
@@ -1331,7 +1333,7 @@ export function handleChatConnection(
   // на iPhone не оставлял следа — этот код один из немногих признаков.
   const openedAt = Date.now();
   ws.on('close', (code: number) => {
-    console.log(`[INFO] Chat client disconnected code=${code} livedSec=${Math.round((Date.now() - openedAt) / 1000)}`);
+    console.log(`[INFO] Chat client disconnected code=${code} livedSec=${Math.round((Date.now() - openedAt) / 1000)} ua=${uaShort}`);
     if (appPingTimer) {
       clearInterval(appPingTimer);
       appPingTimer = null;
