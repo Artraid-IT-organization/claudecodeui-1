@@ -3,6 +3,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { useAuth } from '../components/auth/context/AuthContext';
 import { IS_PLATFORM } from '../shared/utils';
 import { expireAuthSession, isAuthTokenExpired } from '../utils/api';
+import { reportConnectionProbe } from '../utils/connectionProbe';
 import { flipDoor, getDoorHost, markDoorWorked } from '../utils/doors';
 
 import { ChatOutbox, isChatSend, SLOT_RETRY_MS, SLOT_WAIT_CODE, type OutboxEntry } from './chatOutbox';
@@ -168,6 +169,7 @@ const useWebSocketProviderState = (): WebSocketContextType => {
   const probeSentAtRef = useRef<number | null>(null);
   /** Подряд закрывшихся соединений — задаёт паузу перед следующим заходом. */
   const dropCountRef = useRef(0);
+  const disconnectedAtRef = useRef<number | null>(null);
 
   const dispatch = useCallback((event: ServerEvent) => {
     for (const listener of listenersRef.current) {
@@ -219,6 +221,7 @@ const useWebSocketProviderState = (): WebSocketContextType => {
   const forceReconnect = useCallback((reason: string) => {
     if (unmountedRef.current) return;
     console.warn(`[outbox] пересоздаю соединение: ${reason}`);
+    reportConnectionProbe({ event: 'reconnect', reason });
     const stale = wsRef.current;
     if (stale) {
       stale.onopen = null;
@@ -232,6 +235,7 @@ const useWebSocketProviderState = (): WebSocketContextType => {
       }
     }
     wsRef.current = null;
+    disconnectedAtRef.current ??= Date.now();
     probeSentAtRef.current = null;
     setIsConnected(false);
     if (reconnectTimeoutRef.current) {
@@ -419,6 +423,7 @@ const useWebSocketProviderState = (): WebSocketContextType => {
 
       if (!wsUrl) return console.warn('No authentication token found for WebSocket connection');
 
+      reportConnectionProbe({ event: 'attempt', door: getDoorHost(), drops: dropCountRef.current });
       const websocket = new WebSocket(wsUrl);
       // Store connecting sockets too, so a token refresh can close them before
       // their handshake completes with stale credentials.
@@ -429,11 +434,19 @@ const useWebSocketProviderState = (): WebSocketContextType => {
       const markConnectionStable = () => {
         if (stableThisAttempt) return;
         stableThisAttempt = true;
+        const now = Date.now();
+        reportConnectionProbe({
+          event: 'stable',
+          connectMs: now - connectStartedAtRef.current,
+          recoveryMs: disconnectedAtRef.current === null ? 0 : now - disconnectedAtRef.current,
+        });
+        disconnectedAtRef.current = null;
         failedAttemptsRef.current = 0;
         dropCountRef.current = 0;
       };
       websocket.onopen = () => {
         lastInboundAtRef.current = Date.now();
+        reportConnectionProbe({ event: 'open', connectMs: Date.now() - connectStartedAtRef.current });
         probeSentAtRef.current = null;
         markDoorWorked();
         setIsConnected(true);
@@ -543,10 +556,19 @@ const useWebSocketProviderState = (): WebSocketContextType => {
         }
       };
 
-      websocket.onclose = () => {
+      websocket.onclose = (event) => {
         if (wsRef.current !== websocket) {
           return;
         }
+        const now = Date.now();
+        disconnectedAtRef.current ??= now;
+        reportConnectionProbe({
+          event: 'close',
+          code: event.code,
+          reason: event.reason || 'none',
+          livedMs: now - connectStartedAtRef.current,
+          stable: stableThisAttempt,
+        });
         setIsConnected(false);
         wsRef.current = null;
 
@@ -586,18 +608,24 @@ const useWebSocketProviderState = (): WebSocketContextType => {
   // на iPhone сокет после сна часто числится открытым, но мёртв, — открываем
   // новый и досылаем.
   useEffect(() => {
-    const onResume = () => {
+    const onResume = (event: Event) => {
       if (document.visibilityState === 'hidden') return;
       // Повтор, назначенный до сна вкладки, мог отложиться на секунды —
       // страница видна и сеть есть: подключаемся сейчас, а не по таймеру.
       if (reconnectTimeoutRef.current) {
+        reportConnectionProbe({ event: 'resume', reason: event.type });
         clearTimeout(reconnectTimeoutRef.current);
         reconnectTimeoutRef.current = null;
         connectRef.current();
+        return;
       }
-      if (!ensureConnectionRef.current()) return;
+      if (!ensureConnectionRef.current()) {
+        reportConnectionProbe({ event: 'resume', reason: event.type });
+        return;
+      }
       const outbox = outboxRef.current;
       if (!outbox || outbox.size === 0) return;
+      reportConnectionProbe({ event: 'resume', reason: event.type });
       const socket = wsRef.current;
       if (socket && socket.readyState === WebSocket.OPEN && ackModeRef.current === 'ack' && outbox.overdue(0).length > 0) {
         forceReconnect('приложение вернулось из фона, сообщение ждёт расписки');
