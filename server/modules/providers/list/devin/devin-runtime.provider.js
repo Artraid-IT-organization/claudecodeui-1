@@ -1281,7 +1281,8 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
         error: detail,
         sessionName: sessionSummary,
       });
-      hardFail(`Devin run failed: ${detail}`);
+      const brief = detail.replace(/\s+/g, ' ').split(/(?<=\.)\s/)[0].slice(0, 160);
+      hardFail(`Devin run failed: ${brief}`);
     });
   });
 }

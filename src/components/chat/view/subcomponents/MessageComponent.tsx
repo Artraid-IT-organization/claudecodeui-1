@@ -142,6 +142,11 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
     return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString();
   }, [message.timestamp]);
   const shouldHideThinkingMessage = Boolean(message.isThinking && (!showThinking || isEmptyThinking(message)));
+  const compactErrorContent = useMemo(() => {
+    if (message.type !== 'error') return '';
+    const flat = formattedMessageContent.replace(/^Devin run failed:\s*/i, '').replace(/\s+/g, ' ').trim();
+    return (flat.split(/(?<=\.)\s/)[0] || flat).slice(0, 160);
+  }, [formattedMessageContent, message.type]);
 
   if (shouldHideThinkingMessage) {
     return null;
@@ -169,7 +174,14 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
       }
       className={`chat-message ${message.type} ${isGrouped ? 'grouped' : ''} ${message.type === 'user' ? 'flex justify-end px-3 sm:px-0' : 'px-3 sm:px-0'}`}
     >
-      {message.type === 'user' ? (
+      {message.type === 'error' ? (
+        <div className="flex min-w-0 items-center gap-2 py-1 text-sm text-amber-700 dark:text-amber-300">
+          <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full border border-current text-xs">!</span>
+          <span className="flex-shrink-0 font-medium">{t('messageTypes.error')}</span>
+          {formattedTime && <span className="flex-shrink-0 text-muted-foreground">· {formattedTime}</span>}
+          {compactErrorContent && <span className="min-w-0 truncate text-muted-foreground">· {compactErrorContent}</span>}
+        </div>
+      ) : message.type === 'user' ? (
         /* User turn on the right: claude.ai-style attachment cards above the bubble */
         <div className="flex w-full items-end space-x-0 sm:w-auto sm:max-w-[85%] sm:space-x-3 md:max-w-md lg:max-w-lg xl:max-w-xl">
           <div className="flex min-w-0 flex-1 flex-col items-end gap-2 sm:flex-initial">
@@ -234,7 +246,7 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
         <div className="w-full">
           <div className="flex items-center gap-2 py-0.5">
             <span className={`inline-block h-1.5 w-1.5 flex-shrink-0 rounded-full ${message.taskStatus === 'completed' ? 'bg-green-400 dark:bg-green-500' : 'bg-amber-400 dark:bg-amber-500'}`} />
-            <span className="text-xs text-gray-500 dark:text-gray-400">{message.content}</span>
+            <span className="min-w-0 truncate text-xs text-gray-500 dark:text-gray-400">{message.content}</span>
           </div>
         </div>
       ) : (

@@ -328,7 +328,10 @@ export default function SidebarContent({
         />
       )}
 
-      {searchMode === 'projects' && newChatProject && (
+      {/* Кнопка «Новый чат» прячется, пока открыта панель «Промптов»: там
+          своя «Новый сеанс», и две одинаковые кнопки подряд Егору неудобны
+          (15.10.26: «должно оставаться что-то одно»). */}
+      {searchMode === 'projects' && newChatProject && !promptsExpanded && (
         <div className="flex-shrink-0 px-2 pb-1.5 pt-1.5 md:px-2.5">
           <button
             type="button"

@@ -204,7 +204,7 @@ function ChatMessagesPane({
               totalCount={totalMessages}
               onLoadAll={loadAllMessages}
               getMessages={() => chatMessages}
-              sessionTitle={selectedSession?.title}
+              sessionTitle={selectedSession?.summary || selectedSession?.name || selectedSession?.title}
             />
           </div>
         </div>

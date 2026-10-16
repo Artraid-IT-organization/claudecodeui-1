@@ -4,7 +4,7 @@
 // Имя меняется вместе с любым изменением этого файла: браузер переустанавливает
 // служебный кэш только когда сам файл стал другим побайтово. Установленное на
 // экран «Домой» приложение месяц отдавало старую сборку именно поэтому.
-const CACHE_NAME = 'claude-ui-v7';
+const CACHE_NAME = 'claude-ui-v8';
 const urlsToCache = [
   '/manifest.json'
 ];
@@ -87,13 +87,9 @@ function retryingPage() {
     'background:#3b82f6;color:#fff;font-size:15px}',
     '</style></head><body><div>',
     '<b>Соединяюсь с сервером…</b>',
-    '<p>Связь пропала или сервер обновляется. Страница откроется сама, как только он ответит.</p>',
+    '<p>Связь пропала или сервер обновляется. Нажмите кнопку, чтобы повторить подключение.</p>',
     '<button onclick="location.reload()">Попробовать сейчас</button>',
     '</div>',
-    '<script>setInterval(function(){',
-    'fetch("/",{method:"HEAD",cache:"no-store"}).then(function(r){',
-    'if(r.ok||r.status===302)location.reload();}).catch(function(){});',
-    '},3000);<\/script>',
     '</body></html>',
   ].join('');
   return new Response(html, {
@@ -106,12 +102,12 @@ function retryingPage() {
 let stalePageRecoveryDone = false;
 
 /**
- * Выбрасывает запомненную страницу и перезагружает открытые вкладки.
+ * Выбрасывает запомненную страницу и сообщает открытым вкладкам об обновлении.
  *
  * Вызывается, когда кусок сборки отдал 404 — верный признак, что страница, из
- * которой стартовали, осталась от снятой с сервера сборки. Без этого человек
- * застревает на пустом экране: перезагрузка вручную ничего не меняет, потому
- * что снова берётся та же запомненная страница.
+ * которой стартовали, осталась от снятой с сервера сборки. Вкладки нельзя
+ * перезагружать через client.navigate(): этот вызов обходит защиту страницы и
+ * на нестабильном пути Mac без VPN создаёт бесконечный цикл сбросов.
  */
 function recoverFromStalePage() {
   if (stalePageRecoveryDone) {
@@ -121,11 +117,7 @@ function recoverFromStalePage() {
   return caches.open(CACHE_NAME)
     .then(cache => cache.delete(OFFLINE_PAGE_KEY))
     .then(() => self.clients.matchAll({ type: 'window' }))
-    .then(clients => clients.forEach(client => {
-      if (typeof client.navigate === 'function') {
-        client.navigate(client.url);
-      }
-    }))
+    .then(clients => clients.forEach(client => client.postMessage({ type: 'sw:stale-page' })))
     .catch(() => undefined);
 }
 

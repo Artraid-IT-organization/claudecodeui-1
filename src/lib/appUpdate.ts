@@ -38,7 +38,6 @@
  * сборки не делается (цикл невозможен), а новая сборка снимает запрет сама.
  */
 const RELOAD_GUARD_KEY = 'app-update-reload-target';
-const SW_RELOAD_GUARD_KEY = 'app-update-sw-reloaded';
 
 /**
  * Сборка, ожидающая решения человека на видимой странице. Лежит в
@@ -77,28 +76,15 @@ export function reloadOrMarkPending(
   storage: ReloadGuardStorage,
   key: string,
   target: string,
-  reload: () => void,
+  _reload: () => void,
   markPending: (target: string) => void,
 ): void {
-  if (claimReloadTarget(storage, key, target)) {
-    reload();
-    return;
-  }
+  claimReloadTarget(storage, key, target);
   markPending(target);
 }
 
 function reloadForBundle(latest: string): void {
   reloadOrMarkPending(sessionStorage, RELOAD_GUARD_KEY, latest, () => window.location.reload(), markUpdatePending);
-}
-
-function reloadOnceForServiceWorker(): void {
-  reloadOrMarkPending(
-    sessionStorage,
-    SW_RELOAD_GUARD_KEY,
-    'service-worker',
-    () => window.location.reload(),
-    markUpdatePending,
-  );
 }
 
 let pendingNotified = false;
@@ -182,13 +168,9 @@ export function watchServiceWorkerUpdates(): void {
     return;
   }
   navigator.serviceWorker.addEventListener('message', (event: MessageEvent) => {
-    if (event.data?.type !== 'sw:updated') {
+    if (event.data?.type !== 'sw:updated' && event.data?.type !== 'sw:stale-page') {
       return;
     }
-    if (document.visibilityState === 'hidden') {
-      reloadOnceForServiceWorker();
-    } else {
-      markUpdatePending('service-worker');
-    }
+    markUpdatePending('service-worker');
   });
 }

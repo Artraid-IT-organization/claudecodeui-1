@@ -1111,16 +1111,21 @@ export function useChatComposerState({
       uploadedAttachments: unknown[],
     ) => {
       const attachments = uploadedAttachments as ChatAttachment[];
+      // Один номер на пузырь и на запись очереди: он же уходит в chat.send
+      // (clientMessageId) и возвращается в эхе `queued_<номер>` — сверка ленты
+      // узнаёт свои копии по нему, а не по совпадению времени.
+      const pendingId = newDraftId();
       const userMessage: ChatMessage = {
         type: 'user',
         content,
         images: attachments.filter(isImageAttachment),
         files: attachments.filter((attachment) => !isImageAttachment(attachment)),
         timestamp: new Date(),
+        clientMessageId: pendingId,
       };
       (addPendingSendMessage ?? addMessage)(userMessage);
       appendPendingSend(scope, {
-        id: newDraftId(),
+        id: pendingId,
         content,
         attachments: uploadedAttachments,
         options: buildSendOptions(content),
@@ -1182,6 +1187,7 @@ export function useChatComposerState({
           images: attachments.filter(isImageAttachment),
           files: attachments.filter((attachment) => !isImageAttachment(attachment)),
           timestamp: new Date(rec.createdAt),
+          clientMessageId: rec.id,
         });
       }
       const knownSessionId = records.find((rec) => rec.sessionId)?.sessionId;
@@ -1428,12 +1434,18 @@ export function useChatComposerState({
       }
 
       const attachmentRecords = uploadedAttachments as ChatAttachment[];
+      // Номер отправки рождаем здесь, а не в outbox: тот же номер ложится на
+      // пузырь, и эхо очереди `queued_<номер>` узнаёт его по номеру, а не по
+      // совпадению текста и времени (дубль пузыря при быстрой доставке,
+      // снимок Егора 15.10.26 — одно сообщение дважды).
+      const sendId = newDraftId();
       const userMessage: ChatMessage = {
         type: 'user',
         content: currentInput,
         images: attachmentRecords.filter(isImageAttachment),
         files: attachmentRecords.filter((attachment) => !isImageAttachment(attachment)),
         timestamp: new Date(),
+        clientMessageId: sendId,
       };
 
       addMessage(userMessage);
@@ -1457,6 +1469,7 @@ export function useChatComposerState({
       // session row; `options` only carries composer-level preferences.
       sendMessage({
         type: 'chat.send',
+        clientMessageId: sendId,
         sessionId: targetSessionId,
         content: messageContent,
         options: {

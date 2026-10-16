@@ -221,10 +221,11 @@ function buildNotificationPayload(event: NotificationEventInput): NotificationPa
   const providerLabel = (normalizedEvent.provider && PROVIDER_LABELS[normalizedEvent.provider]) || 'Assistant';
   const sessionName = resolveSessionName(normalizedEvent);
   const message = (normalizedEvent.code && CODE_MAP[normalizedEvent.code]) || 'You have a new notification';
+  const compactMessage = message.replace(/\s+/g, ' ').slice(0, 120);
 
   return {
     title: sessionName || 'CloudCLI',
-    body: `${providerLabel}: ${message}`,
+    body: `${providerLabel}: ${compactMessage}`,
     data: {
       sessionId: normalizedEvent.sessionId || null,
       code: normalizedEvent.code || 'generic.info',

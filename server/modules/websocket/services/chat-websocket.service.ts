@@ -68,8 +68,25 @@ import {
  * fact that SOME ceiling exists, and 5 is generous for one interactive user
  * while still bounding the worst case (raised from 3 to 5 on 16.09.26 - one
  * person routinely keeps 3+ chats busy; 8 GB server has room).
+ * Both ceilings read from env so the cap is tunable without a rebuild. The
+ * box owner gets a separate, higher ceiling: their chats are most of the
+ * interactive load, while the regular cap still bounds every other user's
+ * aggregate footprint on the shared instance (owner ceiling added 15.10.26).
  */
-const MAX_CONCURRENT_RUNS_PER_USER = 5;
+function parseConcurrentRunLimit(rawValue: string | undefined, fallback: number): number {
+  const parsed = Number.parseInt(rawValue ?? '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+const MAX_CONCURRENT_RUNS_PER_USER = parseConcurrentRunLimit(process.env.CLOUDCLI_MAX_RUNS_PER_USER, 5);
+const OWNER_MAX_CONCURRENT_RUNS = parseConcurrentRunLimit(process.env.CLOUDCLI_OWNER_MAX_RUNS, 10);
+
+function maxConcurrentRunsForUser(userId: string | number): number {
+  const numericUserId = Number(userId);
+  return Number.isFinite(numericUserId) && isPlatformOwnerWebUser(numericUserId)
+    ? OWNER_MAX_CONCURRENT_RUNS
+    : MAX_CONCURRENT_RUNS_PER_USER;
+}
 
 /**
  * Trust boundary for client-supplied image attachments: chat.send options come
@@ -290,16 +307,17 @@ async function handleChatSend(
     return;
   }
 
-  if (OPEN_REGISTRATION && userId !== null && chatRunRegistry.countRunningRunsForUser(userId) >= MAX_CONCURRENT_RUNS_PER_USER) {
+  const userRunLimit = userId === null ? MAX_CONCURRENT_RUNS_PER_USER : maxConcurrentRunsForUser(userId);
+  if (OPEN_REGISTRATION && userId !== null && chatRunRegistry.countRunningRunsForUser(userId) >= userRunLimit) {
     sendProtocolError(
       ws,
       'TOO_MANY_CONCURRENT_RUNS',
-      `You already have ${MAX_CONCURRENT_RUNS_PER_USER} chats running at once. Wait for one to finish before starting another.`,
+      `You already have ${userRunLimit} chats running at once. Wait for one to finish before starting another.`,
       sessionId,
       clientMessageId,
       // Страница не выбрасывает такое сообщение, а держит в очереди и досылает,
       // когда место освободится (src/contexts/chatOutbox.ts, «ждёт места»).
-      { limit: MAX_CONCURRENT_RUNS_PER_USER },
+      { limit: userRunLimit },
     );
     return;
   }
@@ -761,7 +779,7 @@ async function runQueuedChatMessage(
 
   // Предел одновременных чатов: место освободится — строку заберёт следующий
   // обход очередей, поэтому здесь именно «вернуть в очередь», а не «отбросить».
-  if (OPEN_REGISTRATION && userId !== null && chatRunRegistry.countRunningRunsForUser(userId) >= MAX_CONCURRENT_RUNS_PER_USER) {
+  if (OPEN_REGISTRATION && userId !== null && chatRunRegistry.countRunningRunsForUser(userId) >= maxConcurrentRunsForUser(userId)) {
     return false;
   }
 
@@ -1245,7 +1263,9 @@ export function handleChatConnection(
   request: AuthenticatedWebSocketRequest,
   dependencies: ChatWebSocketDependencies
 ): void {
-  console.log('[INFO] Chat WebSocket connected');
+  const ua = String(request.headers?.['user-agent'] ?? '');
+  const uaShort = /iPhone/.test(ua) ? 'iPhone' : /Mac/.test(ua) ? 'Mac' : /Android/.test(ua) ? 'Android' : ua.slice(0, 40) || '?';
+  console.log(`[INFO] Chat WebSocket connected ua=${uaShort}`);
   connectedClients.add(ws);
   // Первым делом — что умеет этот сервер. Страница досылает сообщения только
   // серверу, который расписывается в получении и узнаёт повторы; со старым
@@ -1331,7 +1351,7 @@ export function handleChatConnection(
   // на iPhone не оставлял следа — этот код один из немногих признаков.
   const openedAt = Date.now();
   ws.on('close', (code: number) => {
-    console.log(`[INFO] Chat client disconnected code=${code} livedSec=${Math.round((Date.now() - openedAt) / 1000)}`);
+    console.log(`[INFO] Chat client disconnected code=${code} livedSec=${Math.round((Date.now() - openedAt) / 1000)} ua=${uaShort}`);
     if (appPingTimer) {
       clearInterval(appPingTimer);
       appPingTimer = null;

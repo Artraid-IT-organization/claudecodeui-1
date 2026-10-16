@@ -6,7 +6,7 @@ import { expireAuthSession, isAuthTokenExpired } from '../utils/api';
 import { flipDoor, getDoorHost, markDoorWorked } from '../utils/doors';
 
 import { ChatOutbox, isChatSend, SLOT_RETRY_MS, SLOT_WAIT_CODE, type OutboxEntry } from './chatOutbox';
-import { decideConnectionAction } from './connectionWatchdog';
+import { decideConnectionAction, isConnectionStableFrame } from './connectionWatchdog';
 
 /**
  * One frame received from the chat websocket. The server guarantees every
@@ -123,7 +123,7 @@ const createOutbox = (): ChatOutbox => {
 const useWebSocketProviderState = (): WebSocketContextType => {
   const wsRef = useRef<WebSocket | null>(null);
   const unmountedRef = useRef(false); // Track if component is unmounted
-  const failedAttemptsRef = useRef(0); // подряд не открывшихся соединений (для смены входа)
+  const failedAttemptsRef = useRef(0); // подряд не подтвердивших устойчивость соединений (для смены входа)
   const hasConnectedRef = useRef(false); // Track if we've ever connected (to detect reconnects)
   /**
    * Listener registry for the subscribe API. A ref (not state) because the
@@ -425,11 +425,14 @@ const useWebSocketProviderState = (): WebSocketContextType => {
       wsRef.current = websocket;
       connectStartedAtRef.current = Date.now();
 
-      let openedThisAttempt = false;
-      websocket.onopen = () => {
-        openedThisAttempt = true;
+      let stableThisAttempt = false;
+      const markConnectionStable = () => {
+        if (stableThisAttempt) return;
+        stableThisAttempt = true;
         failedAttemptsRef.current = 0;
         dropCountRef.current = 0;
+      };
+      websocket.onopen = () => {
         lastInboundAtRef.current = Date.now();
         probeSentAtRef.current = null;
         markDoorWorked();
@@ -454,6 +457,7 @@ const useWebSocketProviderState = (): WebSocketContextType => {
           if (wsRef.current !== websocket || ackModeRef.current !== 'unknown') return;
           console.warn('[outbox] сервер не сообщил о расписках — старая версия, отправляю без повторов');
           ackModeRef.current = 'legacy';
+          markConnectionStable();
           flushRef.current(websocket);
         }, HELLO_GRACE_MS);
       };
@@ -467,8 +471,11 @@ const useWebSocketProviderState = (): WebSocketContextType => {
         probeSentAtRef.current = null;
         try {
           const data = JSON.parse(event.data) as ServerEvent;
-          if (data.kind === 'server_ping' || data.kind === 'server_pong') {
-            // Служебный кадр сторожа связи — слушателям не нужен.
+          if (data.kind === 'server_ping') {
+            if (isConnectionStableFrame(data.kind, serverPingMsRef.current)) markConnectionStable();
+            return;
+          }
+          if (data.kind === 'server_pong') {
             return;
           }
           if (data.kind === 'server_capabilities') {
@@ -543,12 +550,12 @@ const useWebSocketProviderState = (): WebSocketContextType => {
         setIsConnected(false);
         wsRef.current = null;
 
-        // Не открылось два раза подряд — пробуем другой вход.
-        if (!openedThisAttempt) {
+        // Дважды подряд не дожило до подтверждения устойчивости — пробуем другой вход.
+        if (!stableThisAttempt) {
           failedAttemptsRef.current += 1;
           if (failedAttemptsRef.current >= 2) {
             failedAttemptsRef.current = 0;
-            flipDoor('чат дважды не открылся');
+            flipDoor('чат дважды не удержал соединение');
           }
         }
 
