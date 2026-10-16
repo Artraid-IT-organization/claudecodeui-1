@@ -1169,6 +1169,15 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
       run.usageTimer = setInterval(() => emitDevinTokenBudget(ws, run, sessionId), DEVIN_USAGE_POLL_MS);
       run.usageTimer.unref?.();
 
+      // Запрос у модели — подпись плашки меняется с «Запускаю чат» на
+      // «Думает» сразу, а не когда придёт первый токен (у Claude провайдера
+      // тот же кадр 'requesting' шлётся при отправке).
+      sendMessage(ws, createNormalizedMessage({
+        provider: 'devin',
+        sessionId: sessionId || run.devinSessionId || null,
+        kind: 'run_phase',
+        text: 'thinking',
+      }));
       const promptResult = connection.call('session/prompt', {
         sessionId: run.devinSessionId,
         prompt: [{ type: 'text', text: promptText }],
