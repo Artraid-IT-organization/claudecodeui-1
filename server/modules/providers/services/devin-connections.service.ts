@@ -37,6 +37,10 @@ import { AppError, getDevinConnectionsRoot, resolveDevinCliCommand } from '@/sha
 
 /** Как долго канал с rate limit отдыхает, прежде чем его снова выберут. */
 const RATE_LIMIT_COOLDOWN_MINUTES = 15;
+/** Недельная квота без названного срока сброса: 15 минут её не отпускает. */
+const WEEKLY_RATE_LIMIT_COOLDOWN_MINUTES = 6 * 60;
+/** Потолок отдыха при повторном rate limit подряд на том же канале. */
+const RATE_LIMIT_COOLDOWN_MAX_MINUTES = 12 * 60;
 /** Проба здоровья канала — живой вызов CLI, не «файл на месте». */
 const HEALTH_CHECK_TIMEOUT_MS = 20_000;
 
@@ -591,8 +595,16 @@ export const devinConnectionsService = {
     if (cls === 'auth') {
       devinConnectionsDb.markHealth(id, 'auth_failed', { lastError: clipped });
     } else if (cls === 'rate_limit') {
-      // Devin называет время сброса — подписка отдыхает ровно до него, а не 15 мин наугад.
-      const cooldownMinutes = parseRateLimitResetMinutes(errorMessage ?? '') ?? RATE_LIMIT_COOLDOWN_MINUTES;
+      // Devin называет время сброса — подписка отдыхает ровно до него.
+      const namedReset = parseRateLimitResetMinutes(errorMessage ?? '');
+      // Без срока в тексте: недельная квота отдыхает дольше, а повторный
+      // rate limit на канале удваивает отдых — иначе севшая подписка
+      // пробовалась заново каждые 15 минут, добавляя лишний заход на старте.
+      const repeated = namedReset == null
+        && devinConnectionsDb.getById(id)?.health_status === 'rate_limited';
+      const base = namedReset
+        ?? (/weekly/i.test(errorMessage ?? '') ? WEEKLY_RATE_LIMIT_COOLDOWN_MINUTES : RATE_LIMIT_COOLDOWN_MINUTES);
+      const cooldownMinutes = repeated ? Math.min(base * 2, RATE_LIMIT_COOLDOWN_MAX_MINUTES) : base;
       devinConnectionsDb.markHealth(id, 'rate_limited', { lastError: clipped, cooldownMinutes });
     } else {
       devinConnectionsDb.markHealth(id, 'error', { lastError: clipped });

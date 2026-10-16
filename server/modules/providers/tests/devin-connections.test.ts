@@ -153,6 +153,29 @@ test('recordOutcome: rate limit cools the subscription down until the reset time
   });
 });
 
+test('recordOutcome: weekly quota without a named reset cools down for hours, repeated failures double it', async () => {
+  await withIsolatedDatabase(() => {
+    const conn = devinConnectionsDb.create({ name: 'weekly', xdgDataHome: '/tmp/xdg-weekly' });
+    const minutes = (id: number) => {
+      const row = devinConnectionsDb.getById(id)!;
+      return (Date.parse(`${row.cooldown_until!.replace(' ', 'T')}Z`) - Date.now()) / 60_000;
+    };
+    devinConnectionsService.recordOutcome(conn.id, 'failed', 'Your weekly usage quota has been exhausted. Visit https://app.devin.ai/settings/usage');
+    assert.ok(minutes(conn.id) > 350 && minutes(conn.id) <= 361, `weekly ≈ 360 min, got ${minutes(conn.id)}`);
+    // Повторный rate limit после отстоявшего cooldown удваивает отдых.
+    getConnection().prepare("UPDATE devin_connections SET cooldown_until = datetime('now', '-1 minute') WHERE id = ?").run(conn.id);
+    devinConnectionsService.recordOutcome(conn.id, 'failed', 'Your weekly usage quota has been exhausted.');
+    assert.ok(minutes(conn.id) > 700 && minutes(conn.id) <= 721, `repeated weekly ≈ 720 min, got ${minutes(conn.id)}`);
+    // Обычный лимит без срока — короткий отдых, повтор — удвоенный.
+    const daily = devinConnectionsDb.create({ name: 'daily', xdgDataHome: '/tmp/xdg-daily' });
+    devinConnectionsService.recordOutcome(daily.id, 'failed', 'Reached free model rate limit.');
+    assert.ok(minutes(daily.id) > 14 && minutes(daily.id) <= 16, `plain ≈ 15 min, got ${minutes(daily.id)}`);
+    getConnection().prepare("UPDATE devin_connections SET cooldown_until = datetime('now', '-1 minute') WHERE id = ?").run(daily.id);
+    devinConnectionsService.recordOutcome(daily.id, 'failed', 'Reached free model rate limit.');
+    assert.ok(minutes(daily.id) > 29 && minutes(daily.id) <= 31, `repeated plain ≈ 30 min, got ${minutes(daily.id)}`);
+  });
+});
+
 test('pickCredentialForLane: picker choice → lane own credential → any eligible', async () => {
   await withIsolatedDatabase(() => {
     const lane = devinConnectionsDb.create({ name: 'lane', priority: 5, xdgDataHome: '/tmp/xdg-lane' });

@@ -596,7 +596,7 @@ async function queryDevin(command, options = {}, ws, context) {
       const reason = classifyDevinFailure(lastError.message) === 'rate_limit'
         ? 'У текущей подписки Devin исчерпан лимит'
         : 'Текущая подписка Devin не отвечает';
-      console.log(`[Devin] ход чата ${sessionId || '-'}: подписка #${connection.id} (${connection.name}) — ${reason}, переход на другую`);
+      console.log(`[Devin] ход чата ${sessionId || '-'}: подписка #${connection.id} (${connection.name}) — ${reason}, переход на другую (попытка заняла ${lastError.attemptMs ?? '?'}мс)`);
       sendMessage(ws, createNormalizedMessage({
         provider: 'devin',
         sessionId: sessionId || null,
@@ -657,6 +657,8 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
     sessionCreatedSent: Boolean(providerSessionId),
     terminalFailure: null,
     startedAt: Date.now(),
+    // Замеры фаз запуска: spawn/init/session/firstOutput — в журнал на finish.
+    timing: {},
     unregisterSurvivor: null,
     finishRun: null,
     failoverRequested: false,
@@ -678,6 +680,9 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
   // вывода. Сессия при этом уже может существовать — она в линии, и
   // следующая попытка её загрузит.
   const canFailoverNow = () => allowFailover && !run.aborted && !run.liveOutputSent && !run.failoverRequested;
+  // Фаза запуска отмечается один раз — первый вызов побеждает.
+  const markPhase = (name) => { if (run.timing[name] === undefined) run.timing[name] = Date.now(); };
+  const noteLiveOutput = () => { if (!run.liveOutputSent) { run.liveOutputSent = true; markPhase('firstOutput'); } };
   const sessionKey = sessionId || providerSessionId;
   run.sessionKey = sessionKey;
   if (sessionKey) {
@@ -758,6 +763,7 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
     });
   }
   run.child = child;
+  markPhase('spawn');
 
   // Without an 'error' listener a spawn ENOENT (no devin CLI on PATH) is an
   // uncaughtException — it previously took the whole server down per send.
@@ -794,6 +800,10 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
       return; // exactly one `complete` per turn
     }
     run.finishRun = true;
+    // Хронометраж запуска одной строкой: видно, где тонет «Запускаю чат» —
+    // поднятие процесса, рукопожатие, загрузка беседы или ожидание первого вывода.
+    const rel = (name) => (run.timing[name] != null ? `${run.timing[name] - run.startedAt}мс` : '-');
+    console.log(`[Devin] timing чат ${sessionId || '-'}: spawn=${rel('spawn')} init=${rel('init')} session=${rel('session')} first=${rel('firstOutput')} total=${Date.now() - run.startedAt}мс exit=${exitCode}`);
     if (!aborted) {
       devinConnectionsService.recordOutcome(
         devinConn.id,
@@ -894,6 +904,8 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
       const error = new Error(message);
       error[tag] = true;
       error.requestedModel = resolvedModel;
+      // Сколько заняла неудачная попытка — в журнале видно цену перебора подписок.
+      error.attemptMs = Date.now() - run.startedAt;
       // Сессия, которую Devin успел выделить на линии: повтор её загрузит.
       error.devinSessionId = run.devinSessionId || null;
       reject(error);
@@ -929,14 +941,14 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
         }
         const normalized = context.normalizeMessage(params.update ?? params, sessionId || run.devinSessionId || null);
         for (const message of normalized) {
-          run.liveOutputSent = true;
+          noteLiveOutput();
           sendMessage(ws, message);
         }
       },
 
       onRequest: (msg) => {
         if (msg.method === 'session/request_permission') {
-          run.liveOutputSent = true;
+          noteLiveOutput();
           const result = answerPermissionRequest(msg, devinMode, ws, sessionId || run.devinSessionId, run, connection);
           if (result) {
             connection.respond(msg.id, result);
@@ -986,6 +998,7 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
         clientCapabilities: {},
         clientInfo: { name: 'cc2-claude-ui', version: '1.0.0' },
       }, HANDSHAKE_TIMEOUT_MS);
+      markPhase('init');
 
       if (spawnError.error) {
         throw spawnError.error;
@@ -1095,6 +1108,7 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
         }
       }
 
+      markPhase('session');
       if (devinMode) {
         try {
           await connection.call('session/set_mode', {
