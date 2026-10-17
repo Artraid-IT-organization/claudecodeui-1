@@ -25,6 +25,7 @@ export type ServerUpdatePending = {
 export type ServerUpdateApply = {
   id: string;
   state: 'running' | 'ok' | 'failed';
+  startedTs?: number;
   finishedAt?: string;
   detail?: string;
 };

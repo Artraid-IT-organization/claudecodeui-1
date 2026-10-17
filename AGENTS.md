@@ -22,6 +22,29 @@ For every task that creates, modifies, refactors, or reviews backend code under 
 видимыми (worktree/head в штампе), но не запрещает. Запрет есть только на
 доказуемо более старый артефакт.
 
+## Плашка обновлений — жизненный цикл apply-состояния (17.10.26)
+
+Плашка «Обновить» внизу сайдбара управляется тремя файлами в `~/.cloudcli/update-state/`:
+`pending.json` (ожидает решения), `apply.json` (ход установки), `dismissed.json` (скрытые).
+
+Состояния `apply.json`: `running` → `ok` | `failed`. Инварианты:
+
+- **Скрипт выкатки** (`deploy/apply-update.sh`) обязан закрыть `apply.json` при любом
+  исходе: trap на EXIT пишет `failed`, успешный путь пишет `ok`. Оба через `write_state`,
+  которая проверяет `id` и `state === "running"` перед записью — чужое не затирает.
+- **Серверный таймаут** (`expireStaleApply` в `updates.service.ts`): при чтении статуса
+  сервер проверяет возраст `running` по `startedTs`. Если старше `APPLY_TIMEOUT_MS`
+  (45 мин) — переводит в `failed` и пишет файл. Это последний рубеж на случай, если
+  процесс выкатки убит без trap.
+- **Клиентский таймер** (`ApplyingBanner` в `ServerUpdateSection.tsx`): показывает
+  прошедшее время (`useElapsed`). После `CLIENT_APPLY_STALE_MS` (5 мин) появляется
+  кнопка «Долго — проверить статус», которая перечитывает `/api/updates/status`.
+- **Результат** (`ResultBanner`): после перехода в `ok`/`failed` показывает короткую
+  плашку «Обновлено» / «Не удалось», автоскрытие через `RESULT_DISMISS_MS` (15 с).
+
+Граница: клиент не пишет `apply.json` напрямую — только читает через API и может
+форсировать перечитывание. Запись — только скрипт выкатки и серверный таймаут.
+
 ## Mobile sidebar drawer hides the chat composer
 
 On mobile, opening the sidebar drawer (hamburger menu) overlays the chat. The composer — including the input, activity indicator, permission banner, and queued draft card — is hidden while the drawer is open (`isMobileSidebarOpen` prop) so the input does not stay visible behind the chat list. The composer reappears when the drawer closes. State is preserved because the composer state lives in `ChatInterface`; only the presentational shell unmounts.

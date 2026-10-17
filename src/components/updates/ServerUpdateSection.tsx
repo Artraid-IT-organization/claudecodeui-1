@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { AlertTriangle, Loader2, MessageSquareText, RefreshCw, X } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Loader2, MessageSquareText, RefreshCw, X, XCircle } from 'lucide-react';
 
-import { useServerUpdates, type ServerUpdatePending } from '../../hooks/useServerUpdates';
+import { useServerUpdates, type ServerUpdateApply, type ServerUpdatePending } from '../../hooks/useServerUpdates';
 import { authenticatedFetch } from '../../utils/api';
 
 /**
@@ -24,10 +24,131 @@ import { authenticatedFetch } from '../../utils/api';
 
 type Action = 'idle' | 'applying' | 'discussing' | 'dismissing';
 
+/** Сколько клиент показывает спиннер, прежде чем предложить сброс. */
+const CLIENT_APPLY_STALE_MS = 5 * 60_000;
+/** Через сколько после ok/failed результат исчезает из плашки. */
+const RESULT_DISMISS_MS = 15_000;
+
+/** Прошедшее время с начала установки — тикает каждую секунду. */
+function useElapsed(startedTs: number | undefined): string {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (!startedTs) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(id);
+  }, [startedTs]);
+  if (!startedTs) return '';
+  const sec = Math.max(0, Math.round((now - startedTs) / 1_000));
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return m > 0 ? `${m}:${String(s).padStart(2, '0')}` : `0:${String(s).padStart(2, '0')}`;
+}
+
 function commitList(pending: ServerUpdatePending, limit: number) {
   const items = pending.commits.slice(0, limit);
   const rest = pending.commits.length - items.length;
   return { items, rest };
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type TFunc = (...args: any[]) => string;
+
+/**
+ * Плашка «Установка обновления…» — с таймером, прогрессом и кнопкой сброса.
+ *
+ * Раньше была просто спиннер + текст. Если скрипт выкатки зависал или не
+ * закрывал apply.json, плашка висела бесконечно без возможности что-то сделать.
+ * Теперь:
+ * - показывает прошедшее время (человек видит, что что-то идёт)
+ * - после CLIENT_APPLY_STALE_MS предлагает «Сбросить» (перечитает статус;
+ *   сервер к тому времени уже мог пометить running → failed по таймауту)
+ */
+function ApplyingBanner({
+  applying,
+  onReset,
+  t,
+}: {
+  applying: ServerUpdateApply | null;
+  onReset: () => Promise<void>;
+  t: TFunc;
+}) {
+  const elapsed = useElapsed(applying?.startedTs);
+  const isStale = applying?.startedTs
+    ? Date.now() - applying.startedTs > CLIENT_APPLY_STALE_MS
+    : false;
+
+  if (!applying) return null;
+  return (
+    <>
+      <div className="nav-divider" />
+      <div className="px-2 py-1.5 md:px-2 md:py-1.5">
+        <div className="rounded-lg border border-blue-200/60 bg-blue-50/80 px-2.5 py-2 dark:border-blue-700/40 dark:bg-blue-900/15">
+          <div className="flex items-center gap-2.5">
+            <Loader2 className="h-4 w-4 flex-shrink-0 animate-spin text-blue-500 dark:text-blue-400" />
+            <span className="min-w-0 flex-1 truncate text-xs font-medium text-blue-700 dark:text-blue-300">
+              {t('serverUpdate.applying', 'Установка обновления…')}
+            </span>
+            {elapsed && (
+              <span className="flex-shrink-0 tabular-nums text-[10px] text-blue-500/70 dark:text-blue-400/60">
+                {elapsed}
+              </span>
+            )}
+          </div>
+          {isStale && (
+            <button
+              className="mt-1.5 w-full rounded-md border border-blue-300/50 py-1 text-[10px] font-medium text-blue-600 transition-colors hover:bg-blue-100/60 dark:border-blue-600/40 dark:text-blue-300 dark:hover:bg-blue-800/30"
+              onClick={() => void onReset()}
+            >
+              {t('serverUpdate.resetStale', 'Долго — проверить статус')}
+            </button>
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
+
+/**
+ * Короткое уведомление о результате: «Обновлено» или «Не удалось».
+ * Исчезает через RESULT_DISMISS_MS или по клику.
+ */
+function ResultBanner({
+  result,
+  onDismiss,
+  t,
+}: {
+  result: ServerUpdateApply;
+  onDismiss: () => void;
+  t: TFunc;
+}) {
+  const ok = result.state === 'ok';
+  return (
+    <>
+      <div className="nav-divider" />
+      <div className="px-2 py-1.5 md:px-2 md:py-1.5">
+        <button
+          className={`flex w-full items-center gap-2.5 rounded-lg border px-2.5 py-2 text-left transition-colors ${
+            ok
+              ? 'border-emerald-200/60 bg-emerald-50/80 hover:bg-emerald-100/60 dark:border-emerald-700/40 dark:bg-emerald-900/15'
+              : 'border-red-200/60 bg-red-50/80 hover:bg-red-100/60 dark:border-red-700/40 dark:bg-red-900/15'
+          }`}
+          onClick={onDismiss}
+          title={result.detail ?? ''}
+        >
+          {ok
+            ? <CheckCircle2 className="h-4 w-4 flex-shrink-0 text-emerald-500 dark:text-emerald-400" />
+            : <XCircle className="h-4 w-4 flex-shrink-0 text-red-500 dark:text-red-400" />}
+          <span className={`min-w-0 flex-1 truncate text-xs font-medium ${
+            ok ? 'text-emerald-700 dark:text-emerald-300' : 'text-red-700 dark:text-red-300'
+          }`}>
+            {ok
+              ? t('serverUpdate.resultOk', 'Обновлено')
+              : t('serverUpdate.resultFailed', 'Не удалось обновить')}
+          </span>
+        </button>
+      </div>
+    </>
+  );
 }
 
 export default function ServerUpdateSection() {
@@ -110,6 +231,20 @@ export default function ServerUpdateSection() {
     }
   }, [action, post, refresh, status.pending]);
 
+  // Автоскрытие результата (ok/failed) через RESULT_DISMISS_MS
+  const lastResult = status.lastResult;
+  const [resultHidden, setResultHidden] = useState(false);
+  const lastResultIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!lastResult) { setResultHidden(false); lastResultIdRef.current = null; return; }
+    if (lastResult.id !== lastResultIdRef.current) {
+      lastResultIdRef.current = lastResult.id;
+      setResultHidden(false);
+    }
+    const id = window.setTimeout(() => setResultHidden(true), RESULT_DISMISS_MS);
+    return () => window.clearTimeout(id);
+  }, [lastResult]);
+
   if (!status.configured) return null;
 
   const pending = status.pending;
@@ -117,18 +252,10 @@ export default function ServerUpdateSection() {
 
   return (
     <>
-      {applying && (
-        <>
-          <div className="nav-divider" />
-          <div className="px-2 py-1.5 md:px-2 md:py-1.5">
-            <div className="flex items-center gap-2.5 rounded-lg border border-blue-200/60 bg-blue-50/80 px-2.5 py-2 dark:border-blue-700/40 dark:bg-blue-900/15">
-              <Loader2 className="h-4 w-4 flex-shrink-0 animate-spin text-blue-500 dark:text-blue-400" />
-              <span className="min-w-0 flex-1 truncate text-xs font-medium text-blue-700 dark:text-blue-300">
-                {t('serverUpdate.applying', 'Установка обновления…')}
-              </span>
-            </div>
-          </div>
-        </>
+      <ApplyingBanner applying={applying} onReset={refresh} t={t} />
+
+      {lastResult && !resultHidden && !applying && (
+        <ResultBanner result={lastResult} onDismiss={() => setResultHidden(true)} t={t} />
       )}
 
       {pending && !applying && (
