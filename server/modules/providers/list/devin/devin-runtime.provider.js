@@ -30,8 +30,8 @@ import {
   createNormalizedMessage,
   DEVIN_DEFAULT_MODEL,
   DEVIN_AUTO_CONTINUE_PROMPT,
-  getDevinDatabasePath,
   isAllowedDevinModel,
+  isIncompleteDevinResponse,
   resolveDevinCliCommand,
 } from '@/shared/utils.js';
 import { mapPermissionModeToDevinMode } from '@/modules/providers/list/devin/devin-sessions.provider.js';
@@ -59,31 +59,6 @@ const pendingPermissions = new Map();
 
 /** Переподключённые после рестарта супервизор-линки по appSessionId. */
 const reattachedDevinSurvivors = new Map();
-
-/**
- * Проверяет, что текст ответа ассистента — не финальный, а только
- * статусный/вводный блок. Используется как защита от тихого обрывания хода
- * после «Как я понял задачу» или промежуточного статуса.
- */
-function isIncompleteDevinResponse(text, hasToolCalls, textAfterLastTool = '') {
-  if (typeof text !== 'string') return true;
-  const t = text.trim();
-  if (!t) return true;
-  const afterTool = String(textAfterLastTool).trim();
-  if (hasToolCalls && !afterTool) return true;
-  const resultHeading = /(^|\n)## (ответ|итог|результат|таблица|как сделать|готово|не вышло|дальше)($|\s)/mi;
-  if (resultHeading.test(t)) return false;
-  const lower = t.toLowerCase();
-  // Только блок «Как я понял задачу» — явно не финал.
-  if (lower.startsWith('## как я понял задачу')) return true;
-  // Промежуточный статус считается обрывом только в хвосте ответа: обещание
-  // в начале не должно перечёркивать результат, который модель дописала ниже.
-  const tail = (hasToolCalls ? afterTool : t).slice(-500);
-  if (/сейчас (докину|сделаю|поищу|проверю|вернусь)[\s.!?]*$/i.test(tail)) return true;
-  if (/(ещё не готово|пока не готово|продолжаю работу)[\s.!?]*$/i.test(tail)) return true;
-  if (/(^|[\s.,;:!?—-])жду([\s.,;:!?—-]|$)/i.test(tail)) return true;
-  return false;
-}
 
 /** How long `abort` lets Devin wind down before SIGKILLing it. */
 const ABORT_GRACE_MS = 3_000;
