@@ -101,6 +101,11 @@ Environment=VOICE_API_BASE_URL=http://127.0.0.1:8092
 Environment=VOICE_API_KEY=REPLACE_WITH_YOUR_OWN_GROQ_KEY
 Environment=VOICE_STT_MODEL=whisper-large-v3
 
+# Keep shared-instance voice recordings for one week. The archive service
+# sweeps expired recordings at startup and every six hours.
+Environment=AUDIO_ARCHIVE_DIR=/home/claude/voice-archive/claude-ui
+Environment=AUDIO_ARCHIVE_RETENTION_DAYS=7
+
 Environment=ACCOUNT_LABEL="Shared"
 # No SWITCH_ACCOUNT_URL: this instance's users are not the host's personal
 # accounts, so there is nothing on Account 1/2 for them to "switch" to, and
