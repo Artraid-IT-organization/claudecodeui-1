@@ -59,6 +59,37 @@ const pendingPermissions = new Map();
 /** Переподключённые после рестарта супервизор-линки по appSessionId. */
 const reattachedDevinSurvivors = new Map();
 
+/**
+ * Проверяет, что текст ответа ассистента — не финальный, а только
+ * статусный/вводный блок. Используется как защита от тихого обрывания хода
+ * после «Как я понял задачу» или промежуточного статуса.
+ */
+function isIncompleteDevinResponse(text, hasToolCalls) {
+  if (typeof text !== 'string') return false;
+  const t = text.trim();
+  if (!t) return false;
+  // Если были вызовы инструментов, считаем, что работа шла — оставляем
+  // эвристику только для чисто текстовых обрывов.
+  if (hasToolCalls) {
+    const lower = t.toLowerCase();
+    // Даже после инструментов недопустимо заканчивать на «сейчас сделаю»
+    // без результата.
+    if (/сейчас (докину|сделаю|поищу|проверю|вернусь)/i.test(t)) return true;
+    return false;
+  }
+  const lower = t.toLowerCase();
+  // Только блок «Как я понял задачу» — явно не финал.
+  if (lower.startsWith('## как я понял задачу') && !/(^|\n)## (ответ|итог|результат|таблица|как сделать|готово|не вышло|дальше)($|\s)/mi.test(t)) {
+    return true;
+  }
+  // Промежуточный статус без результирующего блока.
+  if (/сейчас (докину|сделаю|поищу|проверю|вернусь)/i.test(t)) return true;
+  if (/ещё не готово|пока не готово|жду|продолжаю работу/i.test(t) && !/(^|\n)## (ответ|итог|результат|таблица|как сделать|готово|не вышло|дальше)($|\s)/mi.test(t)) {
+    return true;
+  }
+  return false;
+}
+
 /** How long `abort` lets Devin wind down before SIGKILLing it. */
 const ABORT_GRACE_MS = 3_000;
 /** Devin пишет расход ответа в свою sessions.db — живой счётчик раз в 4 с. */
@@ -936,6 +967,18 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
         if (update.sessionUpdate === 'config_option_update') {
           noteConfigOptions(run, update.configOptions);
         }
+        // Накапливаем текст текущего ответа для защиты от тихого обрывания
+        // после статусных блоков (см. isIncompleteDevinResponse).
+        if (update.sessionUpdate === 'agent_message_chunk') {
+          const chunkBlock = update.content;
+          const text = chunkBlock && typeof chunkBlock.text === 'string' ? chunkBlock.text : '';
+          if (text) {
+            run.turnAssistantText = (run.turnAssistantText || '') + text;
+          }
+        }
+        if (update.sessionUpdate === 'tool_call') {
+          run.turnHasToolCalls = true;
+        }
         if (run.muted) {
           return; // session/load replays history — never leak it as live deltas
         }
@@ -1162,7 +1205,7 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
       // Attachments ride along as path references (the same <images_input> /
       // <files_input> contract Cursor and OpenCode use): the Devin agent reads
       // them with its own filesystem tools.
-      const promptText = appendFilesInputTag(appendImagesInputTag(command, images), files);
+      let promptText = appendFilesInputTag(appendImagesInputTag(command, images), files);
 
       // Пока ход идёт, счётчик читается из sessions.db — Devin пишет туда
       // metrics каждого ответа по ходу работы (см. devin-usage.ts).
@@ -1178,15 +1221,43 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
         kind: 'run_phase',
         text: 'thinking',
       }));
-      const promptResult = connection.call('session/prompt', {
-        sessionId: run.devinSessionId,
-        prompt: [{ type: 'text', text: promptText }],
-      });
-      // Кадр prompt уже записан в сокет супервизора: с этого момента ход
-      // переживает перезапуск сайта (promptInFlight не даёт супервизору убрать
-      // агента, новый сервер переподключится и дочитает ответ).
-      options.onPromptAnchored?.();
-      const result = await promptResult;
+
+      const MAX_CONTINUATIONS = 2;
+      let continuationCount = 0;
+      let result;
+      while (continuationCount <= MAX_CONTINUATIONS) {
+        const promptResult = connection.call('session/prompt', {
+          sessionId: run.devinSessionId,
+          prompt: [{ type: 'text', text: promptText }],
+        });
+        // Кадр prompt уже записан в сокет супервизора: с этого момента ход
+        // переживает перезапуск сайта (promptInFlight не даёт супервизору убрать
+        // агента, новый сервер переподключится и дочитает ответ).
+        options.onPromptAnchored?.();
+        result = await promptResult;
+
+        const stopReason = result?.stopReason;
+        const needContinue = stopReason === 'end_turn'
+          && continuationCount < MAX_CONTINUATIONS
+          && isIncompleteDevinResponse(run.turnAssistantText, run.turnHasToolCalls);
+
+        if (!needContinue) {
+          break;
+        }
+
+        continuationCount += 1;
+        sendMessage(ws, createNormalizedMessage({
+          provider: 'devin',
+          sessionId: run.devinSessionId || sessionId || null,
+          kind: 'status',
+          text: 'turn_continued',
+          content: `Ход завершился без ответа (только статусный блок). Продолжаю автоматически (попытка ${continuationCount}/${MAX_CONTINUATIONS}).`,
+        }));
+        // Сбрасываем аккумуляторы для следующего витка.
+        run.turnAssistantText = '';
+        run.turnHasToolCalls = false;
+        promptText = 'Продолжи работу с того места, где остановился, и доведи до финального ответа. Не пиши заново блок «Как я понял задачу»; сразу делай следующий шаг и выдай результат, уточняющий вопрос или явное сообщение об ошибке.';
+      }
 
       if (run.usageTimer) {
         clearInterval(run.usageTimer);
@@ -1200,6 +1271,17 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
       }
 
       const stopReason = result?.stopReason;
+      // Если после попыток продолжения ответ всё ещё не финальный — показываем
+      // человеку явную ошибку вместо тихого завершения.
+      if (stopReason === 'end_turn' && isIncompleteDevinResponse(run.turnAssistantText, run.turnHasToolCalls)) {
+        sendMessage(ws, createNormalizedMessage({
+          provider: 'devin',
+          sessionId: run.devinSessionId || sessionId || null,
+          kind: 'error',
+          content: 'Ход завершился без финального ответа: модель остановилась на статусном блоке. Попробуйте повторить запрос или продолжить чат командой «Продолжай».'
+        }));
+      }
+
       // Финальный замер — последний ответ мог дописаться в базу только что.
       emitDevinTokenBudget(ws, run, sessionId, { force: true });
       const usage = result?.usage;
