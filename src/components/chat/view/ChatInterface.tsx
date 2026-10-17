@@ -724,15 +724,15 @@ function ChatInterface({
 
         <div className="relative flex-shrink-0">
           {isUserScrolledUp && chatMessages.length > 0 && (
-            <div className={`pointer-events-none absolute left-0 right-0 z-20 flex justify-center ${hasActivityIndicator ? '-top-[5.75rem]' : '-top-14'}`}>
+            <div className={`pointer-events-none absolute left-0 right-0 z-20 flex justify-center ${hasActivityIndicator ? '-top-20' : '-top-12'}`}>
               <button
                 type="button"
                 onClick={scrollToBottomAndReset}
                 aria-label={t('input.scrollToBottom', { defaultValue: 'Scroll to bottom' })}
-                className="pointer-events-auto flex h-11 w-11 touch-manipulation items-center justify-center rounded-full border border-primary/40 bg-card text-primary shadow-[0_0_0_1px_hsl(var(--primary)/0.08),0_0_16px_hsl(var(--primary)/0.24)] transition-all duration-200 hover:border-primary/60 hover:bg-accent hover:shadow-[0_0_0_1px_hsl(var(--primary)/0.12),0_0_20px_hsl(var(--primary)/0.34)] active:scale-95"
+                className="pointer-events-auto flex h-[30px] w-[30px] touch-manipulation items-center justify-center rounded-full border border-primary/40 bg-card text-primary shadow-[0_0_0_1px_hsl(var(--primary)/0.08),0_0_12px_hsl(var(--primary)/0.24)] transition-all duration-200 hover:border-primary/60 hover:bg-accent hover:shadow-[0_0_0_1px_hsl(var(--primary)/0.12),0_0_16px_hsl(var(--primary)/0.34)] active:scale-95"
                 title={t('input.scrollToBottom', { defaultValue: 'Scroll to bottom' })}
               >
-                <ArrowDownIcon className="h-5 w-5" aria-hidden />
+                <ArrowDownIcon className="h-3.5 w-3.5" aria-hidden />
               </button>
             </div>
           )}
