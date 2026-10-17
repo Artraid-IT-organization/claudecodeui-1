@@ -251,13 +251,41 @@ export default function SidebarContent({
   // функция с транслитом, что и внутри списка чатов папки.
   const visibleConversations = useMemo(() => {
     const query = searchFilter.trim();
-    if (!query) {
-      return recentConversations;
-    }
-    return recentConversations.filter((conversation) =>
+    if (!query) return recentConversations;
+
+    const local = recentConversations.filter((conversation) =>
       sessionTitleMatches(String(conversation.sessionTitle ?? ''), query)
       || sessionTitleMatches(String(conversation.projectDisplayName ?? ''), query));
-  }, [recentConversations, searchFilter]);
+    if (query.length < 2 || !conversationResults) return local;
+
+    const byId = new Map<string, RecentConversationListItem>();
+    for (const result of conversationResults.titleResults) {
+      byId.set(result.sessionId, {
+        sessionId: result.sessionId,
+        provider: result.provider as RecentConversationListItem['provider'],
+        projectId: result.projectId,
+        projectDisplayName: result.projectDisplayName,
+        sessionTitle: result.sessionTitle,
+        lastActivity: result.lastActivity,
+        serverScope,
+      });
+    }
+    for (const project of conversationResults.results) {
+      for (const session of project.sessions) {
+        if (byId.has(session.sessionId)) continue;
+        byId.set(session.sessionId, {
+          sessionId: session.sessionId,
+          provider: (session.provider || 'claude') as RecentConversationListItem['provider'],
+          projectId: project.projectId,
+          projectDisplayName: project.projectDisplayName,
+          sessionTitle: session.sessionSummary,
+          lastActivity: session.matches[0]?.timestamp ?? null,
+          serverScope,
+        });
+      }
+    }
+    return [...byId.values()];
+  }, [recentConversations, searchFilter, conversationResults, serverScope]);
 
   return (
     <div
@@ -650,9 +678,11 @@ export default function SidebarContent({
             <SidebarRecentConversations
               conversations={visibleConversations}
               internalShown={showInternalChats}
-              onToggleInternal={onToggleInternalChats}
+              onToggleInternal={searchFilter.trim() ? undefined : onToggleInternalChats}
+              searchQuery={searchFilter}
+              searching={isSearching}
               projects={projectListProps.projects}
-              total={recentConversationsTotal}
+              total={searchFilter.trim() ? visibleConversations.length : recentConversationsTotal}
               hasMore={recentConversationsHasMore && !searchFilter.trim()}
               isLoading={isRecentConversationsLoading}
               isLoadingMore={isLoadingMoreRecentConversations}

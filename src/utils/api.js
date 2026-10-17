@@ -328,6 +328,7 @@ export const api = {
     const params = new URLSearchParams({ q: query, limit: String(limit) });
     if (scope.projectId) params.set('projectId', scope.projectId);
     if (scope.serverScope) params.set('serverScope', scope.serverScope);
+    if (scope.providerSpace) params.set('space', scope.providerSpace);
     if (token) params.set('token', token);
     return `${getDoorBase()}/api/providers/search/sessions?${params.toString()}`;
   },

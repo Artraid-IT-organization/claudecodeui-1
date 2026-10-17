@@ -69,6 +69,7 @@ type SearchSessionConversationsInput = {
   signal?: AbortSignal;
   projectId?: string | null;
   serverScope?: ServerScope | null;
+  providerSpace?: 'codex' | 'devin' | 'claude' | null;
   onTitleResults?: (results: SessionTitleSearchResult[]) => void;
   onProgress?: (update: SessionConversationSearchProgressUpdate) => void;
 };
@@ -630,6 +631,7 @@ function extractorFor(provider: SearchableProvider): RecordExtractor {
 type SearchScope = {
   projectId?: string | null;
   serverScope?: ServerScope | null;
+  providerSpace?: 'codex' | 'devin' | 'claude' | null;
 };
 
 /**
@@ -648,6 +650,12 @@ function filterSessionsByScope(rows: SessionRepositoryRow[], scope: SearchScope)
     }
     const projectPath = project.project_path.trim();
     filtered = filtered.filter((row) => (row.project_path ?? '').trim() === projectPath);
+  }
+
+  if (scope.providerSpace === 'codex' || scope.providerSpace === 'devin') {
+    filtered = filtered.filter((row) => row.provider === scope.providerSpace);
+  } else if (scope.providerSpace === 'claude') {
+    filtered = filtered.filter((row) => row.provider !== 'codex' && row.provider !== 'devin');
   }
 
   if (scope.serverScope) {
@@ -1258,7 +1266,11 @@ export const sessionConversationsSearchService = {
       input.onProgress ?? null,
       input.signal ?? null,
       input.onTitleResults ?? null,
-      { projectId: input.projectId ?? null, serverScope: input.serverScope ?? null },
+      {
+        projectId: input.projectId ?? null,
+        serverScope: input.serverScope ?? null,
+        providerSpace: input.providerSpace ?? null,
+      },
     );
   },
 
