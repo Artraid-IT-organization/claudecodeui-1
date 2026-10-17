@@ -139,11 +139,13 @@ type ArchivedSessionListItem = {
   lastActivity: string | null;
   isProjectArchived: boolean;
   serverScope: ServerScope;
+  flagged: boolean;
+  done: boolean;
 };
 
 type RecentSessionListItem = Pick<
   ArchivedSessionListItem,
-  'sessionId' | 'provider' | 'projectId' | 'projectDisplayName' | 'sessionTitle' | 'lastActivity'
+  'sessionId' | 'provider' | 'projectId' | 'projectDisplayName' | 'sessionTitle' | 'lastActivity' | 'flagged' | 'done'
 > & {
   /** Блок верхней панели, в котором виден чат. */
   serverScope: ServerScope;
@@ -311,6 +313,8 @@ export const sessionsService = {
         projectDisplayName: resolveProjectDisplayName(projectPath, project?.custom_project_name),
         sessionTitle: session.custom_name?.trim() || session.session_id,
         lastActivity: session.updated_at ?? session.created_at ?? null,
+        flagged: Boolean(session.is_flagged),
+        done: Boolean(session.is_done),
         // Блок верхней панели: своё значение чата важнее значения папки.
         serverScope: normalizeServerScope(session.server_scope ?? project?.server_scope),
       };
@@ -691,6 +695,8 @@ export const sessionsService = {
         updatedAt: session.updated_at ?? null,
         lastActivity: session.updated_at ?? session.created_at ?? null,
         isProjectArchived: Boolean(project?.isArchived),
+        flagged: Boolean(session.is_flagged),
+        done: Boolean(session.is_done),
         // Блок верхней панели: архив тоже делится на блоки, иначе дела
         // второго сервера всплывали бы в архиве обычных «Проектов».
         serverScope: normalizeServerScope(session.server_scope ?? project?.server_scope),

@@ -129,25 +129,28 @@ test('recent sessions map project metadata and preserve database pagination', { 
     );
     sessionsDb.createSession(
       'newer-session',
-      'codex',
+      'claude',
       '/tmp/recent-project',
       'Newer conversation',
       '2026-08-01T10:00:00.000Z',
       '2026-08-01T11:00:00.000Z',
     );
     projectsDb.updateCustomProjectName('/tmp/recent-project', 'Recent Project');
+    sessionsDb.setSessionMark('newer-session', 'flag');
 
     const project = projectsDb.getProjectPath('/tmp/recent-project');
-    const page = sessionsService.listRecentSessions(1, 0);
+    const page = sessionsService.listRecentSessions(1, 0, undefined, undefined, true);
 
     assert.deepEqual(page, {
       conversations: [{
         sessionId: 'newer-session',
-        provider: 'codex',
+        provider: 'claude',
         projectId: project?.project_id ?? null,
         projectDisplayName: 'Recent Project',
         sessionTitle: 'Newer conversation',
         lastActivity: '2026-08-01T11:00:00.000Z',
+        flagged: true,
+        done: false,
         serverScope: 'main',
       }],
       total: 2,

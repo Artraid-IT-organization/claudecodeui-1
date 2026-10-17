@@ -26,11 +26,13 @@ export type ArchivedSessionListItem = {
   isProjectArchived: boolean;
   /** Блок верхней панели, в котором виден архивный чат. */
   serverScope?: ServerScope;
+  flagged: boolean;
+  done: boolean;
 };
 
 export type RecentConversationListItem = Pick<
   ArchivedSessionListItem,
-  'sessionId' | 'provider' | 'projectId' | 'projectDisplayName' | 'sessionTitle' | 'lastActivity'
+  'sessionId' | 'provider' | 'projectId' | 'projectDisplayName' | 'sessionTitle' | 'lastActivity' | 'flagged' | 'done'
 > & {
   /** Блок верхней панели, в котором виден чат. */
   serverScope?: ServerScope;

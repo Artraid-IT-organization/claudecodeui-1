@@ -109,6 +109,8 @@ export default function SidebarRecentConversations({
     summary: conversation.sessionTitle,
     lastActivity: conversation.lastActivity ?? undefined,
     serverScope: conversation.serverScope ?? null,
+    flagged: conversation.flagged,
+    done: conversation.done,
     __provider: conversation.provider,
     __projectId: conversation.projectId ?? undefined,
   });

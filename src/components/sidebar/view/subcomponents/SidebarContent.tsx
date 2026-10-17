@@ -259,7 +259,9 @@ export default function SidebarContent({
     if (query.length < 2 || !conversationResults) return local;
 
     const byId = new Map<string, RecentConversationListItem>();
+    const existingById = new Map(recentConversations.map((conversation) => [conversation.sessionId, conversation]));
     for (const result of conversationResults.titleResults) {
+      const existing = existingById.get(result.sessionId);
       byId.set(result.sessionId, {
         sessionId: result.sessionId,
         provider: result.provider as RecentConversationListItem['provider'],
@@ -267,12 +269,15 @@ export default function SidebarContent({
         projectDisplayName: result.projectDisplayName,
         sessionTitle: result.sessionTitle,
         lastActivity: result.lastActivity,
+        flagged: existing?.flagged ?? false,
+        done: existing?.done ?? false,
         serverScope,
       });
     }
     for (const project of conversationResults.results) {
       for (const session of project.sessions) {
         if (byId.has(session.sessionId)) continue;
+        const existing = existingById.get(session.sessionId);
         byId.set(session.sessionId, {
           sessionId: session.sessionId,
           provider: (session.provider || 'claude') as RecentConversationListItem['provider'],
@@ -280,6 +285,8 @@ export default function SidebarContent({
           projectDisplayName: project.projectDisplayName,
           sessionTitle: session.sessionSummary,
           lastActivity: session.matches[0]?.timestamp ?? null,
+          flagged: existing?.flagged ?? false,
+          done: existing?.done ?? false,
           serverScope,
         });
       }
@@ -520,6 +527,8 @@ export default function SidebarContent({
                                       ? session.created_at
                                       : null,
                               isProjectArchived: true,
+                              flagged: Boolean(session.flagged),
+                              done: Boolean(session.done),
                             })}
                           >
                             <span className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md bg-background/70">
