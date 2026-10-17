@@ -2,6 +2,9 @@ import { useState } from 'react';
 import { Download, FileJson, FileText, Loader2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
+import type { NormalizedMessage } from '../../../../stores/useSessionStore';
+import { authenticatedFetch } from '../../../../utils/api';
+import { normalizedToChatMessages } from '../../hooks/useChatMessages';
 import type { ChatMessage } from '../../types/types';
 import { downloadMarkdown, downloadHTML, downloadPDF, EXPORT_FORMATS } from '../../utils/chatExport';
 
@@ -10,7 +13,9 @@ type ChatExportMenuProps = {
   loadedCount: number;
   /** Сколько сообщений в переписке всего, по данным сервера. */
   totalCount: number;
-  /** Дотянуть всю переписку с сервера. */
+  /** Идентификатор чата — по нему сервер отдаёт полную переписку потоком. */
+  sessionId?: string;
+  /** Дотянуть всю переписку с сервера (запасной путь). */
   onLoadAll: () => Promise<void> | void;
   /** Свежий список сообщений — читается ПОСЛЕ дозагрузки, поэтому функцией. */
   getMessages: () => ChatMessage[];
@@ -41,6 +46,57 @@ async function waitUntilSettled(getCount: () => number): Promise<void> {
   }
 }
 
+/**
+ * Вся переписка с сервера одним потоком.
+ *
+ * Путь «дозагрузить ленту и сохранить видимое» обрезал длинные чаты: сервер
+ * держит полную историю лишь в пределах ~12 МБ с конца стенограммы, поэтому
+ * файл начинался с середины и без первых сообщений человека
+ * (Егор 17.10.26: «чат должен быть весь всегда»). Отдельная точка
+ * `/messages/export` отдаёт каждое сообщение по мере чтения источника —
+ * от первого до последнего, независимо от объёма.
+ */
+async function fetchWholeTranscript(sessionId: string): Promise<ChatMessage[]> {
+  const response = await authenticatedFetch(
+    `/api/providers/sessions/${encodeURIComponent(sessionId)}/messages/export`,
+  );
+  if (!response.ok || !response.body) {
+    throw new Error(`export stream failed: ${response.status}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const normalized: NormalizedMessage[] = [];
+  let carry = '';
+  let streamError: string | null = null;
+
+  const takeLine = (line: string) => {
+    if (!line.trim()) return;
+    const parsed = JSON.parse(line) as NormalizedMessage & { exportError?: string };
+    if (parsed.exportError) {
+      streamError = parsed.exportError;
+      return;
+    }
+    normalized.push(parsed);
+  };
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    carry += decoder.decode(value, { stream: true });
+    let cut = carry.indexOf('\n');
+    while (cut !== -1) {
+      takeLine(carry.slice(0, cut));
+      carry = carry.slice(cut + 1);
+      cut = carry.indexOf('\n');
+    }
+  }
+  if (carry.trim()) takeLine(carry);
+  if (streamError) throw new Error(streamError);
+
+  return normalizedToChatMessages(normalized);
+}
+
 /** Кусок названия для имени файла: без служебных символов и не длиннее 60 знаков. */
 const toFilenamePart = (value: string): string =>
   value
@@ -62,6 +118,7 @@ const formatExportStamp = (date: Date): string => {
 export default function ChatExportMenu({
   loadedCount,
   totalCount,
+  sessionId,
   onLoadAll,
   getMessages,
   sessionTitle,
@@ -78,16 +135,23 @@ export default function ChatExportMenu({
     if (isPreparing) return;
     setIsPreparing(true);
     try {
-      // Сначала дотягиваем всю переписку.
-      //
-      // Раньше в документ попадало только то, что успело загрузиться в ленту:
-      // человек открывал чат, видел последние два десятка сообщений — и
-      // ровно они и сохранялись. Егор: «у меня загружается в документ только
-      // то, что загрузилось».
-      await onLoadAll();
-      await waitUntilSettled(() => getMessages().length);
-
-      const messages = getMessages();
+      // Основной путь — полный поток с сервера: переписка целиком, от первого
+      // сообщения, вне зависимости от длины чата. Запасной путь (поток
+      // недоступен) — дотянуть ленту как раньше.
+      let messages: ChatMessage[];
+      if (sessionId) {
+        try {
+          messages = await fetchWholeTranscript(sessionId);
+        } catch {
+          await onLoadAll();
+          await waitUntilSettled(() => getMessages().length);
+          messages = getMessages();
+        }
+      } else {
+        await onLoadAll();
+        await waitUntilSettled(() => getMessages().length);
+        messages = getMessages();
+      }
       const firstUserText = messages.find((msg) => msg.type === 'user')?.content;
       const fallbackName = typeof firstUserText === 'string' ? firstUserText : '';
       const namePart = toFilenamePart(sessionTitle || fallbackName || 'chat') || 'chat';

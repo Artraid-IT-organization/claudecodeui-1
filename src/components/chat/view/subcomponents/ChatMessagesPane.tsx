@@ -202,6 +202,7 @@ function ChatMessagesPane({
             <ChatExportMenu
               loadedCount={chatMessages.length}
               totalCount={totalMessages}
+              sessionId={selectedSession?.id}
               onLoadAll={loadAllMessages}
               getMessages={() => chatMessages}
               sessionTitle={selectedSession?.summary || selectedSession?.name || selectedSession?.title}

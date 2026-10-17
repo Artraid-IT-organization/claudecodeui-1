@@ -10,7 +10,7 @@ import { parseFilesInputTag } from '@/shared/image-attachments.js';
 import { createNormalizedMessage, generateMessageId, getClaudeConfigDir, readObjectRecord, sliceTailPage } from '@/shared/utils.js';
 import { sessionsDb } from '@/modules/database/index.js';
 
-import { readSessionLines } from './transcript-tail-cache.js';
+import { readSessionLines, streamTranscriptLines } from './transcript-tail-cache.js';
 
 const PROVIDER = 'claude';
 
@@ -954,5 +954,41 @@ export class ClaudeSessionsProvider implements IProviderSessions {
       limit: normalizedLimit,
       ...(!Array.isArray(result) && result.transcriptMissing ? { transcriptMissing: true } : {}),
     };
+  }
+
+  /**
+   * Вся стенограмма потоком, без потолка байтов — для выгрузки чата в файл.
+   *
+   * `fetchHistory` с limit=null всё равно читает лишь хвост
+   * (`MAX_FULL_READ_BYTES`, 12 МБ): у длинного чата файл начинался с середины
+   * и в выгрузке не было первых сообщений (Егор 17.10.26: «чат должен быть
+   * весь всегда»). Здесь файл идёт от начала до конца кусками, в памяти —
+   * только разбираемая строка, поэтому размер переписки не ограничен.
+   *
+   * Отличия от постраничного пути, сознательные: порядок — порядок записи в
+   * файл (он же хронологический), без обогащения действий их результатами и
+   * без разбора стенограмм помощников — выгрузке нужны текстовые реплики,
+   * обогащение там всё равно не доезжает до текста.
+   */
+  async *streamHistory(
+    sessionId: string,
+    options: FetchHistoryOptions = {},
+  ): AsyncGenerator<NormalizedMessage> {
+    const providerSessionId = options.providerSessionId ?? sessionId;
+    const storedPath = sessionsDb.getSessionById(sessionId)?.jsonl_path;
+    const jsonLPath = storedPath || await locateTranscript(providerSessionId);
+    if (!jsonLPath) return;
+
+    for await (const line of streamTranscriptLines(jsonLPath, providerSessionId)) {
+      try {
+        const entry = JSON.parse(line) as AnyRecord;
+        if (entry.sessionId !== providerSessionId) continue;
+        for (const message of this.normalizeMessage(entry, sessionId)) {
+          yield message;
+        }
+      } catch {
+        // Строка могла дописываться в момент чтения — обрывок пропускаем.
+      }
+    }
   }
 }

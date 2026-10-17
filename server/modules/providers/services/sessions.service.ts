@@ -552,6 +552,64 @@ export const sessionsService = {
   },
 
   /**
+   * Полная переписка потоком — для выгрузки чата в файл
+   * (`GET /sessions/:id/messages/export`, NDJSON). Разрешает сеанс и права так
+   * же, как `fetchHistory`, затем отдаёт сообщения по мере чтения источника:
+   * у Claude-читалки безлимитный поток по файлу (постраничный путь режет
+   * начало стенограмм длиннее 12 МБ, и выгрузка начиналась с середины чата —
+   * Егор 17.10.26). Провайдер без потокового чтения отдаётся через
+   * `fetchHistory` без предела — у остальных источников потолка нет.
+   * Наследие переведённых чатов идёт первым, как в `fetchHistory`.
+   */
+  async *streamHistory(sessionId: string): AsyncGenerator<NormalizedMessage> {
+    const session = sessionsDb.getSessionById(sessionId);
+    if (!session) {
+      throw new AppError(`Session "${sessionId}" was not found.`, {
+        code: 'SESSION_NOT_FOUND',
+        statusCode: 404,
+      });
+    }
+    assertSessionReadable(session);
+    const hasLegacyTranscript = session.provider !== 'claude' && Boolean(session.jsonl_path);
+
+    if (hasLegacyTranscript) {
+      const legacyProviderSessionId = path.basename(session.jsonl_path as string, '.jsonl');
+      const legacyStream = providerRegistry.resolveProvider('claude').sessions.streamHistory;
+      if (legacyStream) {
+        for await (const message of legacyStream(sessionId, {
+          projectPath: session.project_path ?? '',
+          providerSessionId: legacyProviderSessionId,
+        })) {
+          yield { ...message, sessionId };
+        }
+      }
+    }
+
+    if (!session.provider_session_id) return;
+
+    const provider = providerRegistry.resolveProvider(session.provider as LLMProvider).sessions;
+    if (provider.streamHistory) {
+      for await (const message of provider.streamHistory(sessionId, {
+        projectPath: session.project_path ?? '',
+        providerSessionId: session.provider_session_id,
+      })) {
+        yield { ...message, sessionId };
+      }
+      return;
+    }
+
+    const result = await provider.fetchHistory(sessionId, {
+      limit: null,
+      offset: 0,
+      projectPath: session.project_path ?? '',
+      providerSessionId: session.provider_session_id,
+    });
+    for (const message of result.messages) {
+      yield { ...message, sessionId };
+    }
+  },
+
+  /**
    * Resolves one session (by app id, falling back to the provider-native id)
    * to its metadata plus the owning project.
    *

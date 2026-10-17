@@ -190,6 +190,17 @@ export interface IProviderMcp {
 export interface IProviderSessions {
   normalizeMessage(raw: unknown, sessionId: string | null): NormalizedMessage[];
   fetchHistory(sessionId: string, options?: FetchHistoryOptions): Promise<FetchHistoryResult>;
+  /**
+   * Полная история потоком — для выгрузки чата в файл. Читает источник кусок
+   * за куском и отдаёт сообщения по одному, так что объём переписки не
+   * упирается в потолки `fetchHistory` (у Claude-читалки — 12 МБ с конца
+   * файла, за которым начало чата молча обрезалось, Егор 17.10.26).
+   * Порядок — порядок записи источника; без склеивания пар действие-результат
+   * (выгрузка печатает только текстовые реплики, им склейка не нужна).
+   * Провайдер без потоковой читалки метод не объявляет — служба откатывается
+   * на `fetchHistory` без предела.
+   */
+  streamHistory?(sessionId: string, options?: FetchHistoryOptions): AsyncIterable<NormalizedMessage>;
 }
 
 // ---------------------------

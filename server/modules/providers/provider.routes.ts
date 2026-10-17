@@ -1126,6 +1126,47 @@ router.get(
   }),
 );
 
+// Полная переписка одним потоком NDJSON — для выгрузки чата в файл.
+//
+// Постраничный `/messages` с limit=null у Claude-читалки отдаёт лишь хвост
+// файла (12 МБ): у длинного чата выгрузка начиналась с середины, первых
+// сообщений не было (Егор 17.10.26: «чат должен быть весь всегда»). Здесь
+// каждое сообщение пишется в ответ по мере чтения источника, поэтому длина
+// переписки не ограничена, а память службы не растёт с размером файла.
+router.get(
+  '/sessions/:sessionId/messages/export',
+  asyncHandler(async (req: Request, res: Response) => {
+    const sessionId = parseSessionId(req.params.sessionId);
+    assertSessionRowAllowed(sessionId);
+
+    res.writeHead(200, {
+      'Content-Type': 'application/x-ndjson; charset=utf-8',
+      'Cache-Control': 'no-cache',
+      'X-Accel-Buffering': 'no',
+    });
+
+    let closed = false;
+    req.on('close', () => {
+      closed = true;
+    });
+
+    try {
+      for await (const message of sessionsService.streamHistory(sessionId)) {
+        if (closed) return;
+        res.write(`${JSON.stringify(message)}\n`);
+      }
+      res.end();
+    } catch (error) {
+      // Заголовки уже ушли — ошибку докладываем маркерной строкой потока.
+      if (!closed) {
+        const reason = error instanceof Error ? error.message : String(error);
+        res.write(`${JSON.stringify({ exportError: reason })}\n`);
+        res.end();
+      }
+    }
+  }),
+);
+
 router.get('/search/sessions', asyncHandler(async (req: Request, res: Response) => {
   const query = parseSessionSearchQuery(req.query.q);
   const limit = parseSessionSearchLimit(req.query.limit);
