@@ -128,7 +128,7 @@ export default function ActivityIndicator({ activity, onAbort, isInputFocused = 
           край (снимок критика 17.09.26). Пилюля берёт доступное место и
           обрезает текст многоточием, кнопка не сжимается.
         */}
-        <div className={`${tabSurfaceClassName} min-w-0 flex-1 gap-2`}>
+        <div className={`${tabSurfaceClassName} pointer-events-auto min-w-0 flex-1 touch-manipulation gap-2`}>
           <PhaseIcon className={`h-4 w-4 shrink-0 animate-pulse ${phaseTone}`} aria-hidden />
           {/*
             Мерцание рисует текст своей серой заливкой и перебивает цвет фазы —
