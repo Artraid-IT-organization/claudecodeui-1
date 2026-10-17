@@ -76,6 +76,7 @@ rl.on('line', (line) => {
       }
       // Replayed history MUST be muted by the runtime.
       notify('session/update', { sessionId: msg.params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'REPLAYED-OLD-TEXT' } } });
+      notify('session/update', { sessionId: msg.params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '## Как я понял задачу\\n\\nСейчас проверю данные.' } } });
       respond(msg.id, { sessionId: msg.params.sessionId });
       break;
     case 'session/set_mode':
@@ -129,10 +130,19 @@ rl.on('line', (line) => {
         setTimeout(() => process.exit(0), 50);
         return;
       }
+      if (process.env.DEVIN_INCOMPLETE === 'complete_after_status') {
+        notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Сейчас проверю данные.\\n\\n## Ответ\\n\\nПроверка завершена, результат готов.' } } });
+        respond(msg.id, { stopReason: 'end_turn' });
+        setTimeout(() => process.exit(0), 50);
+        return;
+      }
       notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'thinking hard' } } });
       notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'LIVE-REPLY' } } });
       notify('session/update', { sessionId: sid, update: { sessionUpdate: 'usage_update', used: 100, size: 200000 } });
-      respond(msg.id, { stopReason: process.env.DEVIN_INCOMPLETE === 'max_tokens' ? 'max_tokens' : 'end_turn', usage: { totalTokens: 42, inputTokens: 30, outputTokens: 12 } });
+      const stopReason = process.env.DEVIN_INCOMPLETE === 'max_tokens'
+        ? 'max_tokens'
+        : process.env.DEVIN_INCOMPLETE === 'refusal' ? 'refusal' : 'end_turn';
+      respond(msg.id, { stopReason, usage: { totalTokens: 42, inputTokens: 30, outputTokens: 12 } });
       setTimeout(() => process.exit(0), 50);
       break;
     }
@@ -245,7 +255,7 @@ test('devin runtime: new session — handshake, session_created, streamed deltas
 });
 
 test('devin runtime: incomplete terminal output is a visible failure without a synthetic user prompt', async () => {
-  for (const scenario of ['understanding', 'tool_only', 'max_tokens']) {
+  for (const scenario of ['understanding', 'tool_only', 'max_tokens', 'refusal']) {
     await withFakeDevin(async (tempRoot) => {
       process.env.DEVIN_INCOMPLETE = scenario;
       const writer = makeWriter();
@@ -267,6 +277,20 @@ test('devin runtime: incomplete terminal output is a visible failure without a s
       assert.equal(completes[0].exitCode, 1, `${scenario}: incomplete output is not success`);
     });
   }
+});
+
+test('devin runtime: a status followed by a result remains successful', async () => {
+  await withFakeDevin(async (tempRoot) => {
+    process.env.DEVIN_INCOMPLETE = 'complete_after_status';
+    const writer = makeWriter();
+
+    await devinRuntime.run('Original user request', { cwd: tempRoot, sessionId: 'app-complete-after-status' }, writer, runtimeContext);
+
+    assert.ok(!writer.messages.some((message) => message.kind === 'error'));
+    const completes = writer.messages.filter((message) => message.kind === 'complete');
+    assert.equal(completes.length, 1);
+    assert.equal(completes[0].exitCode, 0);
+  });
 });
 
 test('devin runtime: resume — session/load replays are muted, no session_created', async () => {

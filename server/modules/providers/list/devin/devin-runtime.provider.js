@@ -68,17 +68,19 @@ function isIncompleteDevinResponse(text, hasToolCalls, textAfterLastTool = '') {
   if (typeof text !== 'string') return true;
   const t = text.trim();
   if (!t) return true;
-  if (hasToolCalls && !String(textAfterLastTool).trim()) return true;
+  const afterTool = String(textAfterLastTool).trim();
+  if (hasToolCalls && !afterTool) return true;
+  const resultHeading = /(^|\n)## (ответ|итог|результат|таблица|как сделать|готово|не вышло|дальше)($|\s)/mi;
+  if (resultHeading.test(t)) return false;
   const lower = t.toLowerCase();
   // Только блок «Как я понял задачу» — явно не финал.
-  if (lower.startsWith('## как я понял задачу') && !/(^|\n)## (ответ|итог|результат|таблица|как сделать|готово|не вышло|дальше)($|\s)/mi.test(t)) {
-    return true;
-  }
-  // Промежуточный статус без результирующего блока.
-  if (/сейчас (докину|сделаю|поищу|проверю|вернусь)/i.test(t)) return true;
-  if (/ещё не готово|пока не готово|жду|продолжаю работу/i.test(t) && !/(^|\n)## (ответ|итог|результат|таблица|как сделать|готово|не вышло|дальше)($|\s)/mi.test(t)) {
-    return true;
-  }
+  if (lower.startsWith('## как я понял задачу')) return true;
+  // Промежуточный статус считается обрывом только в хвосте ответа: обещание
+  // в начале не должно перечёркивать результат, который модель дописала ниже.
+  const tail = (hasToolCalls ? afterTool : t).slice(-500);
+  if (/сейчас (докину|сделаю|поищу|проверю|вернусь)[\s.!?]*$/i.test(tail)) return true;
+  if (/(ещё не готово|пока не готово|продолжаю работу)[\s.!?]*$/i.test(tail)) return true;
+  if (/(^|[\s.,;:!?—-])жду([\s.,;:!?—-]|$)/i.test(tail)) return true;
   return false;
 }
 
@@ -959,6 +961,9 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
         if (update.sessionUpdate === 'config_option_update') {
           noteConfigOptions(run, update.configOptions);
         }
+        if (run.muted) {
+          return; // session/load replays history — never leak it into this turn
+        }
         // Накапливаем текст текущего ответа для защиты от тихого обрывания
         // после статусных блоков (см. isIncompleteDevinResponse).
         if (update.sessionUpdate === 'agent_message_chunk') {
@@ -972,9 +977,6 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
         if (update.sessionUpdate === 'tool_call') {
           run.turnHasToolCalls = true;
           run.turnTextAfterLastTool = '';
-        }
-        if (run.muted) {
-          return; // session/load replays history — never leak it as live deltas
         }
         const normalized = context.normalizeMessage(params.update ?? params, sessionId || run.devinSessionId || null);
         for (const message of normalized) {
@@ -1249,6 +1251,10 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
       }
       if (stopReason === 'max_tokens') {
         hardFail('Devin достиг лимита ответа до подтверждённого завершения задачи. Частичный текст сохранён, ход отмечен ошибкой.');
+        return;
+      }
+      if (stopReason !== 'end_turn') {
+        hardFail(`Devin остановил ход без подтверждённого результата (причина: ${stopReason || 'не указана'}). Запрос и частичный текст сохранены.`);
         return;
       }
 
