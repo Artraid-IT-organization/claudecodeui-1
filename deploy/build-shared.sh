@@ -200,7 +200,7 @@ wait_site_up() {
     done
     say "ОШИБКА: сайт не ответил за 5 мин после перезапуска"
     /home/claude/scripts/notify.sh "Claude UI не поднялся за 5 мин после выкатки" error >/dev/null 2>&1
-    return 0
+    return 1
 }
 
 # Codex, в отличие от Claude, не умеет переподключить уже идущий turn к
@@ -294,6 +294,26 @@ if swap; then
     say "Подменено и перезапущено. Замок держался $((SECONDS - LOCK_HELD_START)) с"
     say "Копия базы: $BACKUP"
     say "Откат при необходимости: mv dist.prev dist && mv dist-server.prev dist-server && sudo -n systemctl restart claudecodeui-shared"
+
+    # Если обновление шло через плашку «Обновить», сервер поставил apply.json в
+    # running, но сам не знает, когда выкатка закончилась. Закрываем её здесь,
+    # чтобы клиент убрал «Установка обновления…» сразу, а не ждал сторожа.
+    if [ -n "${CCUI_UPDATE_ID:-}" ]; then
+        APPLY_FILE="/home/claude/.cloudcli/update-state/apply.json"
+        if [ -f "$APPLY_FILE" ]; then
+            python3 - "$APPLY_FILE" "$CCUI_UPDATE_ID" <<'PY'
+import json, sys, time
+path, expect_id = sys.argv[1], sys.argv[2]
+try:
+    st = json.load(open(path))
+except Exception:
+    sys.exit(0)
+if st.get("state") == "running" and st.get("id") == expect_id:
+    st.update(state="ok", finishedAt=time.strftime("%Y-%m-%dT%H:%M:%S%z"), detail="версия поднялась")
+    json.dump(st, open(path, "w"), ensure_ascii=False, indent=1)
+PY
+        fi
+    fi
 elif [ "${SWAP_REFUSED:-0}" = 1 ]; then
     # Файлы сайта не трогали — откатывать нечего.
     exit 1
