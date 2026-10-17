@@ -513,22 +513,81 @@ export function useSidebarController({
     };
   }, [searchFilter]);
 
-  // Debounced conversation search with SSE streaming
+  // Строка в плоской панели ищет на сервере по всем чатам текущего блока и
+  // помощника, а не только по уже загруженной странице последних чатов.
   useEffect(() => {
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-      eventSourceRef.current = null;
+    eventSourceRef.current?.close();
+    eventSourceRef.current = null;
+
+    const query = debouncedSearchQuery;
+    if (searchMode !== 'projects' || query.length < 2) {
+      searchSeqRef.current += 1;
+      setConversationResults(null);
+      setSearchProgress(null);
+      setIsSearching(false);
+      return;
     }
 
-    // Поиск по чатам жил только в режиме «conversations», а его убрали вместе
-    // с вкладкой. Осталась чистка состояния, чтобы после переключения режима
-    // на экране не висели результаты прошлого запроса.
-    searchSeqRef.current += 1;
+    setIsSearching(true);
     setConversationResults(null);
     setSearchProgress(null);
-    setIsSearching(false);
-    return;
-  }, [debouncedSearchQuery, searchMode]);
+    const seq = ++searchSeqRef.current;
+    const es = new EventSource(api.searchConversationsUrl(query, 100, { serverScope, providerSpace }));
+    eventSourceRef.current = es;
+    const accumulated: ConversationProjectResult[] = [];
+    let titleResults: SessionTitleSearchResult[] = [];
+    let totalMatches = 0;
+
+    const publish = () => setConversationResults({
+      results: [...accumulated],
+      titleResults: [...titleResults],
+      totalMatches,
+      query,
+    });
+    es.addEventListener('title-results', (event) => {
+      if (seq !== searchSeqRef.current) return es.close();
+      try {
+        const data = JSON.parse((event as MessageEvent).data) as { titleResults: SessionTitleSearchResult[] };
+        titleResults = Array.isArray(data.titleResults) ? data.titleResults : [];
+        publish();
+      } catch { /* Ignore malformed SSE data. */ }
+    });
+    es.addEventListener('result', (event) => {
+      if (seq !== searchSeqRef.current) return es.close();
+      try {
+        const data = JSON.parse((event as MessageEvent).data) as {
+          projectResult: ConversationProjectResult;
+          totalMatches: number;
+          scannedProjects: number;
+          totalProjects: number;
+        };
+        accumulated.push(data.projectResult);
+        totalMatches = data.totalMatches;
+        setSearchProgress({ scannedProjects: data.scannedProjects, totalProjects: data.totalProjects });
+        publish();
+      } catch { /* Ignore malformed SSE data. */ }
+    });
+    es.addEventListener('progress', (event) => {
+      if (seq !== searchSeqRef.current) return es.close();
+      try {
+        const data = JSON.parse((event as MessageEvent).data) as SearchProgress & { totalMatches: number };
+        totalMatches = data.totalMatches;
+        setSearchProgress({ scannedProjects: data.scannedProjects, totalProjects: data.totalProjects });
+      } catch { /* Ignore malformed SSE data. */ }
+    });
+    const finish = () => {
+      if (seq !== searchSeqRef.current) return;
+      es.close();
+      eventSourceRef.current = null;
+      setIsSearching(false);
+      setSearchProgress(null);
+      publish();
+    };
+    es.addEventListener('done', finish);
+    es.addEventListener('error', finish);
+
+    return () => es.close();
+  }, [debouncedSearchQuery, searchMode, serverScope, providerSpace]);
 
   // All sidebar state keys (expanded, starred, loading, etc.) use the DB
   // `projectId` as their identifier after the migration.

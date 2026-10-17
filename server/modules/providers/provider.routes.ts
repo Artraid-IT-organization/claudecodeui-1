@@ -1177,6 +1177,9 @@ router.get('/search/sessions', asyncHandler(async (req: Request, res: Response) 
   const serverScope = typeof req.query.serverScope === 'string' && req.query.serverScope
     ? normalizeServerScope(req.query.serverScope)
     : null;
+  const providerSpace = req.query.space === 'codex' || req.query.space === 'devin' || req.query.space === 'claude'
+    ? req.query.space
+    : null;
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -1198,6 +1201,7 @@ router.get('/search/sessions', asyncHandler(async (req: Request, res: Response) 
       limit,
       projectId,
       serverScope,
+      providerSpace,
       signal: abortController.signal,
       onTitleResults: (titleResults) => {
         if (!closed) {
