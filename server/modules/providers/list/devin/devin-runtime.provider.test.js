@@ -116,10 +116,23 @@ rl.on('line', (line) => {
         });
         return;
       }
+      if (process.env.DEVIN_INCOMPLETE === 'understanding') {
+        notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '## Как я понял задачу\\n\\nСейчас проверю данные.' } } });
+        respond(msg.id, { stopReason: 'end_turn' });
+        setTimeout(() => process.exit(0), 50);
+        return;
+      }
+      if (process.env.DEVIN_INCOMPLETE === 'tool_only') {
+        notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Проверяю данные.' } } });
+        notify('session/update', { sessionId: sid, update: { sessionUpdate: 'tool_call', toolCallId: 'tc-incomplete', title: 'Read', kind: 'read' } });
+        respond(msg.id, { stopReason: 'end_turn' });
+        setTimeout(() => process.exit(0), 50);
+        return;
+      }
       notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'thinking hard' } } });
       notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'LIVE-REPLY' } } });
       notify('session/update', { sessionId: sid, update: { sessionUpdate: 'usage_update', used: 100, size: 200000 } });
-      respond(msg.id, { stopReason: 'end_turn', usage: { totalTokens: 42, inputTokens: 30, outputTokens: 12 } });
+      respond(msg.id, { stopReason: process.env.DEVIN_INCOMPLETE === 'max_tokens' ? 'max_tokens' : 'end_turn', usage: { totalTokens: 42, inputTokens: 30, outputTokens: 12 } });
       setTimeout(() => process.exit(0), 50);
       break;
     }
@@ -152,6 +165,7 @@ async function withFakeDevin(fn) {
   const previousCapture = process.env.DEVIN_RPC_CAPTURE;
   const previousHang = process.env.DEVIN_HANG;
   const previousPermTest = process.env.DEVIN_PERMISSION_TEST;
+  const previousIncomplete = process.env.DEVIN_INCOMPLETE;
   const previousRunsDir = process.env.CLOUDCLI_DEVIN_RUNS_DIR;
   const previousLiveRuns = process.env.CLOUDCLI_LIVE_RUNS_DIR;
   const previousDbPath = process.env.DATABASE_PATH;
@@ -183,6 +197,7 @@ async function withFakeDevin(fn) {
     if (previousCapture === undefined) delete process.env.DEVIN_RPC_CAPTURE; else process.env.DEVIN_RPC_CAPTURE = previousCapture;
     if (previousHang === undefined) delete process.env.DEVIN_HANG; else process.env.DEVIN_HANG = previousHang;
     if (previousPermTest === undefined) delete process.env.DEVIN_PERMISSION_TEST; else process.env.DEVIN_PERMISSION_TEST = previousPermTest;
+    if (previousIncomplete === undefined) delete process.env.DEVIN_INCOMPLETE; else process.env.DEVIN_INCOMPLETE = previousIncomplete;
     if (previousRunsDir === undefined) delete process.env.CLOUDCLI_DEVIN_RUNS_DIR; else process.env.CLOUDCLI_DEVIN_RUNS_DIR = previousRunsDir;
     if (previousLiveRuns === undefined) delete process.env.CLOUDCLI_LIVE_RUNS_DIR; else process.env.CLOUDCLI_LIVE_RUNS_DIR = previousLiveRuns;
     if (previousDbPath === undefined) delete process.env.DATABASE_PATH; else process.env.DATABASE_PATH = previousDbPath;
@@ -227,6 +242,31 @@ test('devin runtime: new session — handshake, session_created, streamed deltas
     // Пустая модель клампится в swe-2-high ещё до спауна — иначе Devin взял бы свой конфиг.
     assert.deepEqual(capture.args, ['acp', '--model', 'swe-2-high']);
   });
+});
+
+test('devin runtime: incomplete terminal output is a visible failure without a synthetic user prompt', async () => {
+  for (const scenario of ['understanding', 'tool_only', 'max_tokens']) {
+    await withFakeDevin(async (tempRoot) => {
+      process.env.DEVIN_INCOMPLETE = scenario;
+      const writer = makeWriter();
+
+      await assert.rejects(() => devinRuntime.run(
+        'Original user request',
+        { cwd: tempRoot, sessionId: `app-incomplete-${scenario}` },
+        writer,
+        runtimeContext,
+      ));
+
+      const capture = JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8'));
+      const prompts = capture.calls.filter((call) => call.method === 'session/prompt');
+      assert.equal(prompts.length, 1, `${scenario}: only the original prompt is sent`);
+      assert.equal(prompts[0].params.prompt[0].text, 'Original user request');
+      assert.ok(writer.messages.some((message) => message.kind === 'error'), `${scenario}: error is visible`);
+      const completes = writer.messages.filter((message) => message.kind === 'complete');
+      assert.equal(completes.length, 1, `${scenario}: exactly one terminal complete`);
+      assert.equal(completes[0].exitCode, 1, `${scenario}: incomplete output is not success`);
+    });
+  }
 });
 
 test('devin runtime: resume — session/load replays are muted, no session_created', async () => {

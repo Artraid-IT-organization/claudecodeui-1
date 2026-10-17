@@ -64,19 +64,11 @@ const reattachedDevinSurvivors = new Map();
  * статусный/вводный блок. Используется как защита от тихого обрывания хода
  * после «Как я понял задачу» или промежуточного статуса.
  */
-function isIncompleteDevinResponse(text, hasToolCalls) {
-  if (typeof text !== 'string') return false;
+function isIncompleteDevinResponse(text, hasToolCalls, textAfterLastTool = '') {
+  if (typeof text !== 'string') return true;
   const t = text.trim();
-  if (!t) return false;
-  // Если были вызовы инструментов, считаем, что работа шла — оставляем
-  // эвристику только для чисто текстовых обрывов.
-  if (hasToolCalls) {
-    const lower = t.toLowerCase();
-    // Даже после инструментов недопустимо заканчивать на «сейчас сделаю»
-    // без результата.
-    if (/сейчас (докину|сделаю|поищу|проверю|вернусь)/i.test(t)) return true;
-    return false;
-  }
+  if (!t) return true;
+  if (hasToolCalls && !String(textAfterLastTool).trim()) return true;
   const lower = t.toLowerCase();
   // Только блок «Как я понял задачу» — явно не финал.
   if (lower.startsWith('## как я понял задачу') && !/(^|\n)## (ответ|итог|результат|таблица|как сделать|готово|не вышло|дальше)($|\s)/mi.test(t)) {
@@ -974,10 +966,12 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
           const text = chunkBlock && typeof chunkBlock.text === 'string' ? chunkBlock.text : '';
           if (text) {
             run.turnAssistantText = (run.turnAssistantText || '') + text;
+            run.turnTextAfterLastTool = (run.turnTextAfterLastTool || '') + text;
           }
         }
         if (update.sessionUpdate === 'tool_call') {
           run.turnHasToolCalls = true;
+          run.turnTextAfterLastTool = '';
         }
         if (run.muted) {
           return; // session/load replays history — never leak it as live deltas
@@ -1222,42 +1216,15 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
         text: 'thinking',
       }));
 
-      const MAX_CONTINUATIONS = 2;
-      let continuationCount = 0;
-      let result;
-      while (continuationCount <= MAX_CONTINUATIONS) {
-        const promptResult = connection.call('session/prompt', {
-          sessionId: run.devinSessionId,
-          prompt: [{ type: 'text', text: promptText }],
-        });
-        // Кадр prompt уже записан в сокет супервизора: с этого момента ход
-        // переживает перезапуск сайта (promptInFlight не даёт супервизору убрать
-        // агента, новый сервер переподключится и дочитает ответ).
-        options.onPromptAnchored?.();
-        result = await promptResult;
-
-        const stopReason = result?.stopReason;
-        const needContinue = stopReason === 'end_turn'
-          && continuationCount < MAX_CONTINUATIONS
-          && isIncompleteDevinResponse(run.turnAssistantText, run.turnHasToolCalls);
-
-        if (!needContinue) {
-          break;
-        }
-
-        continuationCount += 1;
-        sendMessage(ws, createNormalizedMessage({
-          provider: 'devin',
-          sessionId: run.devinSessionId || sessionId || null,
-          kind: 'status',
-          text: 'turn_continued',
-          content: `Ход завершился без ответа (только статусный блок). Продолжаю автоматически (попытка ${continuationCount}/${MAX_CONTINUATIONS}).`,
-        }));
-        // Сбрасываем аккумуляторы для следующего витка.
-        run.turnAssistantText = '';
-        run.turnHasToolCalls = false;
-        promptText = 'Продолжи работу с того места, где остановился, и доведи до финального ответа. Не пиши заново блок «Как я понял задачу»; сразу делай следующий шаг и выдай результат, уточняющий вопрос или явное сообщение об ошибке.';
-      }
+      const promptResult = connection.call('session/prompt', {
+        sessionId: run.devinSessionId,
+        prompt: [{ type: 'text', text: promptText }],
+      });
+      // Кадр prompt уже записан в сокет супервизора: с этого момента ход
+      // переживает перезапуск сайта (promptInFlight не даёт супервизору убрать
+      // агента, новый сервер переподключится и дочитает ответ).
+      options.onPromptAnchored?.();
+      const result = await promptResult;
 
       if (run.usageTimer) {
         clearInterval(run.usageTimer);
@@ -1271,15 +1238,18 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
       }
 
       const stopReason = result?.stopReason;
-      // Если после попыток продолжения ответ всё ещё не финальный — показываем
-      // человеку явную ошибку вместо тихого завершения.
-      if (stopReason === 'end_turn' && isIncompleteDevinResponse(run.turnAssistantText, run.turnHasToolCalls)) {
-        sendMessage(ws, createNormalizedMessage({
-          provider: 'devin',
-          sessionId: run.devinSessionId || sessionId || null,
-          kind: 'error',
-          content: 'Ход завершился без финального ответа: модель остановилась на статусном блоке. Попробуйте повторить запрос или продолжить чат командой «Продолжай».'
-        }));
+      const incomplete = stopReason === 'end_turn' && isIncompleteDevinResponse(
+        run.turnAssistantText,
+        run.turnHasToolCalls,
+        run.turnTextAfterLastTool,
+      );
+      if (incomplete) {
+        hardFail('Devin завершил ход без итогового ответа. Запрос сохранён, но этот ход отмечен ошибкой — система не считает промежуточный текст результатом.');
+        return;
+      }
+      if (stopReason === 'max_tokens') {
+        hardFail('Devin достиг лимита ответа до подтверждённого завершения задачи. Частичный текст сохранён, ход отмечен ошибкой.');
+        return;
       }
 
       // Финальный замер — последний ответ мог дописаться в базу только что.
@@ -1310,7 +1280,7 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
         kind: 'stream_end',
       }));
 
-      if (stopReason === 'end_turn' || stopReason === 'max_tokens') {
+      if (stopReason === 'end_turn') {
         notifyRunStopped({
           userId: ws?.userId || null,
           provider: 'devin',
@@ -1320,7 +1290,7 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
         });
       }
 
-      finish(stopReason === 'end_turn' || stopReason === 'max_tokens' ? 0 : 1, stopReason === 'cancelled');
+      finish(stopReason === 'end_turn' ? 0 : 1, stopReason === 'cancelled');
       resolve();
     })().catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
