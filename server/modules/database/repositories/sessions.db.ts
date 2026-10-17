@@ -34,6 +34,8 @@ type SessionRow = {
   server_scope: ServerScope | null;
   /** Ярлык-флажок на чате: 1 — висит, 0 — нет. */
   is_flagged: number;
+  /** Галочка «сделано»: 1 — стоит, 0 — нет. Взаимоисключает флажок. */
+  is_done: number;
   /** Каталог аккаунта, которому принадлежит чат (изоляция пользователей). */
   account_dir: string | null;
   /** Кто из веб-пользователей инициировал чат (NULL у наследия и у строк с диска). */
@@ -51,7 +53,7 @@ type RecentSessionsPage = {
 };
 
 const SESSION_ROW_COLUMNS =
-  'session_id, provider, provider_session_id, project_path, jsonl_path, custom_name, title_source, model, effort, group_id, group_label, server_scope, is_flagged, account_dir, initiated_by_user_id, devin_connection_id, isArchived, created_at, updated_at';
+  'session_id, provider, provider_session_id, project_path, jsonl_path, custom_name, title_source, model, effort, group_id, group_label, server_scope, is_flagged, is_done, account_dir, initiated_by_user_id, devin_connection_id, isArchived, created_at, updated_at';
 
 /**
  * Decides whether a freshly-derived title candidate should replace the
@@ -622,16 +624,17 @@ export const sessionsDb = {
   },
 
   /**
-   * Вешает или снимает ярлык-флажок. `updated_at` не трогаем: ярлык — метка,
-   * а не активность, и чат не должен от него подниматься в списке.
+   * Вешает, снимает или переключает метку чата. `updated_at` не трогаем:
+   * метка — не активность, и чат не должен от неё подниматься в списке.
+   * Флажок и галочка взаимоисключаются.
    */
-  setSessionFlagged(sessionId: string, flagged: boolean): void {
+  setSessionMark(sessionId: string, mark: 'none' | 'flag' | 'done'): void {
     const db = getConnection();
     db.prepare(
       `UPDATE sessions
-       SET is_flagged = ?
+       SET is_flagged = ?, is_done = ?
        WHERE session_id = ?`
-    ).run(flagged ? 1 : 0, sessionId);
+    ).run(mark === 'flag' ? 1 : 0, mark === 'done' ? 1 : 0, sessionId);
   },
 
   setSessionGroup(sessionId: string, groupId: string | null, groupLabel: string | null): void {

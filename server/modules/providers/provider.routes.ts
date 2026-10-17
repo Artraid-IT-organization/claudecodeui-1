@@ -999,21 +999,23 @@ router.post(
   }),
 );
 
+const VALID_SESSION_MARKS = new Set(['none', 'flag', 'done']);
+
 router.post(
-  '/sessions/:sessionId/flag',
+  '/sessions/:sessionId/mark',
   asyncHandler(async (req: Request, res: Response) => {
     const sessionId = parseSessionId(req.params.sessionId);
     assertSessionRowAllowed(sessionId);
-    const flagged = (req.body ?? {}).flagged;
-    if (typeof flagged !== 'boolean') {
-      throw new AppError('flagged must be a boolean.', { code: 'INVALID_FLAGGED', statusCode: 400 });
+    const mark = (req.body ?? {}).mark;
+    if (typeof mark !== 'string' || !VALID_SESSION_MARKS.has(mark)) {
+      throw new AppError("mark must be one of: 'none', 'flag', 'done'.", { code: 'INVALID_MARK', statusCode: 400 });
     }
     // Живое обновление чата (session_upserted) здесь не рассылаем: клиент
     // принимает его как «в чате новое» — ставил жёлтую точку внимания, а
     // открытая вкладка теряла строку из списка до перезагрузки (проверено
     // 25.09.26). Нажавшая вкладка меняет ярлык сама, остальные увидят его
     // при следующей загрузке списка.
-    const result = sessionsService.setSessionFlagged(sessionId, flagged);
+    const result = sessionsService.setSessionMark(sessionId, mark as 'none' | 'flag' | 'done');
     res.json(createApiSuccessResponse(result));
   }),
 );
