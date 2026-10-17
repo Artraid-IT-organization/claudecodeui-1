@@ -156,5 +156,10 @@ test('recent sessions map project metadata and preserve database pagination', { 
       total: 2,
       hasMore: true,
     });
+
+    sessionsDb.setSessionMark('newer-session', 'done');
+    const donePage = sessionsService.listRecentSessions(1, 0, undefined, undefined, true);
+    assert.equal(donePage.conversations[0]?.flagged, false);
+    assert.equal(donePage.conversations[0]?.done, true);
   });
 });
