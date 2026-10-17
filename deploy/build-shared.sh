@@ -1,24 +1,27 @@
 #!/usr/bin/env bash
 #
-# Собирает общий (multi-tenant) инстанс и перезапускает его.
+# Собирает общий (multi-tenant) инстанс и готовит обновление для кнопки.
 #
-# Сборка идёт В СВОЁМ worktree и БЕЗ общего замка. Замок берётся только на
-# подмену готовых файлов и перезапуск — это секунды вместо десяти-пятнадцати
+# Сборка идёт В СВОЁМ worktree и БЕЗ общего замка. Без --apply живой сервер
+# не меняется: готовая версия появляется в интерфейсе и ждёт нажатия «Обновить».
+# Замок берётся только после этого на подмену файлов и перезапуск — это секунды вместо десяти-пятнадцати
 # минут. Раньше замок держался всю сборку целиком, и два чата, ведущих проект,
 # блокировали друг друга наглухо: один стоял в очереди, не имея возможности
 # ничего сообщить, а со стороны это выглядело как зависание.
 #
-# Использование: bash deploy/build-shared.sh <коммит> [--no-restart]
-#   Запускать из своего worktree. Скрипт сам проверит, что он на этом коммите.
+# Использование: bash deploy/build-shared.sh <коммит> [--apply|--no-restart]
+#   Запускать из своего worktree. Без --apply только готовит обновление.
 
 set -uo pipefail
 
 COMMIT="${1:?укажите коммит}"
 NO_RESTART=""
+APPLY=""
 ALLOW_ROLLBACK=""
 for arg in "${@:2}"; do
     case "$arg" in
         --no-restart) NO_RESTART="--no-restart" ;;
+        --apply) APPLY=1 ;;
         --allow-rollback) ALLOW_ROLLBACK=1 ;;
     esac
 done
@@ -100,6 +103,38 @@ say "Проверка содержимого пройдена"
 
 if [ "$NO_RESTART" = "--no-restart" ]; then
     say "Подмена и перезапуск пропущены по флагу"
+    exit 0
+fi
+
+if [ -z "$APPLY" ]; then
+    STATE_DIR="/home/claude/.cloudcli/update-state"
+    mkdir -p "$STATE_DIR"
+    COMMITS_JSON="$(git log --format='%h%x1f%s%x1f%cI%x1f%an' "$LIVE..$HEAD_NOW" | python3 -c 'import sys,json; rows=[]
+for line in sys.stdin:
+    parts=line.rstrip("\n").split("\x1f", 3)
+    if len(parts) == 4: rows.append(dict(zip(("sha","subject","date","author"), parts)))
+print(json.dumps(rows, ensure_ascii=False))')"
+    STAT="$(git diff --shortstat "$LIVE..$HEAD_NOW")"
+    FILES_CHANGED="$(git diff --name-only "$LIVE..$HEAD_NOW" | wc -l | tr -d ' ')"
+    CCUI_TARGET="$HEAD_NOW" CCUI_BASE="$LIVE" CCUI_SOURCE="$SELF" CCUI_COMMITS="$COMMITS_JSON" CCUI_STAT="$STAT" CCUI_FILES="$FILES_CHANGED" \
+        python3 - "$STATE_DIR/pending.json" <<'PY'
+import json, os, sys, time
+state = {
+    "id": os.environ["CCUI_TARGET"],
+    "label": "Готовая версия этого сервера",
+    "remote": "local-build",
+    "base": os.environ["CCUI_BASE"],
+    "commits": json.loads(os.environ["CCUI_COMMITS"]),
+    "filesChanged": int(os.environ.get("CCUI_FILES") or 0),
+    "diffStat": os.environ.get("CCUI_STAT", "").strip(),
+    "conflict": None,
+    "checkedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    "sourceWorktree": os.environ["CCUI_SOURCE"],
+}
+with open(sys.argv[1], "w") as handle:
+    json.dump(state, handle, ensure_ascii=False, indent=1)
+PY
+    say "Обновление ${HEAD_NOW:0:12} готово и ждёт нажатия «Обновить»; живой сервер не перезапускался"
     exit 0
 fi
 
