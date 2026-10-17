@@ -1249,6 +1249,135 @@ export function isDevinAutoContinueText(text: unknown): boolean {
 }
 
 /**
+ * Result headings that signal a substantive final answer from Devin. Used by
+ * `isIncompleteDevinResponse` to distinguish a completed turn from a status-only
+ * preamble.
+ */
+const DEVIN_RESULT_HEADINGS = [
+  'ответ',
+  'итог',
+  'результат',
+  'таблица',
+  'как сделать',
+  'готово',
+  'не вышло',
+  'дальше',
+  'вывод',
+  'заключение',
+  'итоги',
+  'резюме',
+  'итоговый',
+  'рекомендации',
+  'варианты',
+  'возможные улучшения',
+  'версия',
+  'лучший вариант',
+  'выбранный вариант',
+  'готовый промпт',
+  'шорт-лист',
+  'список',
+  'сравнение',
+  'анализ',
+  'обзор',
+];
+
+/**
+ * True if the assistant text ends with a promise to continue working rather
+ * than with a finished statement. Only the tail is checked so that an early
+ * status line does not invalidate a later substantive answer.
+ */
+function hasContinuationTail(text: string): boolean {
+  const tail = text.slice(-1000);
+  const patterns = [
+    /сейчас (докину|сделаю|поищу|проверю|вернусь|приступлю|начну|продолжу)[\s.!?]*$/iu,
+    /начинаю (работу|поиск|проверку|анализ|сравнение|исследование)[\s.!?]*$/iu,
+    /приступаю (к работе|к поиску|к проверке|к анализу|к сравнению|к исследованию)[\s.!?]*$/iu,
+    /вернусь (с|к|позже|через|к вам|к вопросу|к вам с)[\s.!?]*$/iu,
+    /буду (искать|проверять|делать|сравнивать|работать|продолжать|дополнять)[\s.!?]*$/iu,
+    /скоро (вернусь|дам|покажу|напишу|ответ|сделаю)[\s.!?]*$/iu,
+    /(ещё не готово|пока не готово|продолжаю работу|в процессе|в работе|не закончено|не завершено|выполню позже|продолжу позже|обновлю позже)[\s.!?]*$/iu,
+    /(^|[\s.,;:!?—-])жду([\s.,;:!?—-]|$)/iu,
+  ];
+  return patterns.some((re) => re.test(tail));
+}
+
+/**
+ * True if the assistant text contains concrete deliverable structure that
+ * strongly indicates a finished answer: a recognized result heading, a fenced
+ * code block, a markdown table, a long numbered list, or several sections.
+ */
+function hasResultStructure(text: string): boolean {
+  const headingPattern = new RegExp(
+    `(^|\n)## (${DEVIN_RESULT_HEADINGS.map((h) => h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})($|\\s|[«"„(])`,
+    'mi',
+  );
+  if (headingPattern.test(text)) return true;
+
+  if (/```/s.test(text)) return true;
+  if (/\|[^\n]+\|\n\|[-:\s|]+\|/m.test(text)) return true;
+
+  const numberedItems = (text.match(/^\s*\d+[.)]\s+\S/mg) || []).length;
+  if (numberedItems >= 3) return true;
+
+  const bulletItems = (text.match(/^\s*[-*]\s+\S/mg) || []).length;
+  if (bulletItems >= 5) return true;
+
+  const sectionCount = (text.match(/(^|\n)##\s+/g) || []).length;
+  if (sectionCount >= 3 && text.length > 800) return true;
+
+  return false;
+}
+
+/**
+ * True if the text looks like the assistant stopped at the understanding
+ * preamble without producing any result structure.
+ */
+function looksLikeUnderstandingOnly(text: string): boolean {
+  const firstHeadingMatch = text.match(/^##\s+(.+?)(?:\s*\n|$)/i);
+  if (!firstHeadingMatch) return false;
+  const firstHeading = firstHeadingMatch[1].trim().toLowerCase();
+  if (firstHeading.startsWith('как я понял задачу') && !hasResultStructure(text)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Checks whether a Devin assistant turn ended with a real final answer or with
+ * a status-only / introductory block. Used by `devin-runtime.provider.js` to
+ * decide whether the run is complete, should be auto-continued, or should fail.
+ *
+ * A turn is incomplete when:
+ * - the text is missing or empty;
+ * - there were tool calls but no text after the last tool call;
+ * - the tail is an explicit promise to continue working;
+ * - the response is only the "Как я понял задачу" preamble with no result.
+ *
+ * A turn is considered complete when it contains a recognized result heading,
+ * a fenced code block, a table, a long list, or several sections.
+ */
+export function isIncompleteDevinResponse(
+  text: unknown,
+  hasToolCalls: boolean,
+  textAfterLastTool: string = '',
+): boolean {
+  if (typeof text !== 'string') return true;
+  const fullText = text.trim();
+  if (!fullText) return true;
+
+  const afterTool = String(textAfterLastTool).trim();
+  if (hasToolCalls && !afterTool) return true;
+
+  const content = hasToolCalls ? afterTool : fullText;
+
+  if (hasContinuationTail(content)) return true;
+  if (hasResultStructure(content)) return false;
+  if (looksLikeUnderstandingOnly(content)) return true;
+
+  return false;
+}
+
+/**
  * Whether a Devin CLI binary exists on this host. The site is published to
  * other people's servers (selfhost update from GitHub main), where Devin is
  * usually not installed — there the Devin tab must stay hidden instead of

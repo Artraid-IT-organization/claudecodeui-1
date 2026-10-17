@@ -150,6 +150,14 @@ rl.on('line', (line) => {
         setTimeout(() => process.exit(0), 50);
         return;
       }
+      if (process.env.DEVIN_INCOMPLETE === 'structured_answer') {
+        // Реалистичный ответ из проекта «Промпты»: разделы Логика, Готовый промпт,
+        // Возможные улучшения, Версия «Максимум» — без заголовков из старого whitelist.
+        notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '## Логика\n\n- Прежний поиск был слишком узким.\n- Новый поиск строится в два этапа.\n\n## Готовый промпт\n\nТы — исследователь рынка. Проведи глубокий поиск.\n\n## Возможные улучшения\n\n- Добавить фото волос.\n- Указать бюджет.\n\n## Версия «Максимум»\n\nОсновной вариант уже максимальный для задачи.' } } });
+        respond(msg.id, { stopReason: 'end_turn' });
+        setTimeout(() => process.exit(0), 50);
+        return;
+      }
       notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'thinking hard' } } });
       notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'LIVE-REPLY' } } });
       notify('session/update', { sessionId: sid, update: { sessionUpdate: 'usage_update', used: 100, size: 200000 } });
@@ -792,6 +800,51 @@ test('devin runtime: bypass auto-allows without touching the gateway', async () 
     const answer = capture.calls.find((c) => c.answer?.id === 900);
     assert.equal(answer?.answer.result.outcome.optionId, 'o-once', 'first allow_* picked');
   });
+});
+
+test('devin runtime: structured prompt answer is not marked incomplete', async () => {
+  await withFakeDevin(async () => {
+    process.env.DEVIN_INCOMPLETE = 'structured_answer';
+    const writer = makeWriter();
+    await devinRuntime.run('Сделай промпт для поиска паст', { cwd: '/tmp', sessionId: 'app-struct-1' }, writer, runtimeContext);
+
+    const completes = writer.messages.filter((m) => m.kind === 'complete');
+    assert.equal(completes.length, 1, 'exactly one complete');
+    assert.equal(completes[0].exitCode, 0, 'structured answer completes successfully');
+    assert.ok(!writer.messages.some((m) => m.kind === 'error'), 'no error for structured answer');
+  });
+});
+
+test('devin runtime: completeness classifier regression', async () => {
+  const { isIncompleteDevinResponse } = await import('@/shared/utils.js');
+
+  // Оригинальный случай: только «Как я понял задачу» + обещание.
+  assert.equal(isIncompleteDevinResponse('## Как я понял задачу\n\nСейчас проверю данные.', false), true);
+  assert.equal(isIncompleteDevinResponse('Сейчас поищу информацию и вернусь.', false), true);
+  assert.equal(isIncompleteDevinResponse('Ещё не готово, продолжаю работу.', false), true);
+
+  // Статус в начале, но результат ниже.
+  assert.equal(isIncompleteDevinResponse('Сейчас проверю данные.\n\n## Ответ\n\nПроверка завершена.', false), false);
+
+  // Результирующие заголовки и структура должны считаться успехом.
+  assert.equal(isIncompleteDevinResponse('## Возможные улучшения\n- пункт 1\n- пункт 2', false), false);
+  assert.equal(isIncompleteDevinResponse('## Версия «Максимум»\nТекст.', false), false);
+  assert.equal(isIncompleteDevinResponse('## Готовый промпт\n```text\nпромпт\n```', false), false);
+  assert.equal(isIncompleteDevinResponse('## Сравнение\n| a | b |\n|---|---|', false), false);
+  assert.equal(isIncompleteDevinResponse('1. один\n2. два\n3. три', false), false);
+
+  // Инструмент без последующего текста — не завершение.
+  assert.equal(isIncompleteDevinResponse('Проверяю данные.', true, ''), true);
+  assert.equal(isIncompleteDevinResponse('Проверяю данные.', true, 'Вот ответ.'), false);
+
+  // Реальный обрывный ответ из сессии sable-fragment (17.10.26) должен был
+  // считаться полноценным, а не ошибкой.
+  try {
+    const realText = await readFile('/tmp/sable-fragment-node41.txt', 'utf8');
+    assert.equal(isIncompleteDevinResponse(realText, false), false, 'real prompt answer should be complete');
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+  }
 });
 
 test('devin supervisor: ход переживает разрыв клиента, запрос разрешения доезжает до нового', async () => {
