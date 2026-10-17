@@ -160,4 +160,6 @@ export interface ChatInterfaceProps {
   onStartNewChat?: (project: Project) => void;
   onTaskClick?: (...args: unknown[]) => void;
   onShowAllTasks?: (() => void) | null;
+  /** Mobile sidebar drawer state: used to hide the chat composer while the drawer is open. */
+  isMobileSidebarOpen?: boolean;
 }

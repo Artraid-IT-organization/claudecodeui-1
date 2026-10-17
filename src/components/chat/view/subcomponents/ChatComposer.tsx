@@ -130,6 +130,8 @@ interface ChatComposerProps {
   placeholder: string;
   isTextareaExpanded: boolean;
   sendByCtrlEnter?: boolean;
+  /** Hides the composer while the mobile sidebar drawer is open. */
+  isMobileSidebarOpen?: boolean;
 }
 
 export default function ChatComposer({
@@ -197,6 +199,7 @@ export default function ChatComposer({
   placeholder,
   isTextareaExpanded,
   sendByCtrlEnter,
+  isMobileSidebarOpen,
 }: ChatComposerProps) {
   const handoffRunning = handoffStatus === 'running';
   const handoffLevel = contextLevel(tokenBudget);
@@ -389,6 +392,10 @@ export default function ChatComposer({
   // sitting "too high" with wasted space below it. max() fixes that while
   // still guaranteeing the small base (0.25rem/0.5rem/0.75rem, half the old
   // flat pb-2/sm:pb-4/md:pb-6) as a floor on devices with no safe area.
+  if (isMobileSidebarOpen) {
+    return null;
+  }
+
   return (
     <div className="chat-composer-shell relative flex-shrink-0 px-2 pb-[max(0.25rem,env(safe-area-inset-bottom,0px))] pt-0 sm:px-4 sm:pb-[max(0.5rem,env(safe-area-inset-bottom,0px))] md:px-4 md:pb-[max(0.75rem,env(safe-area-inset-bottom,0px))]">
       {!hasPendingPermissions && (

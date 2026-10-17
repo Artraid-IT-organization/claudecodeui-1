@@ -56,6 +56,7 @@ function ChatInterface({
   newSessionTrigger,
   onStartNewChat,
   onShowAllTasks,
+  isMobileSidebarOpen,
 }: ChatInterfaceProps) {
   const { tasksEnabled, isTaskMasterInstalled } = useTasksSettings();
   const { subscribe, isConnected } = useWebSocket();
@@ -807,6 +808,7 @@ function ChatInterface({
           placeholder={t('input.placeholder', { provider: selectedProviderLabel })}
           isTextareaExpanded={isTextareaExpanded}
           sendByCtrlEnter={sendByCtrlEnter}
+          isMobileSidebarOpen={isMobileSidebarOpen}
         />
         </div>
       </div>

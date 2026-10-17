@@ -81,6 +81,8 @@ export type MainContentProps = {
   onSessionRestored?: (sessionId: string) => void;
   /** Чаты, где пришёл ответ, пока их не смотрели, — метка «новый ответ» на главном экране. */
   attentionSessionIds?: ReadonlySet<string>;
+  /** Mobile sidebar drawer state: used to hide the chat composer while the drawer is open. */
+  isMobileSidebarOpen?: boolean;
 };
 
 export type MainContentHeaderProps = {

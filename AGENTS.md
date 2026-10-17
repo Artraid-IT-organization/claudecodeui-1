@@ -22,6 +22,10 @@ For every task that creates, modifies, refactors, or reviews backend code under 
 видимыми (worktree/head в штампе), но не запрещает. Запрет есть только на
 доказуемо более старый артефакт.
 
+## Mobile sidebar drawer hides the chat composer
+
+On mobile, opening the sidebar drawer (hamburger menu) overlays the chat. The composer — including the input, activity indicator, permission banner, and queued draft card — is hidden while the drawer is open (`isMobileSidebarOpen` prop) so the input does not stay visible behind the chat list. The composer reappears when the drawer closes. State is preserved because the composer state lives in `ChatInterface`; only the presentational shell unmounts.
+
 ## Живучесть соединения (`WebSocketContext`)
 
 Короткое открытие WebSocket не доказывает восстановление связи: при смене VPN провайдер может пропустить handshake и оборвать поток через 0–6 секунд. Счётчики неудач и нарастающая пауза сбрасываются только после штатного `server_ping`; два соединения подряд без него переключают вход. Для старого сервера без прикладного heartbeat устойчивость подтверждает завершившийся `HELLO_GRACE_MS`.

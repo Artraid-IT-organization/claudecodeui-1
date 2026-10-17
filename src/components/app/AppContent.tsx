@@ -800,6 +800,7 @@ function AppContentInner() {
           onSessionArchived={removeSessionFromList}
           onSessionRestored={() => void refreshProjectsSilently()}
           attentionSessionIds={attentionSessionIds}
+          isMobileSidebarOpen={isMobile && sidebarOpen}
         />
       </div>
 
