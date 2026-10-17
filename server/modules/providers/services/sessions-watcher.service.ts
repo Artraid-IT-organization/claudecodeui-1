@@ -4,14 +4,12 @@ import { promises as fsPromises } from 'node:fs';
 
 import chokidar, { type FSWatcher } from 'chokidar';
 
-import { projectsDb, sessionsDb } from '@/modules/database/index.js';
-import { chatGroupsDb } from '@/modules/database/repositories/chat-groups.js';
+import { chatGroupsDb, devinConnectionsDb, projectsDb, sessionsDb } from '@/modules/database/index.js';
 import { isSurvivorRunning } from '@/modules/providers/list/claude/survivor-runs.js';
 import { sessionSynchronizerService } from '@/modules/providers/services/session-synchronizer.service.js';
 import { broadcastRealtimeEvent, canReceiveProviderEvents, connectedClients, WS_OPEN_STATE } from '@/modules/websocket/index.js';
 import type { LLMProvider } from '@/shared/types.js';
 import { generateDisplayName } from '@/modules/projects/index.js';
-import { devinConnectionsDb } from '@/modules/database/index.js';
 import { getClaudeConfigDir, getDevinDataDir } from '@/shared/utils.js';
 
 type WatcherEventType = 'add' | 'change';
@@ -195,6 +193,7 @@ async function buildSessionUpsertedEvent(updatedProviderSessionId: string): Prom
       // возвращало бы перенесённый чат обратно в «Проекты» до перезагрузки.
       serverScope: groupedRow.server_scope ?? null,
       flagged: Boolean(groupedRow.is_flagged),
+      done: Boolean(groupedRow.is_done),
     },
     project: project
       ? {
