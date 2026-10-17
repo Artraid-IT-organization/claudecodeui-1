@@ -26,6 +26,8 @@ For every task that creates, modifies, refactors, or reviews backend code under 
 
 On mobile, opening the sidebar drawer (hamburger menu) overlays the chat. The composer — including the input, activity indicator, permission banner, and queued draft card — is hidden while the drawer is open (`isMobileSidebarOpen` prop) so the input does not stay visible behind the chat list. The composer reappears when the drawer closes. State is preserved because the composer state lives in `ChatInterface`; only the presentational shell unmounts.
 
+The composer keyboard-shortcut hint (`submitHint` in `ChatComposer.tsx`, the "Enter — …" caption between the tools row and the model menu) is not rendered at all on coarse-pointer devices: there is no Enter key to teach and the row never fits the string, so the fit-measurement could show it clipped mid-word. On precise-pointer screens it is still measured by ResizeObserver and hidden via `invisible` when it does not fit whole — do not switch that to `display:none` (oscillation) or re-gate on a viewport breakpoint (the pane width is viewport minus sidebar).
+
 ## Живучесть соединения (`WebSocketContext`)
 
 Короткое открытие WebSocket не доказывает восстановление связи: при смене VPN провайдер может пропустить handshake и оборвать поток через 0–6 секунд. Счётчики неудач и нарастающая пауза сбрасываются только после штатного `server_ping`; два соединения подряд без него переключают вход. Для старого сервера без прикладного heartbeat устойчивость подтверждает завершившийся `HELLO_GRACE_MS`.

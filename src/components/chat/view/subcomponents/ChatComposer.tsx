@@ -659,7 +659,14 @@ export default function ChatComposer({
                 glyph mangling the hint ("странный символ слева"), not as a
                 scrollable row. xl reuses the exact width the original
                 weekly-usage-indicator change already verified clean
-                (1280-1440px) instead of inventing a new cutoff. */}
+                (1280-1440px) instead of inventing a new cutoff.
+
+                On touch-keyboard devices (pointer: coarse) the hint is not
+                rendered at all: there is no Enter key to teach, the row
+                never has room for the whole string, and the fit-measurement
+                can transiently show it clipped mid-word - it rendered as a
+                stray "Entе" fragment next to the model button on a phone. */}
+            {!touchKeyboard && (
             <div
               ref={hintRef}
               aria-hidden={!hintFits}
@@ -669,6 +676,7 @@ export default function ChatComposer({
             >
               {submitHint}
             </div>
+            )}
 
             <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
             <ComposerModelMenu
