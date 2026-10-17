@@ -602,6 +602,19 @@ const addSessionFlagColumn = (db: Database): void => {
 };
 
 /**
+ * Добавляет `is_done` — галочку «сделано». Приглушает чат в списке,
+ * взаимоисключает флажок: чат может быть либо с ярлыком, либо с галочкой,
+ * либо без метки.
+ */
+const addSessionDoneColumn = (db: Database): void => {
+  if (!tableExists(db, 'sessions')) {
+    return;
+  }
+  const columnNames = getTableInfo(db, 'sessions').map((column) => column.name);
+  addColumnToTableIfNotExists(db, 'sessions', columnNames, 'is_done', 'INTEGER NOT NULL DEFAULT 0');
+};
+
+/**
  * Атрибуция Devin-чатов (Connection Layer): кто из веб-пользователей
  * инициировал сессию и через какой корпоративный канал она идёт. Обе колонки
  * nullable — существующие строки авторства не знают, а привязка к каналу
@@ -749,6 +762,7 @@ export const runMigrations = (db: Database) => {
     addSessionAttributionColumns(db);
     addServerScopeColumns(db);
     addSessionFlagColumn(db);
+    addSessionDoneColumn(db);
     addSessionAttributionColumns(db);
     ensureProjectsForSessionPaths(db);
 

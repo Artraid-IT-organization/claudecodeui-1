@@ -424,10 +424,10 @@ export const sessionsService = {
   },
 
   /**
-   * Вешает или снимает ярлык-флажок на чате. Только метка в базе: файл
-   * переписки и порядок чатов не меняются.
+   * Вешает, снимает или переключает метку чата ('none' | 'flag' | 'done').
+   * Только метка в базе: файл переписки и порядок чатов не меняются.
    */
-  setSessionFlagged(sessionId: string, flagged: boolean): { flagged: boolean } {
+  setSessionMark(sessionId: string, mark: 'none' | 'flag' | 'done'): { mark: 'none' | 'flag' | 'done' } {
     const session = sessionsDb.getSessionById(sessionId);
     if (!session) {
       throw new AppError(`Session "${sessionId}" was not found.`, {
@@ -437,8 +437,8 @@ export const sessionsService = {
     }
     assertSessionReadable(session);
 
-    sessionsDb.setSessionFlagged(sessionId, flagged);
-    return { flagged };
+    sessionsDb.setSessionMark(sessionId, mark);
+    return { mark };
   },
 
   /**

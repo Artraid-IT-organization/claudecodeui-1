@@ -358,11 +358,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ serverScope }),
     }),
-  // Вешает (true) или снимает (false) ярлык-флажок на чате.
-  setSessionFlagged: (sessionId, flagged) =>
-    authenticatedFetch(`/api/providers/sessions/${encodeURIComponent(sessionId)}/flag`, {
+  // Устанавливает метку чата: 'none', 'flag' или 'done'.
+  setSessionMark: (sessionId, mark) =>
+    authenticatedFetch(`/api/providers/sessions/${encodeURIComponent(sessionId)}/mark`, {
       method: 'POST',
-      body: JSON.stringify({ flagged }),
+      body: JSON.stringify({ mark }),
     }),
   // Clusters this project's currently ungrouped sessions by topic via one
   // LLM call. Assignments land through the usual session_upserted websocket

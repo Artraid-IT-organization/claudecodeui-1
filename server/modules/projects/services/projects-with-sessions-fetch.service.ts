@@ -27,6 +27,8 @@ type SessionSummary = {
   serverScope: ServerScope | null;
   /** Ярлык-флажок на чате. */
   flagged: boolean;
+  /** Галочка «сделано» на чате. */
+  done: boolean;
 };
 
 type SessionRepositoryRow = {
@@ -39,6 +41,7 @@ type SessionRepositoryRow = {
   group_label?: string | null;
   server_scope?: ServerScope | null;
   is_flagged?: number | null;
+  is_done?: number | null;
 };
 
 export type ProjectListItem = {
@@ -163,6 +166,7 @@ function mapSessionRowToSummary(row: SessionRepositoryRow): SessionSummary {
     groupLabel: row.group_label ?? null,
     serverScope: row.server_scope ?? null,
     flagged: Boolean(row.is_flagged),
+    done: Boolean(row.is_done),
   };
 }
 

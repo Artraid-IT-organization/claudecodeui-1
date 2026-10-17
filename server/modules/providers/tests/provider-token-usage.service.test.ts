@@ -26,6 +26,7 @@ function createSessionRow(overrides: Record<string, unknown> = {}) {
     isArchived: 0,
     server_scope: 'main' as const,
     is_flagged: 0,
+    is_done: 0,
     account_dir: null,
     initiated_by_user_id: null,
     devin_connection_id: null,
