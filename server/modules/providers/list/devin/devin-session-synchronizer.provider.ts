@@ -408,6 +408,7 @@ export class DevinSessionSynchronizer implements IProviderSessionSynchronizer {
         WHERE session_id = ?
           AND json_extract(chat_message, '$.role') = 'user'
           AND instr(chat_message, 'onversation to summarize') = 0
+          AND instr(chat_message, 'cc2-auto-continue') = 0
         GROUP BY chat_message
         ORDER BY first_seen
         LIMIT 3

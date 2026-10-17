@@ -29,6 +29,7 @@ import {
   createCompleteMessage,
   createNormalizedMessage,
   DEVIN_DEFAULT_MODEL,
+  DEVIN_AUTO_CONTINUE_PROMPT,
   getDevinDatabasePath,
   isAllowedDevinModel,
   resolveDevinCliCommand,
@@ -100,6 +101,12 @@ const LOCK_ZOMBIE_RETRIES = 3;
 const HANDSHAKE_TIMEOUT_MS = 60_000;
 /** Devin logs progress to stderr (INFO lines) — keep the tail for error text. */
 const STDERR_TAIL_BYTES = 4_000;
+/**
+ * Сколько раз ход продолжается служебным prompt после восстановимого обрыва
+ * (статусный финал, max_tokens). Дальше — видимая ошибка, иначе модель могла
+ * бы уйти в цикл продолжений (предел как у Whale/Kimi: 2).
+ */
+const MAX_AUTO_CONTINUES = 2;
 
 function isDevinPidAlive(pid) {
   try {
@@ -1218,44 +1225,78 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
         text: 'thinking',
       }));
 
-      const promptResult = connection.call('session/prompt', {
-        sessionId: run.devinSessionId,
-        prompt: [{ type: 'text', text: promptText }],
-      });
-      // Кадр prompt уже записан в сокет супервизора: с этого момента ход
-      // переживает перезапуск сайта (promptInFlight не даёт супервизору убрать
-      // агента, новый сервер переподключится и дочитает ответ).
-      options.onPromptAnchored?.();
-      const result = await promptResult;
+      // Ход может понадобиться продолжить: ACP v1 умеет это только новым
+      // session/prompt, и протокол записывает его репликой пользователя.
+      // Чтобы она не выглядела сообщением человека, текст начинается с метки
+      // DEVIN_AUTO_CONTINUE_TAG — её отфильтровывают все места, где история
+      // Devin превращается в нашу ленту (см. utils.ts). Человек видит лишь
+      // короткий статус «продолжаю автоматически».
+      let result = null;
+      let stopReason = null;
+      for (let attempt = 0; ; attempt += 1) {
+        const isContinuation = attempt > 0;
+        const promptResult = connection.call('session/prompt', {
+          sessionId: run.devinSessionId,
+          prompt: [{ type: 'text', text: isContinuation ? DEVIN_AUTO_CONTINUE_PROMPT : promptText }],
+        });
+        // Кадр prompt уже записан в сокет супервизора: с этого момента ход
+        // переживает перезапуск сайта (promptInFlight не даёт супервизору
+        // убрать агента, новый сервер переподключится и дочитает ответ).
+        if (!isContinuation) {
+          options.onPromptAnchored?.();
+        }
+        result = await promptResult;
+
+        if (run.aborted) {
+          if (run.usageTimer) {
+            clearInterval(run.usageTimer);
+            run.usageTimer = null;
+          }
+          finish(0, true);
+          resolve();
+          return;
+        }
+
+        stopReason = result?.stopReason;
+        const incomplete = stopReason === 'end_turn' && isIncompleteDevinResponse(
+          run.turnAssistantText,
+          run.turnHasToolCalls,
+          run.turnTextAfterLastTool,
+        );
+        // Восстановимые обрывы: статусный финал и усечение по лимиту. Отказ,
+        // отмену и неизвестные причины продолжать нельзя — сразу видимый сбой.
+        const recoverable = incomplete || stopReason === 'max_tokens';
+        if (!recoverable || attempt >= MAX_AUTO_CONTINUES) {
+          if (incomplete) {
+            hardFail('Devin завершил ход без итогового ответа. Запрос сохранён, но этот ход отмечен ошибкой — система не считает промежуточный текст результатом.');
+            return;
+          }
+          if (stopReason === 'max_tokens') {
+            hardFail('Devin достиг лимита ответа до подтверждённого завершения задачи. Частичный текст сохранён, ход отмечен ошибкой.');
+            return;
+          }
+          if (stopReason !== 'end_turn') {
+            hardFail(`Devin остановил ход без подтверждённого результата (причина: ${stopReason || 'не указана'}). Запрос и частичный текст сохранены.`);
+            return;
+          }
+          break;
+        }
+
+        sendMessage(ws, createNormalizedMessage({
+          provider: 'devin',
+          sessionId: sessionId || run.devinSessionId || null,
+          kind: 'status',
+          text: 'Ответ оборвался на промежуточном шаге — продолжаю автоматически.',
+        }));
+        // Следующую попытку судим по её собственному тексту.
+        run.turnAssistantText = '';
+        run.turnTextAfterLastTool = '';
+        run.turnHasToolCalls = false;
+      }
 
       if (run.usageTimer) {
         clearInterval(run.usageTimer);
         run.usageTimer = null;
-      }
-
-      if (run.aborted) {
-        finish(0, true);
-        resolve();
-        return;
-      }
-
-      const stopReason = result?.stopReason;
-      const incomplete = stopReason === 'end_turn' && isIncompleteDevinResponse(
-        run.turnAssistantText,
-        run.turnHasToolCalls,
-        run.turnTextAfterLastTool,
-      );
-      if (incomplete) {
-        hardFail('Devin завершил ход без итогового ответа. Запрос сохранён, но этот ход отмечен ошибкой — система не считает промежуточный текст результатом.');
-        return;
-      }
-      if (stopReason === 'max_tokens') {
-        hardFail('Devin достиг лимита ответа до подтверждённого завершения задачи. Частичный текст сохранён, ход отмечен ошибкой.');
-        return;
-      }
-      if (stopReason !== 'end_turn') {
-        hardFail(`Devin остановил ход без подтверждённого результата (причина: ${stopReason || 'не указана'}). Запрос и частичный текст сохранены.`);
-        return;
       }
 
       // Финальный замер — последний ответ мог дописаться в базу только что.

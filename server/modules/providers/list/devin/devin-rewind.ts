@@ -29,6 +29,7 @@ import { parseFilesInputTag, parseImagesInputTag } from '@/shared/image-attachme
 import {
   AppError,
   getDevinDatabasePath,
+  isDevinAutoContinueText,
   readJsonRecord,
   readObjectRecord,
   readOptionalString,
@@ -100,7 +101,11 @@ function devinUserText(chatMessageJson: string): string | null {
   if (!message || readOptionalString(message.role) !== 'user') return null;
   const metadata = readObjectRecord(message.metadata);
   if (metadata?.is_user_input !== true) return null;
-  return cleanUserText(message.content);
+  const text = cleanUserText(message.content);
+  // Служебное автопродолжение нельзя выбрать целью возврата — это не реплика
+  // человека, и «вернуться» к ней не имеет смысла.
+  if (text && isDevinAutoContinueText(text)) return null;
+  return text;
 }
 
 /** Лента кладёт в номер сообщения номер узла (`devin_<nodeId>`). */

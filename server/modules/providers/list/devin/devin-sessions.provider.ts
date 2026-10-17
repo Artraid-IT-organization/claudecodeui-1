@@ -4,7 +4,6 @@ import Database from 'better-sqlite3';
 
 import { devinConnectionsDb, sessionsDb } from '@/modules/database/index.js';
 import { parseFilesInputTag, parseImagesInputTag } from '@/shared/image-attachments.js';
-
 import type { IProviderSessions } from '@/shared/interfaces.js';
 import type {
   AnyRecord,
@@ -16,6 +15,7 @@ import {
   createNormalizedMessage,
   generateMessageId,
   getDevinDatabasePath,
+  isDevinAutoContinueText,
   normalizeProviderTimestamp,
   readJsonRecord,
   readObjectRecord,
@@ -388,6 +388,11 @@ export class DevinSessionsProvider implements IProviderSessions {
 
       if (role === 'user' && metadata?.is_user_input) {
         const { text, images, files } = readUserMessageContent(message.content);
+        // Служебное автопродолжение (см. DEVIN_AUTO_CONTINUE_TAG) — не реплика
+        // человека: в ленте истории её не показываем.
+        if (isDevinAutoContinueText(text)) {
+          continue;
+        }
         if (text || images.length > 0 || files.length > 0) {
           normalized.push(createNormalizedMessage({
             id: `devin_${row.node_id}`,

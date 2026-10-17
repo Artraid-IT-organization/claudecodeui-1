@@ -13,6 +13,7 @@ import Database from 'better-sqlite3';
 
 import {
   getDevinDatabasePath,
+  isDevinAutoContinueText,
   readJsonRecord,
   readObjectRecord,
   readOptionalString,
@@ -155,7 +156,9 @@ export function fullDevinConversation(
       time: Number.isFinite(parsedAt)
         ? parsedAt
         : (typeof row.created_at === 'number' ? row.created_at * 1000 : 0),
-      isUser: role === 'user',
+      // Служебное автопродолжение — не ход человека: оно не должно ни
+      // «засвидетельствовать» снимки, ни становиться последним ходом.
+      isUser: role === 'user' && !isDevinAutoContinueText(content),
       isAgentWork: role === 'assistant' || role === 'tool',
       isSummarizeMarker: role === 'user'
         && /conversation to summarize:/i.test(content),

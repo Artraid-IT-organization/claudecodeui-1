@@ -1222,6 +1222,33 @@ export function isAllowedDevinModel(model: unknown): boolean {
 export const DEVIN_DEFAULT_MODEL = 'swe-2-high';
 
 /**
+ * Метка служебного автопродолжения Devin-хода. ACP v1 умеет продолжить
+ * агента только через session/prompt, который записывается как реплика
+ * пользователя: чтобы такая реплика не выглядела сообщением человека, её
+ * текст начинается с HTML-комментария-метки (в markdown-ленте он сам по себе
+ * невидим) — а все места, превращающие историю Devin в нашу переписку,
+ * такие реплики фильтруют: `devin-sessions.provider` (лента истории),
+ * `devin-transcript` (экспорт «Продолжить в новом чате»), `devin-chain`
+ * (учёт ходов человека), `devin-rewind` (цель возврата), синхронизатор
+ * заголовков.
+ */
+export const DEVIN_AUTO_CONTINUE_TAG = '<!--cc2-auto-continue-->';
+
+/**
+ * Текст самого продолжения: велит агенту доделать исходную задачу, а не
+ * пересказывать понимание. Потребитель — `devin-runtime.provider.js`.
+ */
+export const DEVIN_AUTO_CONTINUE_PROMPT = `${DEVIN_AUTO_CONTINUE_TAG}\nПродолжи выполнение исходной задачи с того места, где остановился. Не пересказывай понимание задачи — сразу делай объявленную работу и доведи её до итогового результата, уточняющего вопроса или явной ошибки.`;
+
+/**
+ * True, если текст реплики — служебное автопродолжение, а не ввод человека.
+ * `includes`, а не `startsWith`: перед меткой могут стоять обёртки вложений.
+ */
+export function isDevinAutoContinueText(text: unknown): boolean {
+  return typeof text === 'string' && text.includes(DEVIN_AUTO_CONTINUE_TAG);
+}
+
+/**
  * Whether a Devin CLI binary exists on this host. The site is published to
  * other people's servers (selfhost update from GitHub main), where Devin is
  * usually not installed — there the Devin tab must stay hidden instead of

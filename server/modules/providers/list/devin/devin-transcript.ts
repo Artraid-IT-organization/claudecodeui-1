@@ -24,7 +24,7 @@ import path from 'node:path';
 
 import Database from 'better-sqlite3';
 
-import { getDevinDatabasePath, readJsonRecord, readObjectRecord, readOptionalString } from '@/shared/utils.js';
+import { getDevinDatabasePath, isDevinAutoContinueText, readJsonRecord, readObjectRecord, readOptionalString } from '@/shared/utils.js';
 
 import { fullDevinConversation } from './devin-chain.js';
 
@@ -76,6 +76,9 @@ function nodeToRecords(
 
   if (role === 'user') {
     if (metadata?.is_user_input !== true) return [];
+    // Автопродолжение — служебная реплика: в экспорт беседы (и дайджест
+    // нового чата) она не входит, человек её не писал.
+    if (isDevinAutoContinueText(readOptionalString(message.content))) return [];
     return [{ ...base, type: 'user', message: { role: 'user', content: message.content } }];
   }
 

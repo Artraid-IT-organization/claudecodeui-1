@@ -39,6 +39,7 @@ const notify = (method, params) => process.stdout.write(JSON.stringify({ jsonrpc
 const request = (id, method, params) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\\n');
 
 let pendingPrompt = null; // msg.id of session/prompt waiting on permission
+let promptCount = 0; // сколько session/prompt получил этот процесс (для сценариев продолжения)
 const finishPrompt = () => {
   if (!pendingPrompt) return;
   const { id, sid } = pendingPrompt;
@@ -86,6 +87,7 @@ rl.on('line', (line) => {
     case 'session/prompt': {
       if (process.env.DEVIN_HANG === '1') return; // never answer → abort test
       const sid = msg.params.sessionId;
+      promptCount += 1;
       // Подписка = credentials.toml под XDG_DATA_HOME процесса; «limited» — исчерпана.
       const credPath = require('node:path').join(process.env.XDG_DATA_HOME || '', 'devin', 'credentials.toml');
       const cred = fs.existsSync(credPath) ? fs.readFileSync(credPath, 'utf8') : '';
@@ -119,6 +121,18 @@ rl.on('line', (line) => {
       }
       if (process.env.DEVIN_INCOMPLETE === 'understanding') {
         notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '## Как я понял задачу\\n\\nСейчас проверю данные.' } } });
+        respond(msg.id, { stopReason: 'end_turn' });
+        setTimeout(() => process.exit(0), 50);
+        return;
+      }
+      if (process.env.DEVIN_INCOMPLETE === 'recover') {
+        // Первый prompt обрывается статусом; каждое служебное продолжение
+        // доводит ход до результата.
+        if (promptCount === 1) {
+          notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '## Как я понял задачу\\n\\nСейчас проверю данные.' } } });
+        } else {
+          notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '## Ответ\\n\\nПроверка завершена, результат готов.' } } });
+        }
         respond(msg.id, { stopReason: 'end_turn' });
         setTimeout(() => process.exit(0), 50);
         return;
@@ -254,8 +268,8 @@ test('devin runtime: new session — handshake, session_created, streamed deltas
   });
 });
 
-test('devin runtime: incomplete terminal output is a visible failure without a synthetic user prompt', async () => {
-  for (const scenario of ['understanding', 'tool_only', 'max_tokens', 'refusal']) {
+test('devin runtime: recoverable stalls auto-continue via a marked service prompt, then fail visibly', async () => {
+  for (const scenario of ['understanding', 'tool_only', 'max_tokens']) {
     await withFakeDevin(async (tempRoot) => {
       process.env.DEVIN_INCOMPLETE = scenario;
       const writer = makeWriter();
@@ -269,14 +283,74 @@ test('devin runtime: incomplete terminal output is a visible failure without a s
 
       const capture = JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8'));
       const prompts = capture.calls.filter((call) => call.method === 'session/prompt');
-      assert.equal(prompts.length, 1, `${scenario}: only the original prompt is sent`);
+      // Исходный запрос + не более двух служебных продолжений с меткой.
+      assert.equal(prompts.length, 3, `${scenario}: original prompt plus capped auto-continues`);
       assert.equal(prompts[0].params.prompt[0].text, 'Original user request');
+      for (const continuation of prompts.slice(1)) {
+        assert.ok(
+          continuation.params.prompt[0].text.includes('cc2-auto-continue'),
+          `${scenario}: continuation prompt carries the service marker`,
+        );
+      }
+      assert.ok(
+        writer.messages.some((message) => message.kind === 'status' && /продолжаю автоматически/i.test(message.text || '')),
+        `${scenario}: a subtle auto-continue status is shown`,
+      );
       assert.ok(writer.messages.some((message) => message.kind === 'error'), `${scenario}: error is visible`);
       const completes = writer.messages.filter((message) => message.kind === 'complete');
       assert.equal(completes.length, 1, `${scenario}: exactly one terminal complete`);
-      assert.equal(completes[0].exitCode, 1, `${scenario}: incomplete output is not success`);
+      assert.equal(completes[0].exitCode, 1, `${scenario}: still-incomplete output is not success`);
     });
   }
+});
+
+test('devin runtime: refusal fails without any continuation prompt', async () => {
+  await withFakeDevin(async (tempRoot) => {
+    process.env.DEVIN_INCOMPLETE = 'refusal';
+    const writer = makeWriter();
+
+    await assert.rejects(() => devinRuntime.run(
+      'Original user request',
+      { cwd: tempRoot, sessionId: 'app-incomplete-refusal' },
+      writer,
+      runtimeContext,
+    ));
+
+    const capture = JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8'));
+    const prompts = capture.calls.filter((call) => call.method === 'session/prompt');
+    assert.equal(prompts.length, 1, 'refusal: only the original prompt is sent');
+    assert.ok(writer.messages.some((message) => message.kind === 'error'));
+    const completes = writer.messages.filter((message) => message.kind === 'complete');
+    assert.equal(completes.length, 1);
+    assert.equal(completes[0].exitCode, 1);
+  });
+});
+
+test('devin runtime: a stalled first answer recovers via auto-continue without a visible user message', async () => {
+  await withFakeDevin(async (tempRoot) => {
+    process.env.DEVIN_INCOMPLETE = 'recover';
+    const writer = makeWriter();
+
+    await devinRuntime.run(
+      'Original user request',
+      { cwd: tempRoot, sessionId: 'app-recover' },
+      writer,
+      runtimeContext,
+    );
+
+    const capture = JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8'));
+    const prompts = capture.calls.filter((call) => call.method === 'session/prompt');
+    assert.equal(prompts.length, 2, 'one continuation was needed');
+    assert.equal(prompts[0].params.prompt[0].text, 'Original user request');
+    assert.ok(prompts[1].params.prompt[0].text.includes('cc2-auto-continue'));
+    // В ленте нет реплики от имени человека — только статус и финальный текст.
+    assert.ok(!writer.messages.some((message) => message.role === 'user' && /продолж/i.test(message.content || '')));
+    assert.ok(writer.messages.some((message) => message.kind === 'status' && /продолжаю автоматически/i.test(message.text || '')));
+    assert.ok(!writer.messages.some((message) => message.kind === 'error'));
+    const completes = writer.messages.filter((message) => message.kind === 'complete');
+    assert.equal(completes.length, 1);
+    assert.equal(completes[0].exitCode, 0);
+  });
 });
 
 test('devin runtime: a status followed by a result remains successful', async () => {
