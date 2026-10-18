@@ -17,7 +17,7 @@ import test from 'node:test';
 
 import Database from 'better-sqlite3';
 
-import { chatMessageQueueDb, closeConnection, initializeDatabase, sessionsDb } from '@/modules/database/index.js';
+import { chatMessageQueueDb, closeConnection, devinConnectionsDb, initializeDatabase, sessionsDb } from '@/modules/database/index.js';
 import { exportDevinTranscript } from '@/modules/providers/index.js';
 import { sessionRewindService } from '@/modules/providers/services/session-rewind.service.js';
 
@@ -214,6 +214,37 @@ test('очередь снимается, её тексты возвращают�
     assert.deepEqual(again.queuedTexts, ['и ещё вот это']);
     assert.equal(again.removedLines, 0);
     assert.equal(again.backupPath, first.backupPath);
+  });
+});
+
+test('чат на втором канале: беседа ищется в sessions.db его xdg_data_home, не в машинной', async () => {
+  await withFixture(async (dir, devinDbPath) => {
+    // Канал со своим XDG_DATA_HOME и своей sessions.db (второй аккаунт Devin).
+    const connXdg = path.join(dir, 'conn-xdg');
+    const connDbDir = path.join(connXdg, 'devin', 'cli');
+    await mkdir(connDbDir, { recursive: true });
+    const connDbPath = path.join(connDbDir, 'sessions.db');
+    seedDevinDb(connDbPath);
+    const conn = devinConnectionsDb.create({ name: 'conn2', xdgDataHome: connXdg });
+    sessionsDb.setSessionDevinConnection(APP_SESSION_ID, conn.id);
+
+    // Без привязки возврат упирался в машинную базу (её здесь нет вовсе) —
+    // «Хранилище бесед Devin недоступно», а при пустой машинной — «Беседы нет у Devin».
+    const result = await sessionRewindService.rewind({
+      sessionId: APP_SESSION_ID,
+      messageId: 'devin_4',
+      text: null,
+    });
+    assert.equal(result.text, 'Теперь  всем\nразошли');
+    assert.deepEqual(liveUserTexts(connDbPath), ['Сделай отчёт']);
+    // Машинная база не тронута — откатили именно цепочку канала.
+    assert.deepEqual(liveUserTexts(devinDbPath), ['Сделай отчёт', 'Теперь  всем\nразошли', 'Спасибо']);
+
+    // Тот же канал и у выгрузки «Продолжить в новом чате»: после возврата
+    // в беседе осталась первая реплика и её ответ.
+    const outPath = path.join(dir, 'export-conn.jsonl');
+    const written = await exportDevinTranscript(PROVIDER_SESSION_ID, outPath, connXdg);
+    assert.equal(written, 2);
   });
 });
 

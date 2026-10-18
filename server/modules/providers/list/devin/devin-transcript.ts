@@ -128,8 +128,13 @@ function nodeToRecords(
  * (перезаписывает), возвращает число записанных записей. Пустая беседа — 0,
  * файл при этом всё равно создаётся пустым.
  */
-export async function exportDevinTranscript(providerSessionId: string, outPath: string): Promise<number> {
-  const db = new Database(getDevinDatabasePath(), { readonly: true, fileMustExist: true });
+export async function exportDevinTranscript(
+  providerSessionId: string,
+  outPath: string,
+  /** XDG_DATA_HOME канала чата (devin_connections.xdg_data_home) — у второго аккаунта своя sessions.db. */
+  xdgDataHome?: string | null,
+): Promise<number> {
+  const db = new Database(getDevinDatabasePath(xdgDataHome ?? null), { readonly: true, fileMustExist: true });
   let lines: string[] = [];
   try {
     for (const row of fullDevinConversation(db, providerSessionId)) {

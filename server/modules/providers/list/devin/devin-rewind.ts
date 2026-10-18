@@ -279,8 +279,10 @@ export async function rewindDevinSession(input: {
   providerSessionId: string;
   messageId: string | null;
   text: string | null;
+  /** XDG_DATA_HOME канала чата (devin_connections.xdg_data_home) — у второго аккаунта своя sessions.db. */
+  xdgDataHome?: string | null;
 }): Promise<DevinRewindResult> {
-  const dbPath = getDevinDatabasePath();
+  const dbPath = getDevinDatabasePath(input.xdgDataHome ?? null);
   if (!fsSync.existsSync(dbPath)) {
     throw new AppError('Хранилище бесед Devin недоступно.', { code: 'REWIND_NO_TRANSCRIPT', statusCode: 404 });
   }
