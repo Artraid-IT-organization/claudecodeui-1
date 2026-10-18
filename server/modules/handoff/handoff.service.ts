@@ -55,7 +55,7 @@ import path from 'node:path';
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
 
-import { sessionsDb } from '@/modules/database/index.js';
+import { devinConnectionsDb, sessionsDb } from '@/modules/database/index.js';
 import {
   askDevinOnce,
   codexHome,
@@ -734,7 +734,15 @@ async function resolveSource(sessionId: string): Promise<HandoffSource> {
     const transcriptPath = path.join(accountDir, 'handoffs', `devin-${providerSessionId}.jsonl`);
     let exported = 0;
     try {
-      exported = await exportDevinTranscript(providerSessionId, transcriptPath);
+      exported = await exportDevinTranscript(
+        providerSessionId,
+        transcriptPath,
+        // sessions.db канала чата (Connection Layer): у второго аккаунта своя
+        // база — без привязки выгрузка видела пустую беседу.
+        row.devin_connection_id != null
+          ? devinConnectionsDb.getById(row.devin_connection_id)?.xdg_data_home ?? null
+          : null,
+      );
     } catch (error) {
       console.error('[handoff] выгрузка беседы Devin не удалась:', error);
       throw new HandoffError(500, 'не удалось прочитать беседу Devin');

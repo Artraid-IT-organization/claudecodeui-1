@@ -82,6 +82,17 @@ const STDERR_TAIL_BYTES = 4_000;
  * бы уйти в цикл продолжений (предел как у Whale/Kimi: 2).
  */
 const MAX_AUTO_CONTINUES = 2;
+const ACP_EVENT_QUIET_MS = 75;
+const ACP_EVENT_DRAIN_MAX_MS = 500;
+
+async function waitForAcpEventDrain(run) {
+  const deadline = Date.now() + ACP_EVENT_DRAIN_MAX_MS;
+  while (Date.now() < deadline) {
+    const quietFor = Date.now() - (run.lastAcpUpdateAt || 0);
+    if (quietFor >= ACP_EVENT_QUIET_MS) return;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(ACP_EVENT_QUIET_MS - quietFor, deadline - Date.now())));
+  }
+}
 
 function isDevinPidAlive(pid) {
   try {
@@ -938,6 +949,7 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
         }
         const params = msg.params || {};
         const update = params.update || {};
+        run.lastAcpUpdateAt = Date.now();
         // Список доступных каналу моделей приходит и событием (после
         // session/set_config_option) — держим его свежим.
         if (update.sessionUpdate === 'config_option_update') {
@@ -982,7 +994,7 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
       },
 
       onClose: () => {
-        if (run.finishRun) {
+        if (run.finishRun || run.promptResponseReceived) {
           return;
         }
         const tail = connection.getStderrTail();
@@ -1210,6 +1222,7 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
       let stopReason = null;
       for (let attempt = 0; ; attempt += 1) {
         const isContinuation = attempt > 0;
+        run.promptResponseReceived = false;
         const promptResult = connection.call('session/prompt', {
           sessionId: run.devinSessionId,
           prompt: [{ type: 'text', text: isContinuation ? DEVIN_AUTO_CONTINUE_PROMPT : promptText }],
@@ -1221,6 +1234,8 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
           options.onPromptAnchored?.();
         }
         result = await promptResult;
+        run.promptResponseReceived = true;
+        await waitForAcpEventDrain(run);
 
         if (run.aborted) {
           if (run.usageTimer) {

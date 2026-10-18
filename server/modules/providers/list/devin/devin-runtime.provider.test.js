@@ -46,7 +46,7 @@ const finishPrompt = () => {
   pendingPrompt = null;
   notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'AFTER-PERMISSION' } } });
   respond(id, { stopReason: 'end_turn' });
-  setTimeout(() => process.exit(0), 50);
+  setTimeout(() => process.exit(0), 1000);
 };
 
 rl.on('line', (line) => {
@@ -122,7 +122,7 @@ rl.on('line', (line) => {
       if (process.env.DEVIN_INCOMPLETE === 'understanding') {
         notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '## Как я понял задачу\\n\\nСейчас проверю данные.' } } });
         respond(msg.id, { stopReason: 'end_turn' });
-        setTimeout(() => process.exit(0), 50);
+        setTimeout(() => process.exit(0), 1000);
         return;
       }
       if (process.env.DEVIN_INCOMPLETE === 'recover') {
@@ -134,28 +134,35 @@ rl.on('line', (line) => {
           notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '## Ответ\\n\\nПроверка завершена, результат готов.' } } });
         }
         respond(msg.id, { stopReason: 'end_turn' });
-        setTimeout(() => process.exit(0), 50);
+        setTimeout(() => process.exit(0), 1000);
         return;
       }
       if (process.env.DEVIN_INCOMPLETE === 'tool_only') {
         notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Проверяю данные.' } } });
         notify('session/update', { sessionId: sid, update: { sessionUpdate: 'tool_call', toolCallId: 'tc-incomplete', title: 'Read', kind: 'read' } });
         respond(msg.id, { stopReason: 'end_turn' });
-        setTimeout(() => process.exit(0), 50);
+        setTimeout(() => process.exit(0), 1000);
         return;
       }
       if (process.env.DEVIN_INCOMPLETE === 'complete_after_status') {
         notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Сейчас проверю данные.\\n\\n## Ответ\\n\\nПроверка завершена, результат готов.' } } });
         respond(msg.id, { stopReason: 'end_turn' });
-        setTimeout(() => process.exit(0), 50);
+        setTimeout(() => process.exit(0), 1000);
+        return;
+      }
+      if (process.env.DEVIN_INCOMPLETE === 'late_final_chunk') {
+        notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '## Как я понял задачу\\n\\nСейчас проверю данные.' } } });
+        respond(msg.id, { stopReason: 'end_turn' });
+        setTimeout(() => notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '\\n\\n## Ответ\\n\\nПроверка завершена, результат готов.' } } }), 25);
+        setTimeout(() => process.exit(0), 150);
         return;
       }
       if (process.env.DEVIN_INCOMPLETE === 'structured_answer') {
         // Реалистичный ответ из проекта «Промпты»: разделы Логика, Готовый промпт,
         // Возможные улучшения, Версия «Максимум» — без заголовков из старого whitelist.
-        notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '## Логика\n\n- Прежний поиск был слишком узким.\n- Новый поиск строится в два этапа.\n\n## Готовый промпт\n\nТы — исследователь рынка. Проведи глубокий поиск.\n\n## Возможные улучшения\n\n- Добавить фото волос.\n- Указать бюджет.\n\n## Версия «Максимум»\n\nОсновной вариант уже максимальный для задачи.' } } });
+        notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '## Логика\\n\\n- Прежний поиск был слишком узким.\\n- Новый поиск строится в два этапа.\\n\\n## Готовый промпт\\n\\nТы — исследователь рынка. Проведи глубокий поиск.\\n\\n## Возможные улучшения\\n\\n- Добавить фото волос.\\n- Указать бюджет.\\n\\n## Версия «Максимум»\\n\\nОсновной вариант уже максимальный для задачи.' } } });
         respond(msg.id, { stopReason: 'end_turn' });
-        setTimeout(() => process.exit(0), 50);
+        setTimeout(() => process.exit(0), 1000);
         return;
       }
       notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'thinking hard' } } });
@@ -165,7 +172,7 @@ rl.on('line', (line) => {
         ? 'max_tokens'
         : process.env.DEVIN_INCOMPLETE === 'refusal' ? 'refusal' : 'end_turn';
       respond(msg.id, { stopReason, usage: { totalTokens: 42, inputTokens: 30, outputTokens: 12 } });
-      setTimeout(() => process.exit(0), 50);
+      setTimeout(() => process.exit(0), 1000);
       break;
     }
     default:
@@ -310,6 +317,29 @@ test('devin runtime: recoverable stalls auto-continue via a marked service promp
       assert.equal(completes[0].exitCode, 1, `${scenario}: still-incomplete output is not success`);
     });
   }
+});
+
+test('devin runtime: waits for a final chunk delivered just after session/prompt resolves', async () => {
+  await withFakeDevin(async (tempRoot) => {
+    process.env.DEVIN_INCOMPLETE = 'late_final_chunk';
+    const writer = makeWriter();
+
+    await devinRuntime.run(
+      'Original user request',
+      { cwd: tempRoot, sessionId: 'app-late-final' },
+      writer,
+      runtimeContext,
+    );
+
+    const capture = JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8'));
+    const prompts = capture.calls.filter((call) => call.method === 'session/prompt');
+    assert.equal(prompts.length, 1, 'late final output must not trigger a synthetic continuation');
+    assert.ok(writer.messages.some((message) => message.kind === 'stream_delta' && /Проверка завершена/.test(message.content || '')));
+    assert.ok(!writer.messages.some((message) => message.kind === 'error'));
+    const completes = writer.messages.filter((message) => message.kind === 'complete');
+    assert.equal(completes.length, 1);
+    assert.equal(completes[0].exitCode, 0);
+  });
 });
 
 test('devin runtime: refusal fails without any continuation prompt', async () => {
@@ -821,10 +851,13 @@ test('devin runtime: completeness classifier regression', async () => {
   // Оригинальный случай: только «Как я понял задачу» + обещание.
   assert.equal(isIncompleteDevinResponse('## Как я понял задачу\n\nСейчас проверю данные.', false), true);
   assert.equal(isIncompleteDevinResponse('Сейчас поищу информацию и вернусь.', false), true);
+  assert.equal(isIncompleteDevinResponse('Сейчас поищу информацию и вернусь с результатами.', false), true);
+  assert.equal(isIncompleteDevinResponse('Сейчас проверю данные.', false), true);
   assert.equal(isIncompleteDevinResponse('Ещё не готово, продолжаю работу.', false), true);
 
   // Статус в начале, но результат ниже.
   assert.equal(isIncompleteDevinResponse('Сейчас проверю данные.\n\n## Ответ\n\nПроверка завершена.', false), false);
+  assert.equal(isIncompleteDevinResponse('Сейчас проверю данные\n\n## Ответ\n\nГотово', false), false);
 
   // Результирующие заголовки и структура должны считаться успехом.
   assert.equal(isIncompleteDevinResponse('## Возможные улучшения\n- пункт 1\n- пункт 2', false), false);

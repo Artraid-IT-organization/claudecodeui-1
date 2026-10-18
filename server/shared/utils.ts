@@ -1289,10 +1289,10 @@ const DEVIN_RESULT_HEADINGS = [
 function hasContinuationTail(text: string): boolean {
   const tail = text.slice(-1000);
   const patterns = [
-    /сейчас (докину|сделаю|поищу|проверю|вернусь|приступлю|начну|продолжу)[\s.!?]*$/iu,
+    /сейчас (докину|сделаю|поищу|проверю|вернусь|приступлю|начну|продолжу)[^.!?]{0,200}[.!?]*$/iu,
     /начинаю (работу|поиск|проверку|анализ|сравнение|исследование)[\s.!?]*$/iu,
     /приступаю (к работе|к поиску|к проверке|к анализу|к сравнению|к исследованию)[\s.!?]*$/iu,
-    /вернусь (с|к|позже|через|к вам|к вопросу|к вам с)[\s.!?]*$/iu,
+    /вернусь(?:\s+(?:с|к|позже|через|к вам|к вопросу|к вам с))?[\s.!?]*$/iu,
     /буду (искать|проверять|делать|сравнивать|работать|продолжать|дополнять)[\s.!?]*$/iu,
     /скоро (вернусь|дам|покажу|напишу|ответ|сделаю)[\s.!?]*$/iu,
     /(ещё не готово|пока не готово|продолжаю работу|в процессе|в работе|не закончено|не завершено|выполню позже|продолжу позже|обновлю позже)[\s.!?]*$/iu,
@@ -1370,8 +1370,8 @@ export function isIncompleteDevinResponse(
 
   const content = hasToolCalls ? afterTool : fullText;
 
-  if (hasContinuationTail(content)) return true;
   if (hasResultStructure(content)) return false;
+  if (hasContinuationTail(content)) return true;
   if (looksLikeUnderstandingOnly(content)) return true;
 
   return false;
