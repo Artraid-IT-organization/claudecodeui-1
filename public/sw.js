@@ -4,7 +4,7 @@
 // Имя меняется вместе с любым изменением этого файла: браузер переустанавливает
 // служебный кэш только когда сам файл стал другим побайтово. Установленное на
 // экран «Домой» приложение месяц отдавало старую сборку именно поэтому.
-const CACHE_NAME = 'claude-ui-v8';
+const CACHE_NAME = 'claude-ui-v9';
 const urlsToCache = [
   '/manifest.json'
 ];
@@ -26,7 +26,7 @@ const urlsToCache = [
  * скачается при открытии, как раньше. Установку это блокировать не должно.
  */
 function precacheBuild() {
-  return fetch('/index.html', { cache: 'no-store' })
+  return fetch('/index.html', { cache: 'no-store', signal: timeoutSignal(60000) })
     .then(response => (response.ok ? response.text() : Promise.reject(new Error('нет страницы'))))
     .then(html => {
       const assets = [];
@@ -58,15 +58,32 @@ const OFFLINE_PAGE_KEY = '/__last-good-page';
 const NAV_TIMEOUT_MS = 4000;
 
 /**
+ * Предел времени на один поход в сеть.
+ *
+ * Разбор утечки 18.10.26: на маке служебный воркер разросся до 5 ГБ и жёг
+ * процессор. Часть причины — запрос без потолка: на нестабильной связи
+ * (мак без VPN) соединение могло висеть часами, а воркер всё это время
+ * держал накопленный буфер ответа и не засыпал. Теперь каждый поход
+ * обрывается по времени — буфер освобождается, воркер умирает по
+ * расписанию браузера.
+ */
+function timeoutSignal(ms) {
+  return typeof AbortSignal !== 'undefined' && AbortSignal.timeout
+    ? AbortSignal.timeout(ms)
+    : undefined;
+}
+
+/**
  * Поход в сеть с одной повторной попыткой.
  *
  * Перезапуск службы занимает секунды, и одиночный запрос, попавший ровно в
  * это окно, раньше означал мёртвый экран. Одна пауза в полторы секунды
  * закрывает почти все такие случаи.
  */
-function fetchWithRetry(request) {
-  return fetch(request).catch(() =>
-    new Promise(resolve => setTimeout(resolve, 1500)).then(() => fetch(request)),
+function fetchWithRetry(request, timeoutMs) {
+  const attempt = () => fetch(request, { signal: timeoutSignal(timeoutMs) });
+  return attempt().catch(() =>
+    new Promise(resolve => setTimeout(resolve, 1500)).then(attempt),
   );
 }
 
@@ -121,11 +138,33 @@ function recoverFromStalePage() {
     .catch(() => undefined);
 }
 
+/**
+ * Дополнение к разбору утечки 18.10.26 (см. timeoutSignal выше).
+ *
+ * Раньше воркер перехватывал ВООБЩЕ всё, что не /api/ и не /ws/: чужие домены,
+ * POST с телом, любые статические адреса. Каждый перехваченный ответ целиком
+ * проходит буфером через процесс воркера — а оборванный или бесконечный запрос
+ * (перезагрузка во время закачки, мёртвое соединение без VPN) оставлял этот
+ * буфер висеть в памяти воркера. На iPhone воркер умирает в фоне за секунды и
+ * накопить не успевает; на маке вкладка живёт часами — отсюда гигабайты.
+ *
+ * Теперь воркер берёт только то, ради чего он нужен: открытие страницы,
+ * куски сборки и маленькая статика. Всё остальное браузер гоняет напрямую,
+ * и воркер не участвует и не буферизует.
+ */
 self.addEventListener('fetch', event => {
-  const url = event.request.url;
+  const request = event.request;
+  if (request.method !== 'GET') {
+    return;
+  }
+  const url = new URL(request.url);
+  if (url.origin !== self.location.origin) {
+    return;
+  }
+  const path = url.pathname;
 
   // Never intercept API requests or WebSocket upgrades
-  if (url.includes('/api/') || url.includes('/ws')) {
+  if (path.startsWith('/api/') || path.startsWith('/ws')) {
     return;
   }
 
@@ -148,18 +187,39 @@ self.addEventListener('fetch', event => {
     // последнюю удачную страницу (она откроет приложение из памяти телефона
     // и сама подключится к серверу) или страницу «Соединяюсь…». Запрос в
     // сеть не бросаем: он дойдёт и запомнится для следующего открытия.
-    const network = fetchWithRetry(event.request).then(response => {
+    // Navigation preload: браузер начинает грузить страницу ещё до старта
+    // воркера — на медленном телефоне это до полусекунды из общего времени
+    // открытия (паттерн из Workbox для network-first навигации). Если
+    // прелоад не сработал или его нет — обычный поход с повтором.
+    const goFetch = () => fetchWithRetry(request, 45000);
+    const start = event.preloadResponse
+      ? event.preloadResponse.then(r => r || goFetch(), goFetch)
+      : goFetch();
+    const network = start.then(response => {
       // Запоминаем последнюю удачную страницу: пригодится, пока сервер
       // перезапускается. Собранные куски (JS и стили) лежат в том же
       // кэше и берутся из него, поэтому пара «страница + куски» остаётся
       // согласованной.
-      if (response.ok) {
+      // Страницы-файлы (api-docs.html и т.п.) не запоминаем: они подменили
+      // бы приложение в офлайн-заглушке. Запись дожидается через waitUntil —
+      // иначе воркер может умереть до сохранения.
+      if (response.ok && !/\.[a-z0-9]{2,5}$/i.test(path)) {
         const clone = response.clone();
-        caches.open(CACHE_NAME).then(cache => cache.put(OFFLINE_PAGE_KEY, clone));
+        event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.put(OFFLINE_PAGE_KEY, clone)));
+      }
+      // Ошибка сервера (500/503 — окно рестарта при выкатке) показывает
+      // последнюю удачную страницу вместо голой ошибки браузера.
+      if (!response.ok) {
+        return caches.match(OFFLINE_PAGE_KEY).then(cached => cached || response);
       }
       return response;
     });
-    const fallback = () => caches.match(OFFLINE_PAGE_KEY).then(cached => cached || retryingPage());
+    // Отказ кэша не должен вешать навигацию: без второго колбэка промис
+    // respondWith не разрешался бы никогда — чёрный экран до убийства воркера.
+    const fallback = () => caches.match(OFFLINE_PAGE_KEY).then(
+      cached => cached || retryingPage(),
+      () => retryingPage(),
+    );
     event.waitUntil(network.catch(() => undefined));
     event.respondWith(new Promise(resolve => {
       let settled = false;
@@ -185,16 +245,20 @@ self.addEventListener('fetch', event => {
   // выбрасывается, и вкладки перезагружаются — следующий заход пойдёт в сеть
   // и принесёт актуальную страницу. Один раз на запуск воркера, чтобы не
   // устроить круг перезагрузок.
-  if (url.includes('/assets/')) {
+  if (path.startsWith('/assets/')) {
     event.respondWith(
-      caches.match(event.request).then(cached => {
+      caches.match(request).then(cached => {
         if (cached) return cached;
-        return fetch(event.request).then(response => {
+        return fetch(request, { signal: timeoutSignal(120000) }).then(response => {
           if (response.status === 404) {
             return recoverFromStalePage().then(() => response);
           }
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
+          // В кэш — только полноценный ответ: раньше 500-я или редирект
+          // ложились навсегда и отдавались из памяти вместо живого файла.
+          if (response.ok) {
+            const clone = response.clone();
+            event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.put(request, clone)));
+          }
           return response;
         });
       })
@@ -202,14 +266,50 @@ self.addEventListener('fetch', event => {
     return;
   }
 
-  // Everything else — network-first
-  event.respondWith(
-    fetch(event.request).catch(() => caches.match(event.request))
-  );
+  // Маленькая статика (шрифты, иконки, манифест) — из кэша с фоновым
+  // обновлением: имена без отпечатка содержимого, поэтому чистый cache-first
+  // отдавал бы заменённую иконку вечно. Личный манифест (?enter=<токен>)
+  // не кэшируем — сервер отдаёт его с no-store и логин-токеном в start_url,
+  // осевший токен в кэше = протухшая ссылка входа навсегда.
+  const isSmallStatic =
+    path.startsWith('/fonts/') ||
+    path.startsWith('/icons/') ||
+    (path === '/manifest.json' && url.search === '') ||
+    path === '/favicon.png' ||
+    path === '/favicon.svg' ||
+    path === '/logo.svg' ||
+    path === '/logo-128.png' ||
+    path === '/logo-256.png';
+  if (isSmallStatic) {
+    event.respondWith(
+      caches.match(request).then(cached => {
+        const update = fetch(request, { signal: timeoutSignal(30000) }).then(response => {
+          if (response.ok) {
+            const clone = response.clone();
+            event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.put(request, clone)));
+          }
+          return response;
+        });
+        if (cached) {
+          event.waitUntil(update.catch(() => undefined));
+          return cached;
+        }
+        return update;
+      })
+    );
+    return;
+  }
+
+  // Всё прочее воркер не трогает: без respondWith браузер обслуживает запрос
+  // напрямую, и ответ не буферизуется в процессе воркера.
 });
 
 // Activate event — purge old caches
 self.addEventListener('activate', event => {
+  // Страница начинает грузиться параллельно с запуском воркера.
+  if (self.registration.navigationPreload) {
+    event.waitUntil(self.registration.navigationPreload.enable().catch(() => undefined));
+  }
   event.waitUntil(
     caches.keys().then(cacheNames =>
       Promise.all(
