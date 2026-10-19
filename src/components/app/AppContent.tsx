@@ -168,12 +168,15 @@ function AppContentInner() {
       // Ставим до перехода, пока selectedSession ещё исходный; запрос
       // идемпотентен, повторное нажатие безопасно.
       if (selectedSession?.id) {
-        void api.setSessionPromptLaunched(selectedSession.id).catch(() => {});
+        void api
+          .setSessionPromptLaunched(selectedSession.id)
+          .then(() => refreshProjectsSilently())
+          .catch(() => {});
       }
       handleNewSession(target);
       notifyPendingFirstMessage();
     },
-    [projects, serverScope, handleNewSession, selectedSession],
+    [projects, serverScope, handleNewSession, selectedSession, refreshProjectsSilently],
   );
   const runInNewChatEnabled = isPromptsProject(selectedProject);
   // Значение контекста мемоизировано: без этого каждый ререндер AppContent
