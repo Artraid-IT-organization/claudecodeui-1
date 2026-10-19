@@ -865,19 +865,19 @@ export const sessionsDb = {
       + (providerSpace === 'devin' ? ` AND sessions.provider = 'devin'` : '')
       + (providerSpace === 'claude' ? ` AND sessions.provider NOT IN ('codex', 'devin')` : '');
     // Лента — только чаты, запущенные человеком (Егор 15.10.26: «запуски
-    // нейросетей и «Промпты» я не должен видеть, мне важен результат»).
-    // Служебные = origin='auto' + одноразовые папки (та же логика, что
-    // isMachineMadeChat в chat-groups), плюс проект «Промпты» — у него своя
-    // закреплённая секция. includeInternal возвращает их одним параметром —
-    // маленькая кнопка «показать служебные» внизу списка.
+    // нейросетей я не должен видеть, мне важен результат»). Служебные =
+    // origin='auto' + одноразовые папки (та же логика, что isMachineMadeChat
+    // в chat-groups). Проект «Промпты» из ленты не вырезается (19.10.26:
+    // Егор не находил в списке рабочий чат из этой папки — там все чаты
+    // ручные, быстрый доступ сверху даёт закреплённая секция).
+    // includeInternal возвращает служебные одним параметром — маленькая
+    // кнопка «показать служебные» внизу списка.
     const internalClause = includeInternal ? '' : `
       AND (sessions.origin IS NULL OR sessions.origin <> 'auto')
       AND (sessions.project_path IS NULL OR (
-        sessions.project_path <> '/home/claude/prompts'
-        AND sessions.project_path NOT LIKE '/tmp/%'
+        sessions.project_path NOT LIKE '/tmp/%'
         AND lower(sessions.project_path) NOT GLOB '*e2e[-_]*'
         AND lower(sessions.project_path) NOT GLOB '*e2e'
-        AND COALESCE(projects.custom_project_name, '') <> 'Промпты'
       ))
     `;
     const visibilityClause = `

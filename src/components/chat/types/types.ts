@@ -45,6 +45,8 @@ export interface ChatMessage {
   type: string;
   /** Store-assigned NormalizedMessage id, when the source row carried one (e.g. live thinking/stream rows use a well-known id so their list key stays stable while they update in place). */
   id?: string;
+  /** NormalizedMessage id строки транскрипта без побочки по ключам ленты (user/assistant текст): для rewind и оценки формата. */
+  sourceId?: string;
   content?: string;
   displayText?: string;
   timestamp: string | number | Date;

@@ -45,7 +45,19 @@ if st.get("id") == expect_id:
 PY
 }
 
+# Кнопка сайта запускает скрипт с окружением службы (Node 22 из nvm), а запуск
+# из чата, cron или systemd-run получает системный Node 18 — vite на нём падает
+# «crypto.hash is not a function» все 12 попыток (19.10.26). Берём Node 22+ сами.
+NVM_NODE="$(ls -d /home/claude/.nvm/versions/node/v*/bin 2>/dev/null | sort -V | tail -1)"
+[ -n "$NVM_NODE" ] && export PATH="$NVM_NODE:$PATH"
+
 trap 'if [ "$SUCCESS" -ne 1 ]; then write_failed "применение прервалось на ошибке"; fi' EXIT
+
+# Одна установка за раз: вторая, запущенная руками, снесла бы замороженную
+# копию первой посреди сборки (кнопка сайта сама не пускает вторую, пока
+# apply.json в running, но ручной запуск этого не знает).
+exec 8>/tmp/ccui-apply-update.lock
+flock -n 8 || { echo "Уже идёт другая установка обновления"; exit 1; }
 
 [ -f "$PENDING" ] || { echo "Нет ожидающего обновления"; exit 1; }
 readarray -t values < <(python3 - "$PENDING" <<'PY'
@@ -66,12 +78,44 @@ SOURCE="${values[2]:-}"
 }
 
 if [ "$REMOTE" = "local-build" ]; then
-    [ -n "$SOURCE" ] && [ -f "$SOURCE/deploy/build-shared.sh" ] || {
-        echo "Исходная рабочая копия готовой версии недоступна"; exit 1;
+    # Собираем не в рабочей копии, откуда пришла версия, а в своей замороженной
+    # копии ровно этого коммита. 19.10.26 20:45 кнопка не сработала: чат-автор
+    # успел докоммитить в свою копию (9a6902b3 поверх 5a82c0bb), сверка
+    # «копия = кнопка» упала, а плашка ещё минуту показывала старую версию.
+    # Рабочая копия чата живёт своей жизнью (коммиты, несохранённые правки),
+    # собирать из неё — гонка. sourceWorktree теперь только для справки.
+    REPO=/home/claude/claudecodeui
+    git -C "$REPO" cat-file -e "$ID^{commit}" 2>/dev/null || {
+        echo "Коммита ${ID:0:12} нет в $REPO — собрать нечего"; exit 1;
     }
-    HEAD_NOW="$(git -C "$SOURCE" rev-parse HEAD 2>/dev/null || true)"
-    [ "$HEAD_NOW" = "$ID" ] || { echo "Рабочая копия изменилась после подготовки обновления"; exit 1; }
-    bash "$SOURCE/deploy/build-shared.sh" "$ID" --apply || exit 1
+    # Пока версия ждала нажатия, на сайт могли выкатить другую ветку напрямую
+    # (19.10.26 20:49 — 4ea93a98 мимо кнопки). Тогда эта версия сняла бы чужую
+    # работу; сборщик её всё равно отклонит, но после минут сборки. Отказываем
+    # сразу и снимаем плашку, которую применить уже нельзя.
+    LIVE="$(git -C /home/claude/claudecodeui-shared rev-parse HEAD 2>/dev/null || true)"
+    if [ -n "$LIVE" ] && ! git -C "$REPO" merge-base --is-ancestor "$LIVE" "$ID"; then
+        echo "Обновление ${ID:0:12} устарело: на сайте уже ${LIVE:0:8}, которого в нём нет. Плашка снята — версию нужно собрать заново поверх живой"
+        clear_pending
+        write_failed "версия устарела — на сайт уже выкатили более новую, её нужно собрать заново"
+        /home/claude/scripts/notify.sh "Обновление сайта ${ID:0:8} устарело (на сайте уже ${LIVE:0:8}) — плашка снята, соберите заново поверх живой" error >/dev/null 2>&1
+        exit 1
+    fi
+    if [ "$LIVE" = "$ID" ]; then
+        echo "Версия ${ID:0:12} уже на сайте — плашка снята"
+        clear_pending; write_ok; SUCCESS=1; exit 0
+    fi
+    SNAP_ROOT=/home/claude/.cloudcli/update-builds
+    SNAP="$SNAP_ROOT/${ID:0:12}"
+    # Прошлые замороженные копии — одноразовые артефакты этого же скрипта.
+    for old in "$SNAP_ROOT"/*; do
+        [ -d "$old" ] && git -C "$REPO" worktree remove --force "$old" 2>/dev/null
+    done
+    git -C "$REPO" worktree prune
+    mkdir -p "$SNAP_ROOT"
+    [ -d "$SNAP" ] || git -C "$REPO" worktree add -q --detach "$SNAP" "$ID" || {
+        echo "Не удалось создать копию ${ID:0:12} для сборки"; exit 1;
+    }
+    bash "$SNAP/deploy/build-shared.sh" "$ID" --apply || exit 1
 else
     bash /home/claude/scripts/ccui-accept-remote.sh || exit 1
 fi

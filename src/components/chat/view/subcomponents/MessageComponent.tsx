@@ -21,6 +21,7 @@ import ChatMessageImages from './ChatMessageImages';
 import ChatMessageFiles from './ChatMessageFiles';
 import { Markdown } from './Markdown';
 import MessageCopyControl from './MessageCopyControl';
+import MessageFeedbackControl from './MessageFeedbackControl';
 import MessageRewindControl from './MessageRewindControl';
 import MessageSpeakControl from './MessageSpeakControl';
 
@@ -46,6 +47,8 @@ type MessageComponentProps = {
   onRewindToMessage?: (message: ChatMessage) => void;
   selectedProject?: Project | null;
   provider: Provider | string;
+  /** id текущей сессии для привязки оценки формата; без него — только локальная запись. */
+  sessionId?: string | null;
 };
 
 type InteractiveOption = {
@@ -70,7 +73,7 @@ function toRequestLabel(content: string): string | undefined {
   return cleaned ? cleaned.slice(0, 300) : undefined;
 }
 
-const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, showRawParameters, showThinking, onRewindToMessage, selectedProject, provider }: MessageComponentProps) => {
+const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, showRawParameters, showThinking, onRewindToMessage, selectedProject, provider, sessionId }: MessageComponentProps) => {
   const { t } = useTranslation('chat');
 
   /*
@@ -515,6 +518,37 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                 {shouldShowAssistantCopyControl && (
                   <div className="flex min-w-0 items-center">
                     <MessageCopyControl content={assistantCopyContent} messageType="assistant" />
+                    {/* Оценка формата ответа: id — uuid из транскрипта (стабилен
+                        после перезагрузки), без него кнопок нет — оценке не к
+                        чему привязаться. Во время потока прячем: id ещё может
+                        смениться при записи в jsonl. */}
+                    {!message.isStreaming &&
+                      (() => {
+                        // Только стабильный id из транскрипта: `text_*`,
+                        // `queued_*`, `local_*`, `__*` — эфемерные строки ленты,
+                        // `<provider>_<uuid>` — рандом generateMessageId при
+                        // каждой загрузке (Codex). Голос под таким id сиротеет
+                        // и после перезагрузки плодит дубль — кнопок нет.
+                        const rawId =
+                          (message as { uuid?: string }).uuid ||
+                          message.sourceId ||
+                          message.id;
+                        const feedbackId =
+                          rawId &&
+                          !/^(?:text_|queued_|local_|__)/.test(rawId) &&
+                          !/^[a-z]+_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+                            rawId
+                          )
+                          ? rawId
+                          : null;
+                        return feedbackId ? (
+                          <MessageFeedbackControl
+                            messageId={feedbackId}
+                            sessionId={sessionId}
+                            content={assistantCopyContent}
+                          />
+                        ) : null;
+                      })()}
                   </div>
                 )}
                 {formattedTime && <span className="whitespace-nowrap">{formattedTime}</span>}

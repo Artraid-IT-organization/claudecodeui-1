@@ -22,6 +22,8 @@ export { scanStateDb } from '@/modules/database/repositories/scan-state.db.js';
 export { devinConnectionsDb, type DevinConnectionRow, type DevinConnectionHealth } from '@/modules/database/repositories/devin-connections.db.js';
 export { sessionsDb } from '@/modules/database/repositories/sessions.db.js';
 export { promptPresetsDb } from '@/modules/database/repositories/prompt-presets.js';
+export { messageFeedbackDb } from '@/modules/database/repositories/message-feedback.js';
+export type { MessageFeedbackRow, MessageFeedbackUpsert } from '@/modules/database/repositories/message-feedback.js';
 export { userDb } from '@/modules/database/repositories/users.js';
 export { voiceTranscriptsDb } from '@/modules/database/repositories/voice-transcripts.js';
 export type { StoredVoiceTranscript, VoiceTranscriptTarget } from '@/modules/database/repositories/voice-transcripts.js';

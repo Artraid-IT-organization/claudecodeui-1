@@ -14,6 +14,26 @@
     "copyAsText": "Копировать как текст",
     "textShort": "TXT"
   },
+  "feedback": {
+    "like": "Формат ответа удобен",
+    "dislike": "Формат ответа неудобен",
+    "saved": "Оценка сохранена",
+    "cleared": "Оценка снята",
+    "saveError": "Не удалось сохранить оценку",
+    "dialogTitle": "Что было неудобно в формате?",
+    "commentPlaceholder": "Комментарий, если нужно",
+    "cancel": "Отмена",
+    "save": "Сохранить",
+    "categories": {
+      "too_long": "Слишком длинно",
+      "too_short": "Слишком коротко",
+      "wrong_structure": "Неудачная структура",
+      "missing_table": "Не хватает таблицы",
+      "too_verbose": "Много лишнего",
+      "unclear": "Непонятно",
+      "custom": "Другое"
+    }
+  },
   "messageTypes": {
     "user": "П",
     "error": "Ошибка",
