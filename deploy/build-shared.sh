@@ -10,7 +10,10 @@
 # ничего сообщить, а со стороны это выглядело как зависание.
 #
 # Использование: bash deploy/build-shared.sh <коммит> [--apply|--no-restart]
-#   Запускать из своего worktree. Без --apply только готовит обновление.
+#   Запускать из своего worktree. Без --apply только готовит обновление и
+#   откладывает собранное в ~/.cloudcli/update-builds/ready-<id>.
+#   --apply --prebuilt=<папка> — кнопка «Обновить»: ставит уже собранное при
+#   подготовке, без второй сборки (секунды вместо 3–6 минут).
 
 set -uo pipefail
 
@@ -18,14 +21,20 @@ COMMIT="${1:?укажите коммит}"
 NO_RESTART=""
 APPLY=""
 ALLOW_ROLLBACK=""
+PREBUILT=""
 for arg in "${@:2}"; do
     case "$arg" in
         --no-restart) NO_RESTART="--no-restart" ;;
         --apply) APPLY=1 ;;
         --allow-rollback) ALLOW_ROLLBACK=1 ;;
+        --prebuilt=*) PREBUILT="${arg#--prebuilt=}" ;;
     esac
 done
+if [ -n "$PREBUILT" ] && [ -z "$APPLY" ]; then
+    echo "--prebuilt имеет смысл только вместе с --apply"; exit 1
+fi
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+READY_ROOT="/home/claude/.cloudcli/update-builds"
 SHARED="/home/claude/claudecodeui-shared"
 SOURCE_MODULES="/home/claude/claudecodeui/node_modules"
 DB="/home/claude/.cloudcli-shared/auth.db"
@@ -36,13 +45,29 @@ say() { echo "[$(date +%H:%M:%S)] $*"; }
 
 # ── Шаг 1. Сборка у себя, без общего замка ───────────────────────────────────
 
-cd "$SELF" || exit 1
-HEAD_NOW="$(git rev-parse HEAD)"
-if [ "${HEAD_NOW:0:${#COMMIT}}" != "$COMMIT" ]; then
-    say "ОШИБКА: $SELF стоит на $HEAD_NOW, а собрать просят $COMMIT"
-    exit 1
+# Откуда брать собранные dist и dist-server для подмены.
+SRC="$SELF"
+if [ -n "$PREBUILT" ]; then
+    # Готовая сборка: скрипт лежит в папке сборки, git — в основном репозитории.
+    SELF=/home/claude/claudecodeui
+    cd "$SELF" || exit 1
+    HEAD_NOW="$(git rev-parse --verify -q "$COMMIT^{commit}")"
+    if [ -z "$HEAD_NOW" ] || [ "$(cat "$PREBUILT/COMMIT" 2>/dev/null)" != "$HEAD_NOW" ] \
+        || [ ! -d "$PREBUILT/dist" ] || [ ! -d "$PREBUILT/dist-server" ]; then
+        say "ОШИБКА: готовая сборка $PREBUILT не от коммита $COMMIT или неполная"
+        exit 1
+    fi
+    SRC="$PREBUILT"
+    say "Готовая сборка без пересборки: $(git log --oneline -1 "$HEAD_NOW")"
+else
+    cd "$SELF" || exit 1
+    HEAD_NOW="$(git rev-parse HEAD)"
+    if [ "${HEAD_NOW:0:${#COMMIT}}" != "$COMMIT" ]; then
+        say "ОШИБКА: $SELF стоит на $HEAD_NOW, а собрать просят $COMMIT"
+        exit 1
+    fi
+    say "Сборка в своём каталоге: $(git log --oneline -1)"
 fi
-say "Сборка в своём каталоге: $(git log --oneline -1)"
 
 # Выкатка не затирает чужую работу. Сайт общий, выкатывают несколько чатов, и
 # каждый — свою ветку. 15.09.26 правку «сообщения не теряются» (12:07) за
@@ -65,6 +90,7 @@ if [ -z "$NO_RESTART" ] && [ -n "$LIVE" ] && ! git merge-base --is-ancestor "$LI
     say "ВНИМАНИЕ: намеренный откат — на сайте было ${LIVE:0:8}"
 fi
 
+if [ -z "$PREBUILT" ]; then
 # Жёсткие ссылки вместо npm install: семь секунд, места не занимают и, в отличие
 # от установки в worktree, не теряют молча devDependencies.
 cp -al "$SOURCE_MODULES/." node_modules/ 2>/dev/null
@@ -92,12 +118,13 @@ for attempt in $(seq 1 "$ATTEMPTS"); do
     sleep 45
 done
 [ "$built" -eq 1 ] || { say "ОШИБКА: не собралось за $ATTEMPTS попыток"; exit 1; }
+fi
 
 # Проверяем СОДЕРЖИМЫМ, а не временем файла: dist-server умеет сохранять старые
 # mtime, поэтому «свежесть» по дате врёт.
 missing=""
-grep -rq "account_scan_state" "$SELF/dist-server" 2>/dev/null || missing="$missing разделение-аккаунтов"
-grep -rq "loginToken" "$SELF/dist/assets" 2>/dev/null || missing="$missing иконка-на-экране-Домой"
+grep -rq "account_scan_state" "$SRC/dist-server" 2>/dev/null || missing="$missing разделение-аккаунтов"
+grep -rq "loginToken" "$SRC/dist/assets" 2>/dev/null || missing="$missing иконка-на-экране-Домой"
 [ -z "$missing" ] || { say "ОШИБКА: в собранных файлах нет правок:$missing"; exit 1; }
 say "Проверка содержимого пройдена"
 
@@ -109,6 +136,31 @@ fi
 if [ -z "$APPLY" ]; then
     STATE_DIR="/home/claude/.cloudcli/update-state"
     mkdir -p "$STATE_DIR"
+    # Откладываем собранное: кнопка «Обновить» поставит его без второй сборки
+    # (19.10.26 замер: сборка 3,5–5,5 мин из 4–6 мин установки, подмена — 5–23 с).
+    # Только из чистой копии: несохранённые правки попали бы в сборку, но не в
+    # коммит на плашке — тогда кнопка соберёт заново из коммита.
+    READY=""
+    DIRTY="$(git status --porcelain | grep -vE '^\?\? (node_modules|dist[^/]*)/?$')"
+    if [ -n "$DIRTY" ]; then
+        say "В каталоге есть несохранённые правки — готовую сборку не откладываю, кнопка соберёт из коммита"
+    else
+        READY="$READY_ROOT/ready-${HEAD_NOW:0:12}"
+        mkdir -p "$READY_ROOT"
+        # Прежние отложенные сборки — одноразовые артефакты этого скрипта.
+        for old in "$READY_ROOT"/ready-*; do
+            [ -d "$old" ] && [ "$old" != "$READY" ] && rm -rf "$old"
+        done
+        rm -rf "$READY.tmp" "$READY"
+        if mkdir -p "$READY.tmp" && cp -a "$SELF/dist" "$SELF/dist-server" "$READY.tmp/" \
+            && cp -a "$SELF/deploy/build-shared.sh" "$READY.tmp/" \
+            && echo "$HEAD_NOW" > "$READY.tmp/COMMIT" && mv "$READY.tmp" "$READY"; then
+            say "Собранное отложено: $READY — кнопка поставит его без пересборки"
+        else
+            say "ВНИМАНИЕ: не удалось отложить сборку — кнопка соберёт заново"
+            READY=""
+        fi
+    fi
     COMMITS_JSON="$(git log --format='%h%x1f%s%x1f%cI%x1f%an' "$LIVE..$HEAD_NOW" | python3 -c 'import sys,json; rows=[]
 for line in sys.stdin:
     parts=line.rstrip("\n").split("\x1f", 3)
@@ -116,7 +168,7 @@ for line in sys.stdin:
 print(json.dumps(rows, ensure_ascii=False))')"
     STAT="$(git diff --shortstat "$LIVE..$HEAD_NOW")"
     FILES_CHANGED="$(git diff --name-only "$LIVE..$HEAD_NOW" | wc -l | tr -d ' ')"
-    CCUI_TARGET="$HEAD_NOW" CCUI_BASE="$LIVE" CCUI_SOURCE="$SELF" CCUI_COMMITS="$COMMITS_JSON" CCUI_STAT="$STAT" CCUI_FILES="$FILES_CHANGED" \
+    CCUI_TARGET="$HEAD_NOW" CCUI_BASE="$LIVE" CCUI_SOURCE="$SELF" CCUI_COMMITS="$COMMITS_JSON" CCUI_STAT="$STAT" CCUI_FILES="$FILES_CHANGED" CCUI_READY="$READY" \
         python3 - "$STATE_DIR/pending.json" <<'PY'
 import json, os, sys, time
 state = {
@@ -130,6 +182,7 @@ state = {
     "conflict": None,
     "checkedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     "sourceWorktree": os.environ["CCUI_SOURCE"],
+    "prebuilt": os.environ.get("CCUI_READY") or None,
 }
 with open(sys.argv[1], "w") as handle:
     json.dump(state, handle, ensure_ascii=False, indent=1)
@@ -279,7 +332,7 @@ swap() {
     for d in dist dist-server; do
         rm -rf "$d.prev"
         [ -d "$d" ] && mv "$d" "$d.prev"
-        cp -a "$SELF/$d" "$d" || return 1
+        cp -a "$SRC/$d" "$d" || return 1
     done
 
     renew_drain
