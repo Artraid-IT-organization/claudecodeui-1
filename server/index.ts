@@ -50,6 +50,7 @@ import { promptPresetsRoutes } from './modules/presets/index.js';
 import { chatGroupsRoutes } from './modules/chat-groups/index.js';
 import { handoffRoutes } from './modules/handoff/index.js';
 import { openTabsRoutes } from './modules/open-tabs/index.js';
+import { messageFeedbackRoutes } from './modules/message-feedback/index.js';
 import { updatesRoutes } from './modules/updates/index.js';
 import { startChatGroupClassifier } from './modules/chat-groups/chat-group-classifier.js';
 import { userRoutes } from './modules/user/index.js';
@@ -266,6 +267,8 @@ app.use('/api/chat-groups', withUserRuntimeContext, chatGroupsRoutes);
 // «Продолжить в новом чате»: выжимка главного из длинного чата.
 app.use('/api/handoff', withUserRuntimeContext, handoffRoutes);
 app.use('/api/open-tabs', withUserRuntimeContext, openTabsRoutes);
+// Лайк/дизлайк формата ответа — референс ~/response-format-memory, upsert по message_id.
+app.use('/api/messages', withUserRuntimeContext, messageFeedbackRoutes);
 // Плашка «Обновить»: пул изменений с другого сервера — применить/отложить/разобрать.
 app.use('/api/updates', withUserRuntimeContext, updatesRoutes);
 

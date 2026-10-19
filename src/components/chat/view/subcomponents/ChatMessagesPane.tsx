@@ -356,6 +356,7 @@ function ChatMessagesPane({
                   onRewindToMessage={onRewindToMessage}
                   selectedProject={selectedProject}
                   provider={provider}
+                  sessionId={selectedSession?.id}
                 />
                 </div>
               );

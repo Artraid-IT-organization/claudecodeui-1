@@ -14,6 +14,25 @@
     "copyAsText": "Copy as text",
     "textShort": "TXT"
   },
+  "feedback": {
+    "like": "Response format works well",
+    "dislike": "Response format is inconvenient",
+    "saved": "Rating saved",
+    "saveError": "Could not save the rating",
+    "dialogTitle": "What was inconvenient about the format?",
+    "commentPlaceholder": "Comment, if needed",
+    "cancel": "Cancel",
+    "save": "Save",
+    "categories": {
+      "too_long": "Too long",
+      "too_short": "Too short",
+      "wrong_structure": "Poor structure",
+      "missing_table": "Missing a table",
+      "too_verbose": "Too much filler",
+      "unclear": "Unclear",
+      "custom": "Other"
+    }
+  },
   "messageTypes": {
     "user": "U",
     "error": "Error",
