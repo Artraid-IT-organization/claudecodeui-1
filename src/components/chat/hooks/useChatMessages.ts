@@ -232,6 +232,9 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
             type: 'assistant',
             content: text,
             timestamp: msg.timestamp,
+            // Номер строки разговора — для оценки формата. Как и у
+            // пользовательского: не `id`, чтобы не менять ключи ленты.
+            sourceId: msg.id,
             ...sharedMetadata,
           });
         }

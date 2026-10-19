@@ -525,7 +525,9 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                     {!message.isStreaming &&
                       (() => {
                         const feedbackId =
-                          (message as { uuid?: string }).uuid || message.id;
+                          (message as { uuid?: string }).uuid ||
+                          message.sourceId ||
+                          message.id;
                         return feedbackId ? (
                           <MessageFeedbackControl
                             messageId={feedbackId}
