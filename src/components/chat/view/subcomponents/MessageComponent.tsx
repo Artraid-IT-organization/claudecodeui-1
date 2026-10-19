@@ -524,10 +524,23 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                         смениться при записи в jsonl. */}
                     {!message.isStreaming &&
                       (() => {
-                        const feedbackId =
+                        // Только стабильный id из транскрипта: `text_*`,
+                        // `queued_*`, `local_*`, `__*` — эфемерные строки ленты,
+                        // `<provider>_<uuid>` — рандом generateMessageId при
+                        // каждой загрузке (Codex). Голос под таким id сиротеет
+                        // и после перезагрузки плодит дубль — кнопок нет.
+                        const rawId =
                           (message as { uuid?: string }).uuid ||
                           message.sourceId ||
                           message.id;
+                        const feedbackId =
+                          rawId &&
+                          !/^(?:text_|queued_|local_|__)/.test(rawId) &&
+                          !/^[a-z]+_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+                            rawId
+                          )
+                          ? rawId
+                          : null;
                         return feedbackId ? (
                           <MessageFeedbackControl
                             messageId={feedbackId}
