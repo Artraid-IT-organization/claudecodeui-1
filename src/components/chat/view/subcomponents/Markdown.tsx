@@ -31,6 +31,7 @@ import { normalizeInlineCodeFences, separateMarkdownBlocks } from '../../utils/c
 import { MARKDOWN_ROOT_ATTR, installCopyParagraphBreaks } from '../../utils/copyParagraphBreaks';
 import { copyTextToClipboard } from '../../../../utils/clipboard';
 import { usePaletteOps } from '../../../../contexts/PaletteOpsContext';
+import { useRunInNewChat } from '../../../../contexts/RunInNewChatContext';
 import { useTheme } from '../../../../contexts/ThemeContext';
 
 import { MarkdownImage } from './MarkdownImage';
@@ -124,6 +125,7 @@ type CodeBlockProps = {
 const CodeBlock = ({ node: _node, className, children, forceBlock, ...props }: CodeBlockProps) => {
   const { t } = useTranslation('chat');
   const { isDarkMode } = useTheme();
+  const { enabled: runInNewChatEnabled, run: runInNewChat } = useRunInNewChat();
   const [copied, setCopied] = useState(false);
   // Fenced blocks carry a trailing newline in the tree; trim it so the
   // highlighter doesn't render an empty final line.
@@ -164,7 +166,31 @@ const CodeBlock = ({ node: _node, className, children, forceBlock, ...props }: C
       {/* Label row shares the block's background — no divider, ChatGPT-style */}
       <div className="flex items-center justify-between px-4 pt-2">
         <span className="select-none text-xs text-muted-foreground">{languageLabel}</span>
-        <button
+        <div className="flex items-center gap-1">
+          {runInNewChatEnabled && raw.trim() && (
+            <button
+              type="button"
+              onClick={() => runInNewChat(raw)}
+              className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              title={t('codeBlock.runInNewChatTitle')}
+              aria-label={t('codeBlock.runInNewChatTitle')}
+            >
+              <svg
+                className="h-3.5 w-3.5"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M5 12h14"></path>
+                <path d="m13 6 6 6-6 6"></path>
+              </svg>
+              {t('codeBlock.runInNewChat')}
+            </button>
+          )}
+          <button
           type="button"
           onClick={() =>
             copyTextToClipboard(raw).then((success) => {
@@ -204,6 +230,7 @@ const CodeBlock = ({ node: _node, className, children, forceBlock, ...props }: C
             </svg>
           )}
         </button>
+        </div>
       </div>
 
       <SyntaxHighlighter

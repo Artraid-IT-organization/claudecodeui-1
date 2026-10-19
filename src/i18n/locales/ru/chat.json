@@ -2,7 +2,9 @@
   "codeBlock": {
     "copy": "Копировать",
     "copied": "Скопировано",
-    "copyCode": "Копировать код"
+    "copyCode": "Копировать код",
+    "runInNewChat": "В новый чат",
+    "runInNewChatTitle": "Вставить в новый чат и запустить"
   },
   "copyMessage": {
     "copy": "Копировать сообщение",

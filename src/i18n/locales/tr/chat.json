@@ -2,7 +2,9 @@
   "codeBlock": {
     "copy": "Kopyala",
     "copied": "Kopyalandı",
-    "copyCode": "Kodu kopyala"
+    "copyCode": "Kodu kopyala",
+    "runInNewChat": "Yeni sohbet",
+    "runInNewChatTitle": "Yeni sohbete ekle ve çalıştır"
   },
   "copyMessage": {
     "copy": "Mesajı kopyala",

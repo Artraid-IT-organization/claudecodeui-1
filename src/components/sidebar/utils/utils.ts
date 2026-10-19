@@ -3,6 +3,27 @@ import type { TFunction } from 'i18next';
 import type { LLMProvider, Project, ProjectSession } from '../../../types/app';
 import type { ProjectSortOrder, SettingsProject, SessionViewModel, SessionWithProvider } from '../types/types';
 
+/**
+ * Проект «Промпты»: папка ищется по пути и по имени — displayName мог быть
+ * переименован. Общий признак для закреплённой строки в сайдбаре и кнопки
+ * «В новый чат» на промпт-блоке.
+ */
+export const isPromptsProject = (project: Pick<Project, 'fullPath' | 'displayName'> | null | undefined): boolean =>
+  Boolean(project && (project.fullPath === '/home/claude/prompts' || project.displayName === 'Промпты'));
+
+/**
+ * Папка для обычного чата вне «Промптов»: домашняя (/home/claude), на другом
+ * срезе — папка с наибольшим числом чатов. Одно правило у кнопки «Новый чат»
+ * в сайдбаре и у кнопки «В новый чат» на промпт-блоке — иначе два места
+ * разъехались бы молча.
+ */
+export const resolveMainChatProject = (projects: Project[], serverScope: string): Project | null => {
+  const scoped = projects.filter((p) => (p.serverScope ?? 'main') === serverScope);
+  return scoped.find((p) => p.fullPath === '/home/claude')
+    ?? [...scoped].sort((a, b) => (b.sessions?.length ?? 0) - (a.sessions?.length ?? 0))[0]
+    ?? null;
+};
+
 export const formatCompactAge = (
   dateInput: string | number | null | undefined,
   currentTime: Date,

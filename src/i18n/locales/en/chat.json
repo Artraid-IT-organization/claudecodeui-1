@@ -2,7 +2,9 @@
   "codeBlock": {
     "copy": "Copy",
     "copied": "Copied",
-    "copyCode": "Copy code"
+    "copyCode": "Copy code",
+    "runInNewChat": "New chat",
+    "runInNewChatTitle": "Insert into a new chat and run"
   },
   "copyMessage": {
     "copy": "Copy message",

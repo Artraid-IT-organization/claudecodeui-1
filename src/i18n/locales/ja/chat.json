@@ -2,7 +2,9 @@
   "codeBlock": {
     "copy": "コピー",
     "copied": "コピーしました",
-    "copyCode": "コードをコピー"
+    "copyCode": "コードをコピー",
+    "runInNewChat": "新しいチャット",
+    "runInNewChatTitle": "新しいチャットに挿入して実行"
   },
   "copyMessage": {
     "copy": "メッセージをコピー",

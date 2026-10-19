@@ -63,6 +63,23 @@ const COMPOSER_ROOM_FLOOR_PX = 96;
  * может пересоздать экран, а выжимка должна дожить до него.
  */
 let pendingHandoff: { projectId: string; message: string } | null = null;
+
+/*
+ * Постановка первого сообщения нового чата извне хука (кнопка «В новый чат»
+ * на промпт-блоке в ленте): кнопка не достаёт до состояния композера, поэтому
+ * пишет в тот же слот, что и выжимка handoff, а подписчик будит эффект —
+ * дальше текст уходит обычной посылкой с очередью и защитой от потери.
+ */
+const pendingFirstMessageListeners = new Set<() => void>();
+
+export function queuePendingFirstMessage(projectId: string, message: string) {
+  pendingHandoff = { projectId, message };
+}
+
+export function notifyPendingFirstMessage() {
+  for (const listener of pendingFirstMessageListeners) listener();
+}
+
 /** Идёт ли опрос задачи — один на вкладку, даже если экран чата пересоздан. */
 let handoffPolling = false;
 /** На каком десятке процентов окна этой вкладкой уже просили заготовку — по чатам. */
@@ -1732,6 +1749,19 @@ export function useChatComposerState({
   const [handoffStatus, setHandoffStatus] = useState<'idle' | 'running'>('idle');
   const handoffTickRef = useRef(0);
   const [handoffTick, setHandoffTick] = useState(0);
+
+  // Постановщики снаружи хука (кнопка «В новый чат» на промпт-блоке) будят
+  // эффект доставки тем же тиком, что и сам handoff.
+  useEffect(() => {
+    const bump = () => {
+      handoffTickRef.current += 1;
+      setHandoffTick(handoffTickRef.current);
+    };
+    pendingFirstMessageListeners.add(bump);
+    return () => {
+      pendingFirstMessageListeners.delete(bump);
+    };
+  }, []);
   const canHandoff = Boolean(sessionKey && selectedProject && onStartNewChat && (provider === 'claude' || provider === 'devin'));
 
   /**

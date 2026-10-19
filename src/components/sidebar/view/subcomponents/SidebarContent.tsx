@@ -9,7 +9,7 @@ import type { ReleaseInfo } from '../../../../shared/types';
 import type { ConversationSearchResults, SearchProgress } from '../../hooks/useSidebarController';
 import type { ArchivedProjectListItem, ArchivedSessionListItem, RecentConversationListItem, SidebarSearchMode } from '../../types/types';
 import LLMProviderLogo from '../../../llm-provider-logo/LLMProviderLogo';
-import { formatCompactAge, getAllSessions, readPromptsPinnedExpanded, sessionTitleMatches, writePromptsPinnedExpanded } from '../../utils/utils';
+import { formatCompactAge, getAllSessions, isPromptsProject, readPromptsPinnedExpanded, resolveMainChatProject, sessionTitleMatches, writePromptsPinnedExpanded } from '../../utils/utils';
 
 import SidebarFooter from './SidebarFooter';
 import SidebarHeader from './SidebarHeader';
@@ -224,8 +224,7 @@ export default function SidebarContent({
    * пути и по имени — displayName мог быть переименован.
    */
   const promptsProject = useMemo(() => {
-    const project = projectListProps.projects.find((candidate) =>
-      candidate.fullPath === '/home/claude/prompts' || candidate.displayName === 'Промпты');
+    const project = projectListProps.projects.find((candidate) => isPromptsProject(candidate));
     return project && (project.serverScope ?? 'main') === serverScope ? project : null;
   }, [projectListProps.projects, serverScope]);
 
@@ -233,12 +232,10 @@ export default function SidebarContent({
   // домашняя (/home/claude), на другом срезе — папка с наибольшим числом
   // чатов. До плоской ленты такой кнопкой был «Новый сеанс» в карточке
   // каждой папки; с уходом папок пропала и кнопка (Егор 15.10.26).
-  const newChatProject = useMemo(() => {
-    const scoped = projectListProps.projects.filter((p) => (p.serverScope ?? 'main') === serverScope);
-    return scoped.find((p) => p.fullPath === '/home/claude')
-      ?? [...scoped].sort((a, b) => (b.sessions?.length ?? 0) - (a.sessions?.length ?? 0))[0]
-      ?? null;
-  }, [projectListProps.projects, serverScope]);
+  const newChatProject = useMemo(
+    () => resolveMainChatProject(projectListProps.projects, serverScope),
+    [projectListProps.projects, serverScope],
+  );
   const [promptsExpanded, setPromptsExpanded] = useState(readPromptsPinnedExpanded);
   const togglePromptsExpanded = () => {
     setPromptsExpanded((previous) => {
