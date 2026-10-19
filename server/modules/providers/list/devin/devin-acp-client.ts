@@ -32,10 +32,17 @@ function resolveSupervisorScriptPath(): string {
   throw new Error(`devin-acp-supervisor script not found next to ${here}`);
 }
 
-/** Каталог сокетов/спеков супервизоров; CLOUDCLI_DEVIN_RUNS_DIR — для тестов. */
+/**
+ * Каталог сокетов/спеков супервизоров; CLOUDCLI_DEVIN_RUNS_DIR — для тестов.
+ * По умолчанию — рядом с базой сайта (DATABASE_PATH), как и live-runs
+ * (survivor-runs.js): копия сайта со своей базой не видит ходы боя. У боя база
+ * в ~/.cloudcli-shared — его каталог прежний.
+ */
 export function devinRunsDir(): string {
-  return process.env.CLOUDCLI_DEVIN_RUNS_DIR?.trim()
-    || path.join(os.homedir(), '.cloudcli-shared', 'devin-runs');
+  if (process.env.CLOUDCLI_DEVIN_RUNS_DIR?.trim()) return process.env.CLOUDCLI_DEVIN_RUNS_DIR.trim();
+  const db = process.env.DATABASE_PATH?.trim();
+  const root = db ? path.dirname(path.resolve(db)) : path.join(os.homedir(), '.cloudcli-shared');
+  return path.join(root, 'devin-runs');
 }
 
 export type SupervisedDevinSpec = {
