@@ -38,8 +38,16 @@ let shuttingDown = false;
 const survivors = new Map();
 let pollTimer = null;
 
+// По умолчанию — рядом с базой сайта (DATABASE_PATH), а не в общем доме.
+// 19.10.26 пробная копия со своей базой в /tmp при старте подобрала отсюда 7
+// живых ходов Devin боя: бой потерял их сокеты, счёл ходы упавшими, а чаты
+// встали на session_locked («чат ещё занят»). У боя база в ~/.cloudcli-shared —
+// его каталог прежний.
 function liveRunsDir() {
-  return process.env.CLOUDCLI_LIVE_RUNS_DIR || path.join(os.homedir(), '.cloudcli-shared', 'live-runs');
+  if (process.env.CLOUDCLI_LIVE_RUNS_DIR) return process.env.CLOUDCLI_LIVE_RUNS_DIR;
+  const db = process.env.DATABASE_PATH?.trim();
+  const root = db ? path.dirname(path.resolve(db)) : path.join(os.homedir(), '.cloudcli-shared');
+  return path.join(root, 'live-runs');
 }
 
 function recordPath(pid) {
