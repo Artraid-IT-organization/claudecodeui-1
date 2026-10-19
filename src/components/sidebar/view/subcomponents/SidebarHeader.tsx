@@ -1,8 +1,8 @@
 import { Archive, Folder, FolderPlus, Plus, RefreshCw, Search, Server, X, PanelLeftClose } from 'lucide-react';
-import { useSecondServerLabel, useServerScope } from '../../hooks/useServerScope';
 import type { TFunction } from 'i18next';
 import type { ReactNode } from 'react';
 
+import { useSecondServerLabel, useServerScope } from '../../hooks/useServerScope';
 import { Button, Input, Tooltip } from '../../../../shared/view/ui';
 import { CLOUDCLI_WORDMARK_FONT_FAMILY } from '../../../../shared/constants';
 import { IS_PLATFORM } from '../../../../shared/utils';

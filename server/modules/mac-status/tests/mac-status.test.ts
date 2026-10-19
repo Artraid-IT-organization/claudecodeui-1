@@ -1,10 +1,9 @@
+import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-
-// eslint-disable-next-line import-x/no-unresolved
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, it } from 'node:test';
 
 import { checkSocksProxy, createMacStatusService } from '../mac-status.service.js';
 
@@ -47,7 +46,7 @@ describe('mac-status service', () => {
       checkSocks: true,
       connectTimeoutMs: 1000,
     });
-    expect(result.ok).toBe(true);
+    assert.equal(result.ok, true);
   });
 
   it('reports disconnected when port is closed', async () => {
@@ -57,8 +56,8 @@ describe('mac-status service', () => {
       checkSocks: true,
       connectTimeoutMs: 200,
     });
-    expect(result.ok).toBe(false);
-    expect(result.details).toBeTruthy();
+    assert.equal(result.ok, false);
+    assert.ok(result.details);
   });
 
   it('writes status file and tracks state transitions', async () => {
@@ -74,11 +73,11 @@ describe('mac-status service', () => {
     service.start();
     await new Promise((resolve) => setTimeout(resolve, 250));
 
-    expect(service.getStatus().connected).toBe(true);
-    expect(fs.existsSync(statusFile)).toBe(true);
+    assert.equal(service.getStatus().connected, true);
+    assert.equal(fs.existsSync(statusFile), true);
 
     const fileStatus = JSON.parse(fs.readFileSync(statusFile, 'utf8'));
-    expect(fileStatus.connected).toBe(true);
-    expect(fileStatus.method).toBe('socks5-tunnel');
+    assert.equal(fileStatus.connected, true);
+    assert.equal(fileStatus.method, 'socks5-tunnel');
   });
 });
