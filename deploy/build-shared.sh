@@ -314,6 +314,20 @@ if st.get("state") == "running" and st.get("id") == expect_id:
 PY
         fi
     fi
+    # Плашка с другой версией после выкатки либо уже на сайте (входит в
+    # $COMMIT), либо устарела (в ней нет того, что теперь на сайте) — в обоих
+    # случаях нажатие ничего не даст или упадёт. 19.10.26 20:49 прямая выкатка
+    # 4ea93a98 оставила плашку 9a6902b3, которую применить было уже нельзя.
+    PENDING_FILE="/home/claude/.cloudcli/update-state/pending.json"
+    PENDING_ID="$(python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); print(s.get("id","") if s.get("remote")=="local-build" else "")' "$PENDING_FILE" 2>/dev/null)"
+    if [ -n "$PENDING_ID" ] && [ "$PENDING_ID" != "$COMMIT" ]; then
+        if git merge-base --is-ancestor "$PENDING_ID" "$COMMIT" 2>/dev/null; then
+            mv "$PENDING_FILE" "$PENDING_FILE.applied-$(date +%Y%m%d-%H%M%S)" && say "Плашка ${PENDING_ID:0:8} снята — эта версия уже вошла в выкатку"
+        elif ! git merge-base --is-ancestor "$COMMIT" "$PENDING_ID" 2>/dev/null; then
+            mv "$PENDING_FILE" "$PENDING_FILE.stale-$(date +%Y%m%d-%H%M%S)" && say "Плашка ${PENDING_ID:0:8} снята — устарела, в ней нет ${COMMIT:0:8}; соберите заново поверх живой"
+            /home/claude/scripts/notify.sh "Обновление сайта ${PENDING_ID:0:8} устарело после выкатки ${COMMIT:0:8} — плашка снята, соберите заново поверх живой" error >/dev/null 2>&1
+        fi
+    fi
 elif [ "${SWAP_REFUSED:-0}" = 1 ]; then
     # Файлы сайта не трогали — откатывать нечего.
     exit 1

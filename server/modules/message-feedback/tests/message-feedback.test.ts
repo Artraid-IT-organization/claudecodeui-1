@@ -4,8 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { closeConnection, getConnection } from '@/modules/database/connection.js';
-import { initializeDatabase } from '@/modules/database/init-db.js';
+import { closeConnection, getConnection, initializeDatabase } from '@/modules/database/index.js';
 import {
   FeedbackValidationError,
   listSessionFeedback,

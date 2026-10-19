@@ -57,9 +57,12 @@ const CODEX_WORKER_NOTIFY_MARKER = 'cloudcli-worker';
 const CODEX_RUN_COMPLETE_NOTIFY_MARKER = 'cloudcli-run-complete';
 const execFileAsync = promisify(execFile);
 
+// Тот же каталог, что у survivor-runs.js: рядом с базой сайта.
 function liveRunsDir(): string {
-  return process.env.CLOUDCLI_LIVE_RUNS_DIR
-    || path.join(os.homedir(), '.cloudcli-shared', 'live-runs');
+  if (process.env.CLOUDCLI_LIVE_RUNS_DIR) return process.env.CLOUDCLI_LIVE_RUNS_DIR;
+  const db = process.env.DATABASE_PATH?.trim();
+  const root = db ? path.dirname(path.resolve(db)) : path.join(os.homedir(), '.cloudcli-shared');
+  return path.join(root, 'live-runs');
 }
 
 function safeSessionPart(value: string): string {

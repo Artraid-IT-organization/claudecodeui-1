@@ -36,6 +36,7 @@ interface WorkStretchContainerProps {
   showRawParameters?: boolean;
   selectedProject?: Project | null;
   provider: Provider | string;
+  sessionId?: string | null;
   /**
    * Это свёртка идущей сейчас работы: под строкой виден живой хвост —
    * последние этапы мысли и шаги, в том числе помощников. Работа закончилась —
@@ -173,12 +174,14 @@ export default function WorkStretchContainer({
   showRawParameters,
   selectedProject,
   provider,
+  sessionId,
   isLive = false,
 }: WorkStretchContainerProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   // В режиме «Devin» перевод мыслей не запрашивается: он идёт через Claude (Haiku),
   // а там должны тратиться только токены Devin (Егор 03.10.26).
-  const claudeFree = provider === 'devin' || useSelectedChatProvider() === 'devin';
+  const selectedProvider = useSelectedChatProvider();
+  const claudeFree = provider === 'devin' || selectedProvider === 'devin';
   const digest = useThoughtDigest(stretch.thoughts, isExpanded && !claudeFree);
   const showLiveTail = isLive && !isExpanded;
   const liveThoughts = useMemo(() => stretch.thoughts.slice(-LIVE_THOUGHTS), [stretch.thoughts]);
@@ -294,6 +297,7 @@ export default function WorkStretchContainer({
                   showThinking={false}
                   selectedProject={selectedProject}
                   provider={provider}
+                  sessionId={sessionId}
                 />
               );
             }
@@ -330,6 +334,7 @@ export default function WorkStretchContainer({
                 showThinking={false}
                 selectedProject={selectedProject}
                 provider={provider}
+                sessionId={sessionId}
               />
             );
           })}

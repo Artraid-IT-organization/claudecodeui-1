@@ -67,7 +67,12 @@ function loadSessionFeedback(sessionId: string): Promise<Map<string, StoredFeedb
         }
         return map;
       })
-      .catch(() => new Map<string, StoredFeedback>());
+      .catch(() => {
+        // Промах кэша не запоминаем: иначе упавший при рестарте сервера запрос
+        // навсегда оставлял бы кнопки «не оценёнными» до перезагрузки страницы.
+        sessionFeedbackRequests.delete(sessionId);
+        return new Map<string, StoredFeedback>();
+      });
     sessionFeedbackRequests.set(sessionId, pending);
   }
   return pending;
