@@ -6,10 +6,12 @@
  * Сервис каждые 10–15 секунд проверяет, жив ли прокси, пишет JSON-статус в файл
  * и рассылает обновления клиентам через SSE.
  */
+import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 
 import type { Response } from 'express';
 
@@ -23,7 +25,15 @@ export type MacStatus = {
   method: string;
   /** ISO-время последней проверки. */
   lastCheck: string;
-  /** Причина неудачи проверки, если соединение потеряно. */
+  /** Разрешены ли поиски через текущий выход. */
+  searchReady: boolean;
+  /** Публичный IP выхода через MacBook. */
+  exitIp?: string;
+  /** Страна выхода в ISO-формате. */
+  countryCode?: string;
+  /** Обнаружен ли VPN на выходном IP. */
+  isVpn?: boolean;
+  /** Причина неудачи проверки или запрета поиска. */
   details?: string;
 };
 
@@ -41,6 +51,14 @@ export type MacStatusConfig = {
   checkSocks: boolean;
   /** Таймаут TCP-соединения в миллисекундах. */
   connectTimeoutMs: number;
+  /** Ожидаемая страна выхода в ISO-формате. */
+  expectedCountryCode: string;
+  /** Endpoint, возвращающий публичный IP запроса. */
+  exitIpUrl: string;
+  /** Endpoint геолокации, к которому добавляется IP. */
+  geoLookupUrl: string;
+  /** Endpoint VPN-проверки, к которому добавляется IP. */
+  vpnLookupUrl: string;
 };
 
 /** Результат одной попытки проверки прокси. */
@@ -66,6 +84,10 @@ export function getMacStatusConfig(): MacStatusConfig {
     statusFilePath: process.env.MAC_STATUS_FILE_PATH || defaultStatusFilePath(),
     checkSocks: process.env.MAC_STATUS_CHECK_SOCKS !== 'false',
     connectTimeoutMs: Number.parseInt(process.env.MAC_STATUS_CONNECT_TIMEOUT_MS || '5000', 10),
+    expectedCountryCode: (process.env.MAC_STATUS_EXPECTED_COUNTRY || 'RU').toUpperCase(),
+    exitIpUrl: process.env.MAC_STATUS_EXIT_IP_URL || 'https://api.ipify.org',
+    geoLookupUrl: process.env.MAC_STATUS_GEO_LOOKUP_URL || 'https://api.ipapi.is/?q=',
+    vpnLookupUrl: process.env.MAC_STATUS_VPN_LOOKUP_URL || 'https://api.vpndetection.io/',
   };
 }
 
@@ -76,6 +98,54 @@ function nowIso(): string {
 function writeJsonFile(filePath: string, value: unknown): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+const execFileAsync = promisify(execFile);
+
+type ExitQuality = {
+  exitIp: string;
+  countryCode: string;
+  isVpn: boolean;
+};
+
+const exitQualityCache = new Map<string, Omit<ExitQuality, 'exitIp'>>();
+
+async function checkExitQuality(config: Pick<MacStatusConfig, 'host' | 'port' | 'connectTimeoutMs' | 'expectedCountryCode' | 'exitIpUrl' | 'geoLookupUrl' | 'vpnLookupUrl'>): Promise<MacStatusCheckResult & Partial<ExitQuality>> {
+  try {
+    const timeoutSeconds = Math.max(1, Math.ceil(config.connectTimeoutMs / 1000));
+    const proxy = `socks5h://${config.host}:${config.port}`;
+    const { stdout: ipOutput } = await execFileAsync('curl', [
+      '--silent', '--show-error', '--fail', '--max-time', String(timeoutSeconds), '--proxy', proxy, config.exitIpUrl,
+    ]);
+    const exitIp = ipOutput.trim();
+    if (!net.isIP(exitIp)) return { ok: false, details: 'exit IP response is invalid' };
+
+    let quality = exitQualityCache.get(exitIp);
+    if (!quality) {
+      const [{ stdout: geoOutput }, { stdout: vpnOutput }] = await Promise.all([
+        execFileAsync('curl', ['--silent', '--show-error', '--fail', '--max-time', String(timeoutSeconds), `${config.geoLookupUrl}${encodeURIComponent(exitIp)}`]),
+        execFileAsync('curl', ['--silent', '--show-error', '--fail', '--max-time', String(timeoutSeconds), `${config.vpnLookupUrl}${encodeURIComponent(exitIp)}`]),
+      ]);
+      const geo = JSON.parse(geoOutput) as { country?: string };
+      const vpn = JSON.parse(vpnOutput) as { is_vpn?: boolean };
+      const countryCode = geo.country === 'Russia' ? 'RU' : geo.country || '';
+      if (!countryCode || typeof vpn.is_vpn !== 'boolean') {
+        return { ok: false, exitIp, details: 'exit quality response is incomplete' };
+      }
+      quality = { countryCode, isVpn: vpn.is_vpn };
+      exitQualityCache.set(exitIp, quality);
+    }
+
+    const ok = quality.countryCode === config.expectedCountryCode && !quality.isVpn;
+    return {
+      ok,
+      exitIp,
+      ...quality,
+      details: ok ? undefined : quality.isVpn ? 'VPN detected' : `unexpected country: ${quality.countryCode}`,
+    };
+  } catch (error) {
+    return { ok: false, details: error instanceof Error ? error.message : 'exit quality check failed' };
+  }
 }
 
 /**
@@ -150,19 +220,24 @@ export type MacStatusService = {
  * Сервис пишет статус в файл при каждой проверке (чтобы внешние скрипты видели
  * `lastCheck`), но логирует и рассылает SSE только при смене состояния.
  */
-export function createMacStatusService(config: MacStatusConfig): MacStatusService {
+export function createMacStatusService(
+  config: MacStatusConfig,
+  checks = { socks: checkSocksProxy, exit: checkExitQuality },
+): MacStatusService {
   const method = 'socks5-tunnel';
   let currentStatus: MacStatus = {
     connected: false,
     since: nowIso(),
     method,
     lastCheck: nowIso(),
+    searchReady: false,
     details: 'initial',
   };
 
   let timer: NodeJS.Timeout | null = null;
   const sseClients = new Set<Response>();
-  let isRunning = false;
+  let started = false;
+  let checking = false;
 
   function broadcastStatus(): void {
     const payload = JSON.stringify(currentStatus);
@@ -176,7 +251,9 @@ export function createMacStatusService(config: MacStatusConfig): MacStatusServic
   }
 
   function updateStatus(next: MacStatus): void {
-    const changed = currentStatus.connected !== next.connected;
+    const changed = currentStatus.connected !== next.connected
+      || currentStatus.searchReady !== next.searchReady
+      || currentStatus.exitIp !== next.exitIp;
     currentStatus = next;
     try {
       writeJsonFile(config.statusFilePath, next);
@@ -184,46 +261,62 @@ export function createMacStatusService(config: MacStatusConfig): MacStatusServic
       console.error('[mac-status] failed to write status file:', error);
     }
     if (changed) {
-      const transition = next.connected
-        ? `[mac-status] MacBook connected since ${next.since}`
-        : `[mac-status] MacBook disconnected, last check ${next.lastCheck}`;
+      const transition = !next.connected
+        ? `[mac-status] MacBook disconnected, last check ${next.lastCheck}`
+        : next.searchReady
+          ? `[mac-status] Russian exit ready: ${next.exitIp}`
+          : `[mac-status] MacBook connected, search blocked: ${next.details}`;
       console.log(transition, next.details || '');
       broadcastStatus();
     }
   }
 
   async function tick(): Promise<void> {
-    const check = await checkSocksProxy(config);
-    const lastCheck = nowIso();
-    if (check.ok) {
-      if (!currentStatus.connected) {
-        updateStatus({ connected: true, since: lastCheck, method, lastCheck });
-      } else {
-        updateStatus({ ...currentStatus, lastCheck });
+    if (checking) return;
+    checking = true;
+    try {
+      const check = await checks.socks(config);
+      const lastCheck = nowIso();
+      if (!check.ok) {
+        updateStatus({
+          connected: false,
+          since: currentStatus.connected ? lastCheck : currentStatus.since,
+          method,
+          lastCheck,
+          searchReady: false,
+          details: check.details,
+        });
+        return;
       }
-    } else if (currentStatus.connected) {
+
+      const quality = await checks.exit(config);
+      const connectedSince = currentStatus.connected ? currentStatus.since : lastCheck;
       updateStatus({
-        connected: false,
-        since: currentStatus.since,
+        connected: true,
+        since: connectedSince,
         method,
         lastCheck,
-        details: check.details,
+        searchReady: quality.ok,
+        exitIp: quality.exitIp,
+        countryCode: quality.countryCode,
+        isVpn: quality.isVpn,
+        details: quality.details,
       });
-    } else {
-      updateStatus({ ...currentStatus, lastCheck, details: check.details });
+    } finally {
+      checking = false;
     }
   }
 
   return {
     getStatus: () => currentStatus,
     start: () => {
-      if (isRunning) return;
-      isRunning = true;
+      if (started) return;
+      started = true;
       void tick();
       timer = setInterval(() => void tick(), config.intervalMs);
     },
     stop: () => {
-      isRunning = false;
+      started = false;
       if (timer) {
         clearInterval(timer);
         timer = null;

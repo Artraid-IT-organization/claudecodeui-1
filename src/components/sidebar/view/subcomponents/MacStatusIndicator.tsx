@@ -9,6 +9,10 @@ type MacStatusData = {
   since?: string;
   method?: string;
   lastCheck?: string;
+  searchReady?: boolean;
+  exitIp?: string;
+  countryCode?: string;
+  isVpn?: boolean;
   details?: string;
 };
 
@@ -82,19 +86,24 @@ export default function MacStatusIndicator({ variant }: MacStatusIndicatorProps)
     };
   }, []);
 
-  const status = linkLost ? 'lost' : data?.connected ? 'connected' : 'disconnected';
+  const status = linkLost || !data?.connected
+    ? 'disconnected'
+    : data.searchReady
+      ? 'ready'
+      : 'vpn';
 
   const dotClass = {
-    connected: 'bg-green-500',
-    disconnected: 'bg-gray-400',
-    lost: 'bg-yellow-400',
+    ready: 'bg-green-500',
+    vpn: 'bg-yellow-400',
+    disconnected: 'bg-red-500',
   }[status];
 
-  const tooltip =
-    status === 'lost'
-      ? 'Связь с сервером потеряна'
-      : status === 'connected'
-        ? `MacBook подключён с ${formatLastCheck(data?.lastCheck)}`
+  const tooltip = linkLost
+    ? 'Статус MacBook недоступен: связь с сервером потеряна'
+    : status === 'ready'
+      ? `MacBook подключён, российский выход готов (${data?.exitIp || 'IP проверен'})`
+      : status === 'vpn'
+        ? `MacBook подключён, но поиск заблокирован: ${data?.isVpn ? 'обнаружен VPN' : data?.details || 'выход не подтверждён'} (${data?.exitIp || 'IP неизвестен'})`
         : `MacBook не подключён, последняя проверка ${formatLastCheck(data?.lastCheck)}`;
 
   const isDesktop = variant === 'desktop';

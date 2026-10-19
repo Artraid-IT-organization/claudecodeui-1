@@ -60,7 +60,8 @@ describe('mac-status service', () => {
     assert.ok(result.details);
   });
 
-  it('writes status file and tracks state transitions', async () => {
+  it('writes status file and tracks ready and VPN states', async () => {
+    let exitReady = true;
     service = createMacStatusService({
       host: '127.0.0.1',
       port,
@@ -68,16 +69,37 @@ describe('mac-status service', () => {
       statusFilePath: statusFile,
       checkSocks: true,
       connectTimeoutMs: 1000,
+      expectedCountryCode: 'RU',
+      exitIpUrl: 'https://api.ipify.org',
+      geoLookupUrl: 'https://api.ipapi.is/?q=',
+      vpnLookupUrl: 'https://api.vpndetection.io/',
+    }, {
+      socks: checkSocksProxy,
+      exit: async () => ({
+        ok: exitReady,
+        exitIp: exitReady ? '46.138.41.160' : '84.17.46.10',
+        countryCode: exitReady ? 'RU' : 'NL',
+        isVpn: !exitReady,
+        details: exitReady ? undefined : 'VPN detected',
+      }),
     });
 
     service.start();
     await new Promise((resolve) => setTimeout(resolve, 250));
 
     assert.equal(service.getStatus().connected, true);
+    assert.equal(service.getStatus().searchReady, true);
+    assert.equal(service.getStatus().exitIp, '46.138.41.160');
     assert.equal(fs.existsSync(statusFile), true);
 
     const fileStatus = JSON.parse(fs.readFileSync(statusFile, 'utf8'));
     assert.equal(fileStatus.connected, true);
     assert.equal(fileStatus.method, 'socks5-tunnel');
+
+    exitReady = false;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(service.getStatus().connected, true);
+    assert.equal(service.getStatus().searchReady, false);
+    assert.equal(service.getStatus().isVpn, true);
   });
 });
