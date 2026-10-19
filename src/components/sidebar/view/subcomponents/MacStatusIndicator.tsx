@@ -111,7 +111,11 @@ export default function MacStatusIndicator({ variant }: MacStatusIndicatorProps)
   const iconSize = isDesktop ? 'h-3.5 w-3.5' : 'h-4 w-4';
 
   return (
-    <Tooltip content={tooltip} position="top">
+    <Tooltip
+      content={tooltip}
+      position="bottom"
+      className="max-w-64 whitespace-normal text-center"
+    >
       <div
         aria-label={tooltip}
         className={cn(
