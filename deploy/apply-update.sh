@@ -45,6 +45,12 @@ if st.get("id") == expect_id:
 PY
 }
 
+# Кнопка сайта запускает скрипт с окружением службы (Node 22 из nvm), а запуск
+# из чата, cron или systemd-run получает системный Node 18 — vite на нём падает
+# «crypto.hash is not a function» все 12 попыток (19.10.26). Берём Node 22+ сами.
+NVM_NODE="$(ls -d /home/claude/.nvm/versions/node/v2[2-9]*/bin 2>/dev/null | sort -V | tail -1)"
+[ -n "$NVM_NODE" ] && export PATH="$NVM_NODE:$PATH"
+
 trap 'if [ "$SUCCESS" -ne 1 ]; then write_failed "применение прервалось на ошибке"; fi' EXIT
 
 [ -f "$PENDING" ] || { echo "Нет ожидающего обновления"; exit 1; }
