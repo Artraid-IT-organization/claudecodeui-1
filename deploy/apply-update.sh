@@ -48,10 +48,16 @@ PY
 # Кнопка сайта запускает скрипт с окружением службы (Node 22 из nvm), а запуск
 # из чата, cron или systemd-run получает системный Node 18 — vite на нём падает
 # «crypto.hash is not a function» все 12 попыток (19.10.26). Берём Node 22+ сами.
-NVM_NODE="$(ls -d /home/claude/.nvm/versions/node/v2[2-9]*/bin 2>/dev/null | sort -V | tail -1)"
+NVM_NODE="$(ls -d /home/claude/.nvm/versions/node/v*/bin 2>/dev/null | sort -V | tail -1)"
 [ -n "$NVM_NODE" ] && export PATH="$NVM_NODE:$PATH"
 
 trap 'if [ "$SUCCESS" -ne 1 ]; then write_failed "применение прервалось на ошибке"; fi' EXIT
+
+# Одна установка за раз: вторая, запущенная руками, снесла бы замороженную
+# копию первой посреди сборки (кнопка сайта сама не пускает вторую, пока
+# apply.json в running, но ручной запуск этого не знает).
+exec 8>/tmp/ccui-apply-update.lock
+flock -n 8 || { echo "Уже идёт другая установка обновления"; exit 1; }
 
 [ -f "$PENDING" ] || { echo "Нет ожидающего обновления"; exit 1; }
 readarray -t values < <(python3 - "$PENDING" <<'PY'
@@ -93,6 +99,10 @@ if [ "$REMOTE" = "local-build" ]; then
         write_failed "версия устарела — на сайт уже выкатили более новую, её нужно собрать заново"
         /home/claude/scripts/notify.sh "Обновление сайта ${ID:0:8} устарело (на сайте уже ${LIVE:0:8}) — плашка снята, соберите заново поверх живой" error >/dev/null 2>&1
         exit 1
+    fi
+    if [ "$LIVE" = "$ID" ]; then
+        echo "Версия ${ID:0:12} уже на сайте — плашка снята"
+        clear_pending; write_ok; SUCCESS=1; exit 0
     fi
     SNAP_ROOT=/home/claude/.cloudcli/update-builds
     SNAP="$SNAP_ROOT/${ID:0:12}"
