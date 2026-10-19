@@ -128,6 +128,19 @@ export const messageFeedbackDb = {
   },
 
   /**
+   * Удаляет оценку сообщения — отмена голоса повторным кликом на активную кнопку.
+   * Возвращает true, если запись существовала и была удалена.
+   */
+  remove(messageId: string, userId: number): boolean {
+    ensureTable();
+    const db = getConnection();
+    const result = db
+      .prepare('DELETE FROM message_feedback WHERE message_id = ? AND user_id = ?')
+      .run(messageId, userId);
+    return result.changes > 0;
+  },
+
+  /**
    * Все оценки сессии пользователя — для восстановления состояния кнопок после
    * перезагрузки страницы. Чужую сессию не отдаёт: фильтр по user_id.
    */

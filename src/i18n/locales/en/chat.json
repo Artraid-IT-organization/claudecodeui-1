@@ -18,6 +18,7 @@
     "like": "Response format works well",
     "dislike": "Response format is inconvenient",
     "saved": "Rating saved",
+    "cleared": "Rating cleared",
     "saveError": "Could not save the rating",
     "dialogTitle": "What was inconvenient about the format?",
     "commentPlaceholder": "Comment, if needed",

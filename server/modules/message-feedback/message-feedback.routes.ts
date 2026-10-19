@@ -14,6 +14,7 @@ import express from 'express';
 import {
   FeedbackValidationError,
   listSessionFeedback,
+  removeMessageFeedback,
   saveMessageFeedback,
   type FeedbackDirection,
 } from '@/modules/message-feedback/message-feedback.service.js';
@@ -43,6 +44,22 @@ router.get('/feedback', (req, res) => {
   } catch (error) {
     console.error('Не удалось прочитать оценки сообщений:', error);
     return res.status(500).json({ error: 'Не удалось прочитать оценки' });
+  }
+});
+
+router.delete('/:messageId/feedback', (req, res) => {
+  const userId = readUserId(req);
+  if (userId === null) return res.status(401).json({ error: 'нет пользователя' });
+  const messageId = String(req.params.messageId || '').trim();
+  if (!messageId || messageId.length > 200) {
+    return res.status(400).json({ error: 'нужен message_id' });
+  }
+  try {
+    const deleted = removeMessageFeedback(messageId, userId);
+    return res.json({ message_id: messageId, deleted });
+  } catch (error) {
+    console.error('Не удалось удалить оценку сообщения:', error);
+    return res.status(500).json({ error: 'Не удалось удалить оценку' });
   }
 });
 

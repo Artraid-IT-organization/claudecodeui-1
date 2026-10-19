@@ -1265,6 +1265,9 @@ HTML-тегов; сообщения разделяются `---`. HTML/PDF — �
 сообщение, `PUT /api/messages/{message_id}/feedback` идемпотентен — повторное
 нажатие переписывает ту же строку (`ON CONFLICT`), `revision` растёт; дубль
 физически невозможен, поэтому повторная доставка клика безопасна.
+`DELETE /api/messages/{message_id}/feedback` — отмена оценки: повторный клик
+на уже активную кнопку удаляет запись из базы, кнопки возвращаются в нейтральное
+состояние. Ответ `{ message_id, deleted: bool }`. Удалённая оценка не учитывается.
 
 - Таблица `message_feedback` (в общей auth.db, создаётся лениво репозиторием):
   `message_id PK, session_id, user_id, direction ±1, category, comment,

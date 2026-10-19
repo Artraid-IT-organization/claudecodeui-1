@@ -93,6 +93,14 @@ async function sendFeedback(
   return response.ok;
 }
 
+async function deleteFeedback(messageId: string): Promise<boolean> {
+  const response = await authenticatedFetch(
+    `/api/messages/${encodeURIComponent(messageId)}/feedback`,
+    { method: 'DELETE' }
+  );
+  return response.ok;
+}
+
 async function formatExtras(content: string): Promise<Record<string, unknown>> {
   try {
     const fingerprint = extractFormatFingerprint(content);
@@ -121,7 +129,7 @@ export default function MessageFeedbackControl({
   const [category, setCategory] = useState<DislikeCategory>('unclear');
   const [comment, setComment] = useState('');
   const [busy, setBusy] = useState(false);
-  const [savedFlash, setSavedFlash] = useState(false);
+  const [savedFlash, setSavedFlash] = useState<'saved' | 'cleared' | false>(false);
   const [error, setError] = useState<string | null>(null);
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sessionMapRef = useRef<Map<string, StoredFeedback> | null>(null);
@@ -149,8 +157,8 @@ export default function MessageFeedbackControl({
     []
   );
 
-  const flashSaved = useCallback(() => {
-    setSavedFlash(true);
+  const flashSaved = useCallback((kind: 'saved' | 'cleared' = 'saved') => {
+    setSavedFlash(kind);
     if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
     savedTimerRef.current = setTimeout(() => setSavedFlash(false), SAVED_FLASH_MS);
   }, []);
@@ -164,8 +172,30 @@ export default function MessageFeedbackControl({
     [messageId, flashSaved]
   );
 
+  const clearVote = useCallback(async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const ok = await deleteFeedback(messageId);
+      if (ok) {
+        setSelected(null);
+        sessionMapRef.current?.delete(messageId);
+        flashSaved('cleared');
+      } else {
+        setError(t('feedback.saveError', { defaultValue: 'Не удалось сохранить оценку' }));
+      }
+    } catch {
+      setError(t('feedback.saveError', { defaultValue: 'Не удалось сохранить оценку' }));
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, messageId, flashSaved, t]);
+
   const voteLike = useCallback(async () => {
     if (busy) return;
+    // Повторный клик на активный лайк — отмена оценки.
+    if (selected === 'like') return clearVote();
     setBusy(true);
     setError(null);
     try {
@@ -185,7 +215,7 @@ export default function MessageFeedbackControl({
     } finally {
       setBusy(false);
     }
-  }, [busy, content, messageId, sessionId, applyVote, t]);
+  }, [busy, selected, content, messageId, sessionId, applyVote, clearVote, t]);
 
   const saveDislike = useCallback(async () => {
     if (busy) return;
@@ -240,13 +270,15 @@ export default function MessageFeedbackControl({
         aria-pressed={selected === 'dislike'}
         title={t('feedback.dislike', { defaultValue: 'Формат ответа неудобен' })}
         disabled={busy}
-        onClick={() => setDialogOpen(true)}
+        onClick={() => (selected === 'dislike' ? clearVote() : setDialogOpen(true))}
       >
         <ThumbsDown className="h-3.5 w-3.5" fill={selected === 'dislike' ? 'currentColor' : 'none'} />
       </button>
       {savedFlash && (
         <span className="ml-1 whitespace-nowrap text-gray-400 dark:text-gray-500">
-          {t('feedback.saved', { defaultValue: 'Оценка сохранена' })}
+          {savedFlash === 'cleared'
+            ? t('feedback.cleared', { defaultValue: 'Оценка снята' })
+            : t('feedback.saved', { defaultValue: 'Оценка сохранена' })}
         </span>
       )}
       {error && !dialogOpen && (
