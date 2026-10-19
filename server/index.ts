@@ -68,6 +68,11 @@ import { worktreesRoutes } from './modules/worktrees/index.js';
 import browserUseMcpRoutes from './modules/browser-use/browser-use-mcp.routes.js';
 import { browserUseService } from './modules/browser-use/browser-use.service.js';
 import { configureWebPush } from './modules/notifications/index.js';
+import {
+  createMacStatusRouter,
+  createMacStatusService,
+  getMacStatusConfig,
+} from './modules/mac-status/index.js';
 
 // Модули загружаются раньше любого кода, поэтому защита ставится сразу
 // после блока импортов — до первого запроса и до открытия сокетов.
@@ -152,6 +157,8 @@ const agentRoutes = createAgentModule({
     queryOpenCode,
 });
 
+const macStatusService = createMacStatusService(getMacStatusConfig());
+
 // Single WebSocket server that handles chat, shell, and plugin proxy paths.
 const wss = createWebSocketServer(server, {
     verifyClient: {
@@ -217,6 +224,9 @@ app.use('/api', validateApiKey);
 
 // Authentication routes (public)
 app.use('/api/auth', authRoutes);
+
+// MacBook connection status (public endpoint used by the header indicator)
+app.use('/api/mac-status', createMacStatusRouter(macStatusService));
 
 // Resolves the authenticated user's own CLAUDE_CONFIG_DIR/workspace/API key
 // for the rest of the request (OPEN_REGISTRATION instances only - a no-op
@@ -526,6 +536,9 @@ async function startServer() {
             console.log(`${terminalTextStyles.tip('[TIP]')}  Run "cloudcli status" for full configuration details`);
             console.log('');
 
+            // Start monitoring MacBook SOCKS tunnel (127.0.0.1:1080 by default).
+            macStatusService.start();
+
             // Start watching the projects folder for changes. Skipped on
             // OPEN_REGISTRATION: with no fixed CLAUDE_CONFIG_DIR for this
             // instance, the watcher's boot-time root falls back to the
@@ -748,6 +761,11 @@ async function startServer() {
                     await stopAllPlugins();
                 } catch (err) {
                     console.error('[Plugins] Error stopping plugins during shutdown:', getErrorMessage(err));
+                }
+                try {
+                    macStatusService.stop();
+                } catch (err) {
+                    console.error('[MacStatus] Error stopping monitor during shutdown:', getErrorMessage(err));
                 }
                 try {
                     await removeLocalServerMarker();

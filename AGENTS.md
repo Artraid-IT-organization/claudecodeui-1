@@ -4,6 +4,18 @@
 
 For every task that creates, modifies, refactors, or reviews backend code under `server/`, load and follow `$backend-module-standards` from `.agents/skills/backend-module-standards/SKILL.md`. Apply it only to backend code; do not impose those architecture rules on the frontend.
 
+## Мониторинг подключения MacBook (`server/modules/mac-status`, 19.10.26)
+
+MacBook владельца поднимает SSH SOCKS5-туннель (`ru-exit.command`) → на сервере появляется прокси 127.0.0.1:1080. Модуль `mac-status` проверяет этот прокси каждые 15 с (конфигурируется `MAC_STATUS_INTERVAL_MS`) и:
+
+- пишет JSON-статус в `~/.cloudcli/macbook-status.json`;
+- отдаёт `GET /api/mac-status` и SSE `/api/mac-status/stream`;
+- пушит изменения только при смене `connected` (не на каждую проверку).
+
+Индикатор в шапке (`MacStatusIndicator`) слушает SSE `/api/mac-status/stream` и показывает цветную точку: зелёная — `connected=true`, серая — `connected=false`, жёлтая — потеряна связь с самим сервером SSE. В шапке сайдбара он стоит слева от кнопки обновления в обеих версиях (порядок: MacBook, Refresh, Pulse, NewChat) и неинтерактивен. Внешние поисковые скрипты читают тот же JSON-файл перед запуском и не стартуют без подключения.
+
+Тесты бэкенда (`server/**/*.test.ts`) не включаются в `dist-server`: `server/tsconfig.json` исключает `**/*.test.ts`, чтобы сборка не требовала dev-зависимостей в окружении без `vitest`.
+
 ## Защита выкатки от гонки сборок (`promote-dist-server.mjs`, 16.10.26)
 
 Параллельные чаты собирают `dist-server` из разных worktree/веток и могут молча

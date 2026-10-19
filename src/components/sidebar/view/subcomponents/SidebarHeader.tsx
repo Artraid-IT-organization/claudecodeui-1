@@ -12,6 +12,7 @@ import type { Project, ProjectSession, ServerScope } from '../../../../types/app
 import type { SessionWithProvider, SidebarSearchMode } from '../../types/types';
 
 import SidebarPulseTrigger from './SidebarPulseTrigger';
+import MacStatusIndicator from './MacStatusIndicator';
 
 const MOD_KEY =
   typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl';
@@ -175,6 +176,7 @@ export default function SidebarHeader({
           )}
 
           <div className="flex flex-shrink-0 items-center gap-0.5">
+            <MacStatusIndicator variant="desktop" />
             <Button
               variant="ghost"
               size="sm"
@@ -302,6 +304,7 @@ export default function SidebarHeader({
           )}
 
           <div className="flex flex-shrink-0 gap-1.5">
+            <MacStatusIndicator variant="mobile" />
             <button
               className="flex h-8 w-8 items-center justify-center rounded-lg bg-muted/50 transition-all active:scale-95"
               onClick={onRefresh}

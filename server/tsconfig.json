@@ -36,5 +36,14 @@
     "types": ["node"]
   },
   "include": ["./**/*.js", "./**/*.ts", "../shared/**/*.js", "../shared/**/*.ts"],
-  "exclude": ["../dist", "../dist-server", "../dist-server.next", "../dist-server.old", "../node_modules", "../src"]
+  "exclude": [
+    "../dist",
+    "../dist-server",
+    "../dist-server.next",
+    "../dist-server.old",
+    "../node_modules",
+    "../src",
+    "./**/*.test.ts",
+    "./**/*.test.js"
+  ]
 }
