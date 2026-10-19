@@ -194,6 +194,7 @@ async function buildSessionUpsertedEvent(updatedProviderSessionId: string): Prom
       serverScope: groupedRow.server_scope ?? null,
       flagged: Boolean(groupedRow.is_flagged),
       done: Boolean(groupedRow.is_done),
+      promptLaunched: Boolean(groupedRow.prompt_launched),
     },
     project: project
       ? {

@@ -36,6 +36,8 @@ type SessionRow = {
   is_flagged: number;
   /** Галочка «сделано»: 1 — стоит, 0 — нет. Взаимоисключает флажок. */
   is_done: number;
+  /** Промпт из чата «Промптов» уже ушёл кнопкой «В новый чат»: 1 — да. */
+  prompt_launched: number;
   /** Каталог аккаунта, которому принадлежит чат (изоляция пользователей). */
   account_dir: string | null;
   /** Кто из веб-пользователей инициировал чат (NULL у наследия и у строк с диска). */
@@ -53,7 +55,7 @@ type RecentSessionsPage = {
 };
 
 const SESSION_ROW_COLUMNS =
-  'session_id, provider, provider_session_id, project_path, jsonl_path, custom_name, title_source, model, effort, group_id, group_label, server_scope, is_flagged, is_done, account_dir, initiated_by_user_id, devin_connection_id, isArchived, created_at, updated_at';
+  'session_id, provider, provider_session_id, project_path, jsonl_path, custom_name, title_source, model, effort, group_id, group_label, server_scope, is_flagged, is_done, prompt_launched, account_dir, initiated_by_user_id, devin_connection_id, isArchived, created_at, updated_at';
 
 /**
  * Decides whether a freshly-derived title candidate should replace the
@@ -635,6 +637,19 @@ export const sessionsDb = {
        SET is_flagged = ?, is_done = ?
        WHERE session_id = ?`
     ).run(mark === 'flag' ? 1 : 0, mark === 'done' ? 1 : 0, sessionId);
+  },
+
+  /**
+   * Отмечает/снимает признак «промпт из этого чата «Промптов» уже ушёл
+   * кнопкой «В новый чат». `updated_at` не трогаем — метка не активность.
+   */
+  setSessionPromptLaunched(sessionId: string, launched: boolean): void {
+    const db = getConnection();
+    db.prepare(
+      `UPDATE sessions
+       SET prompt_launched = ?
+       WHERE session_id = ?`
+    ).run(launched ? 1 : 0, sessionId);
   },
 
   setSessionGroup(sessionId: string, groupId: string | null, groupLabel: string | null): void {

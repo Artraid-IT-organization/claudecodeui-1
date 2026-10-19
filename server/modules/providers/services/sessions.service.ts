@@ -141,6 +141,7 @@ type ArchivedSessionListItem = {
   serverScope: ServerScope;
   flagged: boolean;
   done: boolean;
+  promptLaunched: boolean;
 };
 
 type RecentSessionListItem = Pick<
@@ -315,6 +316,7 @@ export const sessionsService = {
         lastActivity: session.updated_at ?? session.created_at ?? null,
         flagged: Boolean(session.is_flagged),
         done: Boolean(session.is_done),
+        promptLaunched: Boolean(session.prompt_launched),
         // Блок верхней панели: своё значение чата важнее значения папки.
         serverScope: normalizeServerScope(session.server_scope ?? project?.server_scope),
       };
@@ -443,6 +445,24 @@ export const sessionsService = {
 
     sessionsDb.setSessionMark(sessionId, mark);
     return { mark };
+  },
+
+  /**
+   * Ставит/снимает признак «промпт из этого чата «Промптов» уже ушёл
+   * кнопкой «В новый чат». Независима от mark — метка чата не меняется.
+   */
+  setSessionPromptLaunched(sessionId: string, launched: boolean): { promptLaunched: boolean } {
+    const session = sessionsDb.getSessionById(sessionId);
+    if (!session) {
+      throw new AppError(`Session "${sessionId}" was not found.`, {
+        code: 'SESSION_NOT_FOUND',
+        statusCode: 404,
+      });
+    }
+    assertSessionReadable(session);
+
+    sessionsDb.setSessionPromptLaunched(sessionId, launched);
+    return { promptLaunched: launched };
   },
 
   /**
@@ -697,6 +717,7 @@ export const sessionsService = {
         isProjectArchived: Boolean(project?.isArchived),
         flagged: Boolean(session.is_flagged),
         done: Boolean(session.is_done),
+        promptLaunched: Boolean(session.prompt_launched),
         // Блок верхней панели: архив тоже делится на блоки, иначе дела
         // второго сервера всплывали бы в архиве обычных «Проектов».
         serverScope: normalizeServerScope(session.server_scope ?? project?.server_scope),

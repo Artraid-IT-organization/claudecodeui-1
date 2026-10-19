@@ -364,6 +364,12 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ mark }),
     }),
+  // Отмечает чат «Промптов» как использованный кнопкой «В новый чат».
+  setSessionPromptLaunched: (sessionId, launched = true) =>
+    authenticatedFetch(`/api/providers/sessions/${encodeURIComponent(sessionId)}/prompt-launched`, {
+      method: 'POST',
+      body: JSON.stringify({ launched }),
+    }),
   // Clusters this project's currently ungrouped sessions by topic via one
   // LLM call. Assignments land through the usual session_upserted websocket
   // broadcast, so this response is mainly useful for immediate UI feedback

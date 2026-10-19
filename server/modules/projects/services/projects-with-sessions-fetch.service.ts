@@ -29,6 +29,8 @@ type SessionSummary = {
   flagged: boolean;
   /** Галочка «сделано» на чате. */
   done: boolean;
+  /** Промпт из чата «Промптов» уже ушёл кнопкой «В новый чат». */
+  promptLaunched: boolean;
 };
 
 type SessionRepositoryRow = {
@@ -42,6 +44,7 @@ type SessionRepositoryRow = {
   server_scope?: ServerScope | null;
   is_flagged?: number | null;
   is_done?: number | null;
+  prompt_launched?: number | null;
 };
 
 export type ProjectListItem = {
@@ -167,6 +170,7 @@ function mapSessionRowToSummary(row: SessionRepositoryRow): SessionSummary {
     serverScope: row.server_scope ?? null,
     flagged: Boolean(row.is_flagged),
     done: Boolean(row.is_done),
+    promptLaunched: Boolean(row.prompt_launched),
   };
 }
 

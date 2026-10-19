@@ -180,6 +180,7 @@ async function broadcastCanonicalSessionUpsert(appSessionId: string): Promise<vo
       serverScope: row.server_scope ?? null,
       flagged: Boolean(row.is_flagged),
       done: Boolean(row.is_done),
+      promptLaunched: Boolean(row.prompt_launched),
     },
     project: project
       ? {

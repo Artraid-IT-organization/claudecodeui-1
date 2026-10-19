@@ -69,6 +69,11 @@ export function saveMessageFeedback(input: SaveFeedbackInput): MessageFeedbackRo
   });
 }
 
+/** Удаляет оценку — отмена голоса повторным кликом. */
+export function removeMessageFeedback(messageId: string, userId: number): boolean {
+  return messageFeedbackDb.remove(messageId, userId);
+}
+
 export function listSessionFeedback(sessionId: string, userId: number): MessageFeedbackRow[] {
   return messageFeedbackDb.listBySession(sessionId, userId);
 }

@@ -615,6 +615,19 @@ const addSessionDoneColumn = (db: Database): void => {
 };
 
 /**
+ * Добавляет `prompt_launched` — признак «из этого чата «Промптов» промпт
+ * уже ушёл кнопкой «В новый чат». Ставится один раз, в списке показывает
+ * иконку провайдера серой. Независима от is_flagged/is_done.
+ */
+const addSessionPromptLaunchedColumn = (db: Database): void => {
+  if (!tableExists(db, 'sessions')) {
+    return;
+  }
+  const columnNames = getTableInfo(db, 'sessions').map((column) => column.name);
+  addColumnToTableIfNotExists(db, 'sessions', columnNames, 'prompt_launched', 'INTEGER NOT NULL DEFAULT 0');
+};
+
+/**
  * Атрибуция Devin-чатов (Connection Layer): кто из веб-пользователей
  * инициировал сессию и через какой корпоративный канал она идёт. Обе колонки
  * nullable — существующие строки авторства не знают, а привязка к каналу
@@ -763,6 +776,7 @@ export const runMigrations = (db: Database) => {
     addServerScopeColumns(db);
     addSessionFlagColumn(db);
     addSessionDoneColumn(db);
+    addSessionPromptLaunchedColumn(db);
     addSessionAttributionColumns(db);
     ensureProjectsForSessionPaths(db);
 
