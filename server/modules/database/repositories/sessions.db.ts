@@ -852,11 +852,9 @@ export const sessionsDb = {
     // Лента — только чаты, запущенные человеком (Егор 15.10.26: «запуски
     // нейросетей я не должен видеть, мне важен результат»). Служебные =
     // origin='auto' + одноразовые папки (та же логика, что isMachineMadeChat
-    // в chat-groups). Проект «Промпты» из ленты не вырезается (19.10.26:
-    // Егор не находил в списке рабочий чат из этой папки — там все чаты
-    // ручные, быстрый доступ сверху даёт закреплённая секция).
-    // includeInternal возвращает служебные одним параметром — маленькая
-    // кнопка «показать служебные» внизу списка.
+    // в chat-groups). includeInternal возвращает служебные одним параметром —
+    // маленькая кнопка «показать служебные» внизу списка. Проект «Промпты»
+    // всегда остаётся только в своей закреплённой секции (Егор 19.10.26).
     const internalClause = includeInternal ? '' : `
       AND (sessions.origin IS NULL OR sessions.origin <> 'auto')
       AND (sessions.project_path IS NULL OR (
@@ -865,10 +863,14 @@ export const sessionsDb = {
         AND lower(sessions.project_path) NOT GLOB '*e2e'
       ))
     `;
+    const promptsClause = `
+      AND COALESCE(sessions.project_path, '') <> '/home/claude/prompts'
+      AND COALESCE(projects.custom_project_name, '') <> 'Промпты'
+    `;
     const visibilityClause = `
       sessions.isArchived = 0
       AND (projects.isArchived IS NULL OR projects.isArchived = 0)
-    ` + internalClause + accountVisibilitySql(accountVisibility, 'sessions') + scopeClause;
+    ` + internalClause + promptsClause + accountVisibilitySql(accountVisibility, 'sessions') + scopeClause;
     const accountDir = getActiveAccountDir();
     const scopeParams = serverScope ? [serverScope] : [];
     const rows = db

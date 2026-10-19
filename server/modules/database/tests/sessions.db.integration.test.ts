@@ -143,6 +143,23 @@ test('recent sessions are globally ordered, paginated, and limited to visible co
   });
 });
 
+test('recent sessions keep Prompts chats out of the general feed in every internal visibility mode', async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createSession('regular', 'claude', '/workspace/regular', 'Regular');
+    sessionsDb.createSession('prompts-by-path', 'claude', '/home/claude/prompts', 'Prompt by path');
+    sessionsDb.createSession('prompts-by-name', 'claude', '/workspace/renamed-prompts', 'Prompt by name');
+    sessionsDb.createSession('internal', 'claude', '/tmp/internal', 'Internal');
+    projectsDb.updateCustomProjectName('/workspace/renamed-prompts', 'Промпты');
+
+    const visibleIds = sessionsDb.getRecentSessionsPage(10, 0).sessions.map((session) => session.session_id);
+    const internalIds = sessionsDb.getRecentSessionsPage(10, 0, undefined, undefined, 'current', true)
+      .sessions.map((session) => session.session_id);
+
+    assert.deepEqual(visibleIds, ['regular']);
+    assert.deepEqual(internalIds.sort(), ['internal', 'regular']);
+  });
+});
+
 test('Devin has its own list: owner sees it across Claude accounts, Claude and Codex lists do not, guests never', async () => {
   await withIsolatedDatabase(() => {
     const projectPath = '/workspace/devin-space-project';
