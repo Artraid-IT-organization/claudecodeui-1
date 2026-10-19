@@ -1020,6 +1020,22 @@ router.post(
   }),
 );
 
+/**
+ * Отметка «из чата «Промптов» промпт ушёл кнопкой «В новый чат». Ставит
+ * сама вкладка после того, как текст поставлен в очередь нового чата;
+ * идемпотентна (повторное нажатие кнопки просто оставляет 1).
+ */
+router.post(
+  '/sessions/:sessionId/prompt-launched',
+  asyncHandler(async (req: Request, res: Response) => {
+    const sessionId = parseSessionId(req.params.sessionId);
+    assertSessionRowAllowed(sessionId);
+    const launched = (req.body ?? {}).launched !== false;
+    const result = sessionsService.setSessionPromptLaunched(sessionId, launched);
+    res.json(createApiSuccessResponse(result));
+  }),
+);
+
 router.get(
   '/sessions/:sessionId/provider-id',
   asyncHandler(async (req: Request, res: Response) => {

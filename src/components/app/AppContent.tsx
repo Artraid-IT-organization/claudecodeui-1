@@ -163,10 +163,17 @@ function AppContentInner() {
       const target = resolveMainChatProject(projects, serverScope);
       if (!target || !text.trim()) return;
       queuePendingFirstMessage(target.projectId, text);
+      // Чат-источник в «Промптах» помечаем promptLaunched: строка в блоке
+      // получает серую иконку — видно, что промпт уже ушёл в работу.
+      // Ставим до перехода, пока selectedSession ещё исходный; запрос
+      // идемпотентен, повторное нажатие безопасно.
+      if (selectedSession?.id) {
+        void api.setSessionPromptLaunched(selectedSession.id).catch(() => {});
+      }
       handleNewSession(target);
       notifyPendingFirstMessage();
     },
-    [projects, serverScope, handleNewSession],
+    [projects, serverScope, handleNewSession, selectedSession],
   );
   const runInNewChatEnabled = isPromptsProject(selectedProject);
   // Значение контекста мемоизировано: без этого каждый ререндер AppContent

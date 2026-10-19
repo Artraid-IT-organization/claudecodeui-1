@@ -67,6 +67,8 @@ export interface ProjectSession {
   flagged?: boolean;
   /** Галочка «сделано»: приглушает чат в списке. Взаимоисключает флажок. */
   done?: boolean;
+  /** Из чата «Промптов» промпт уже ушёл кнопкой «В новый чат» — серая иконка. */
+  promptLaunched?: boolean;
   __provider?: LLMProvider;
   // Tags the session with the owning project's DB `projectId` so UI handlers
   // (session switching, sidebar focus, etc.) can match against selectedProject.

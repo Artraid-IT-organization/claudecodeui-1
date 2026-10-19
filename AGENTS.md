@@ -169,6 +169,14 @@ activate) — браузер качает страницу параллельн�
 - Контекст `RunInNewChatContext` (`{enabled, run}`) провайдится в AppContent
   над MainContent и мемоизирован — без `useMemo` каждый ререндер AppContent
   пересоздавал бы значение и перерисовывал все блоки кода ленты.
+- Чат-источник помечается `sessions.prompt_launched=1`
+  (`POST /api/providers/sessions/:id/prompt-launched`, идемпотентно,
+  вызывается из `runPromptInNewChat` до перехода). Поле проносится во все
+  обогащения сессий (`projects-with-sessions-fetch`, `sessions.service`,
+  `sessions-watcher`, `chat-run-registry`). В строке чата «Промптов»
+  иконка провайдера становится серой (`grayscale opacity-40` в
+  `SidebarSessionItem`) — без новых цветов и элементов. Метка независима
+  от `is_flagged`/`is_done` и взаимоисключений с ними нет.
 - Снимок-проверка: временный экземпляр с `HOME=/tmp/…`, workspace webuser'а —
   симлинк на `/home/claude` (иначе validateWorkspacePath не пустит пути проектов),
   `PLATFORM_OWNER_WEB_USER_IDS=<id>`, креды `.credentials.json` КОПИРУЮТСЯ

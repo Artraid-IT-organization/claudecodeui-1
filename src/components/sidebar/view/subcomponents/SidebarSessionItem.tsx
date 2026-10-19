@@ -275,7 +275,12 @@ export default function SidebarSessionItem({
       aria-label={t('sessions.done', { defaultValue: 'С галочкой' })}
     />
   ) : (
-    <LLMProviderLogo provider={session.__provider} className="h-3 w-3" />
+    // promptLaunched — из чата «Промптов» промпт уже ушёл «В новый чат»:
+    // иконка серая, без новых цветов и элементов в строке.
+    <LLMProviderLogo
+      provider={session.__provider}
+      className={cn('h-3 w-3', session.promptLaunched && 'opacity-40 grayscale')}
+    />
   );
 
   return (
