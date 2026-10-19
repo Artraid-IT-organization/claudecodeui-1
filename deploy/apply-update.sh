@@ -66,11 +66,13 @@ state = json.load(open(sys.argv[1]))
 print(state.get("id", ""))
 print(state.get("remote", ""))
 print(state.get("sourceWorktree", ""))
+print(state.get("prebuilt") or "")
 PY
 )
 ID="${values[0]:-}"
 REMOTE="${values[1]:-}"
 SOURCE="${values[2]:-}"
+READY="${values[3]:-}"
 
 [ -n "$ID" ] || { echo "У ожидающего обновления нет id"; exit 1; }
 [ -z "${CCUI_UPDATE_ID:-}" ] || [ "$CCUI_UPDATE_ID" = "$ID" ] || {
@@ -105,6 +107,27 @@ if [ "$REMOTE" = "local-build" ]; then
         clear_pending; write_ok; SUCCESS=1; exit 0
     fi
     SNAP_ROOT=/home/claude/.cloudcli/update-builds
+    # Быстрый путь: при подготовке плашки версия уже собрана и отложена —
+    # ставим её, не собирая второй раз (секунды вместо 3–6 минут; Егор 19.10.26:
+    # «обновление должно просто браться и применяться»). Сначала переносим её
+    # к себе: подготовка следующей плашки в соседнем чате убирает ready-*.
+    TAKEN="$SNAP_ROOT/applying-${ID:0:12}"
+    for old in "$SNAP_ROOT"/applying-*; do
+        [ -d "$old" ] && [ "$old" != "$TAKEN" ] && rm -rf "$old"
+    done
+    if [ -n "$READY" ] && [ -d "$READY" ] && [ ! -d "$TAKEN" ]; then
+        mv "$READY" "$TAKEN" 2>/dev/null || true
+    fi
+    if [ -f "$TAKEN/COMMIT" ] && [ "$(cat "$TAKEN/COMMIT")" = "$ID" ] && [ -f "$TAKEN/build-shared.sh" ]; then
+        echo "[$(date +%H:%M:%S)] Версия ${ID:0:12} уже собрана при подготовке — ставлю без пересборки"
+        if bash "$TAKEN/build-shared.sh" "$ID" --apply --prebuilt="$TAKEN"; then
+            clear_pending; write_ok; SUCCESS=1; exit 0
+        fi
+        # Сайт мог не подняться — тогда сборщик уже откатил подмену. Повторять
+        # долгой сборкой то же самое незачем: отказ видно в плашке и журнале.
+        exit 1
+    fi
+    [ -n "$READY" ] && echo "[$(date +%H:%M:%S)] Готовой сборки нет или она не от этой версии — собираю заново"
     SNAP="$SNAP_ROOT/${ID:0:12}"
     # Прошлые замороженные копии — одноразовые артефакты этого же скрипта.
     for old in "$SNAP_ROOT"/*; do
