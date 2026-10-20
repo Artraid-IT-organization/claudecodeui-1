@@ -24,7 +24,7 @@ import path from 'node:path';
 
 import Database from 'better-sqlite3';
 
-import { getDevinDatabasePath, readJsonRecord, readObjectRecord, readOptionalString } from '@/shared/utils.js';
+import { getDevinDatabasePath, isDevinAutoContinueText, readJsonRecord, readObjectRecord, readOptionalString } from '@/shared/utils.js';
 
 import { fullDevinConversation } from './devin-chain.js';
 
@@ -76,6 +76,9 @@ function nodeToRecords(
 
   if (role === 'user') {
     if (metadata?.is_user_input !== true) return [];
+    // Автопродолжение — служебная реплика: в экспорт беседы (и дайджест
+    // нового чата) она не входит, человек её не писал.
+    if (isDevinAutoContinueText(readOptionalString(message.content))) return [];
     return [{ ...base, type: 'user', message: { role: 'user', content: message.content } }];
   }
 
@@ -125,8 +128,13 @@ function nodeToRecords(
  * (перезаписывает), возвращает число записанных записей. Пустая беседа — 0,
  * файл при этом всё равно создаётся пустым.
  */
-export async function exportDevinTranscript(providerSessionId: string, outPath: string): Promise<number> {
-  const db = new Database(getDevinDatabasePath(), { readonly: true, fileMustExist: true });
+export async function exportDevinTranscript(
+  providerSessionId: string,
+  outPath: string,
+  /** XDG_DATA_HOME канала чата (devin_connections.xdg_data_home) — у второго аккаунта своя sessions.db. */
+  xdgDataHome?: string | null,
+): Promise<number> {
+  const db = new Database(getDevinDatabasePath(xdgDataHome ?? null), { readonly: true, fileMustExist: true });
   let lines: string[] = [];
   try {
     for (const row of fullDevinConversation(db, providerSessionId)) {

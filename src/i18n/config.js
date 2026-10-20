@@ -15,6 +15,10 @@ import { initReactI18next } from 'react-i18next';
 import LanguageDetector from 'i18next-browser-languagedetector';
 
 // Import translation resources
+// Русский и английский грузятся статикой: ru — язык владельца по умолчанию,
+// en — предохранитель fallbackLng, оба должны быть под рукой мгновенно.
+// Остальные 9 языков (~460 КБ JSON суммарно) подтягиваются по требованию через
+// ensureLanguage — раньше все 11 языков входили в стартовый бандл (14.10.26).
 import enCommon from './locales/en/common.json';
 import enSettings from './locales/en/settings.json';
 import enAuth from './locales/en/auth.json';
@@ -23,51 +27,6 @@ import enChat from './locales/en/chat.json';
 import enCodeEditor from './locales/en/codeEditor.json';
 // eslint-disable-next-line import-x/order
 import enTasks from './locales/en/tasks.json';
-
-import frCommon from './locales/fr/common.json';
-import frSettings from './locales/fr/settings.json';
-import frAuth from './locales/fr/auth.json';
-import frSidebar from './locales/fr/sidebar.json';
-import frChat from './locales/fr/chat.json';
-import frCodeEditor from './locales/fr/codeEditor.json';
-// eslint-disable-next-line import-x/order
-import frTasks from './locales/fr/tasks.json';
-
-import esCommon from './locales/es/common.json';
-import esSettings from './locales/es/settings.json';
-import esAuth from './locales/es/auth.json';
-import esSidebar from './locales/es/sidebar.json';
-import esChat from './locales/es/chat.json';
-import esCodeEditor from './locales/es/codeEditor.json';
-// eslint-disable-next-line import-x/order
-import esTasks from './locales/es/tasks.json';
-
-import koCommon from './locales/ko/common.json';
-import koSettings from './locales/ko/settings.json';
-import koAuth from './locales/ko/auth.json';
-import koSidebar from './locales/ko/sidebar.json';
-import koChat from './locales/ko/chat.json';
-import koCodeEditor from './locales/ko/codeEditor.json';
-// eslint-disable-next-line import-x/order
-import koTasks from './locales/ko/tasks.json';
-
-import zhCommon from './locales/zh-CN/common.json';
-import zhSettings from './locales/zh-CN/settings.json';
-import zhAuth from './locales/zh-CN/auth.json';
-import zhSidebar from './locales/zh-CN/sidebar.json';
-import zhChat from './locales/zh-CN/chat.json';
-// eslint-disable-next-line import-x/order
-import zhCodeEditor from './locales/zh-CN/codeEditor.json';
-import zhTasks from './locales/zh-CN/tasks.json';
-
-import jaCommon from './locales/ja/common.json';
-import jaSettings from './locales/ja/settings.json';
-import jaAuth from './locales/ja/auth.json';
-import jaSidebar from './locales/ja/sidebar.json';
-import jaChat from './locales/ja/chat.json';
-import jaCodeEditor from './locales/ja/codeEditor.json';
-// eslint-disable-next-line import-x/order
-import jaTasks from './locales/ja/tasks.json';
 
 import ruCommon from './locales/ru/common.json';
 import ruSettings from './locales/ru/settings.json';
@@ -78,40 +37,21 @@ import ruCodeEditor from './locales/ru/codeEditor.json';
 // eslint-disable-next-line import-x/order
 import ruTasks from './locales/ru/tasks.json';
 
-import deCommon from './locales/de/common.json';
-import deSettings from './locales/de/settings.json';
-import deAuth from './locales/de/auth.json';
-import deSidebar from './locales/de/sidebar.json';
-import deChat from './locales/de/chat.json';
-import deCodeEditor from './locales/de/codeEditor.json';
-// eslint-disable-next-line import-x/order
-import deTasks from './locales/de/tasks.json';
+const LAZY_NAMESPACES = ['common', 'settings', 'auth', 'sidebar', 'chat', 'codeEditor', 'tasks'];
 
-import trCommon from './locales/tr/common.json';
-import trSettings from './locales/tr/settings.json';
-import trAuth from './locales/tr/auth.json';
-import trSidebar from './locales/tr/sidebar.json';
-import trChat from './locales/tr/chat.json';
-import trCodeEditor from './locales/tr/codeEditor.json';
-// eslint-disable-next-line import-x/order
-import trTasks from './locales/tr/tasks.json';
-import itCommon from './locales/it/common.json';
-import itSettings from './locales/it/settings.json';
-import itAuth from './locales/it/auth.json';
-import itSidebar from './locales/it/sidebar.json';
-import itChat from './locales/it/chat.json';
-import itCodeEditor from './locales/it/codeEditor.json';
-// eslint-disable-next-line import-x/order
-import itTasks from './locales/it/tasks.json';
-
-import zhTWCommon from './locales/zh-TW/common.json';
-import zhTWSettings from './locales/zh-TW/settings.json';
-import zhTWAuth from './locales/zh-TW/auth.json';
-import zhTWSidebar from './locales/zh-TW/sidebar.json';
-import zhTWChat from './locales/zh-TW/chat.json';
-import zhTWCodeEditor from './locales/zh-TW/codeEditor.json';
-// eslint-disable-next-line import-x/order
-import zhTWTasks from './locales/zh-TW/tasks.json';
+// Карта «язык → загрузчик семи пространств имён». Разные файлы грузим
+// параллельно, чтобы переключение языка оставалось одним ожиданием.
+const lazyLanguageLoaders = {
+  fr: () => Promise.all(LAZY_NAMESPACES.map((ns) => import(`./locales/fr/${ns}.json`))),
+  es: () => Promise.all(LAZY_NAMESPACES.map((ns) => import(`./locales/es/${ns}.json`))),
+  ko: () => Promise.all(LAZY_NAMESPACES.map((ns) => import(`./locales/ko/${ns}.json`))),
+  'zh-CN': () => Promise.all(LAZY_NAMESPACES.map((ns) => import(`./locales/zh-CN/${ns}.json`))),
+  ja: () => Promise.all(LAZY_NAMESPACES.map((ns) => import(`./locales/ja/${ns}.json`))),
+  de: () => Promise.all(LAZY_NAMESPACES.map((ns) => import(`./locales/de/${ns}.json`))),
+  tr: () => Promise.all(LAZY_NAMESPACES.map((ns) => import(`./locales/tr/${ns}.json`))),
+  it: () => Promise.all(LAZY_NAMESPACES.map((ns) => import(`./locales/it/${ns}.json`))),
+  'zh-TW': () => Promise.all(LAZY_NAMESPACES.map((ns) => import(`./locales/zh-TW/${ns}.json`))),
+};
 
 // Import supported languages configuration
 import { languages } from './languages.js';
@@ -142,6 +82,7 @@ i18n
   .use(initReactI18next) // Pass i18n instance to react-i18next
   .init({
     // Resources containing all translations
+    // Resources containing all translations
     resources: {
       en: {
         common: enCommon,
@@ -152,51 +93,6 @@ i18n
         codeEditor: enCodeEditor,
         tasks: enTasks,
       },
-      fr: {
-        common: frCommon,
-        settings: frSettings,
-        auth: frAuth,
-        sidebar: frSidebar,
-        chat: frChat,
-        codeEditor: frCodeEditor,
-        tasks: frTasks,
-      },
-      es: {
-        common: esCommon,
-        settings: esSettings,
-        auth: esAuth,
-        sidebar: esSidebar,
-        chat: esChat,
-        codeEditor: esCodeEditor,
-        tasks: esTasks,
-      },
-      ko: {
-        common: koCommon,
-        settings: koSettings,
-        auth: koAuth,
-        sidebar: koSidebar,
-        chat: koChat,
-        codeEditor: koCodeEditor,
-        tasks: koTasks,
-      },
-      'zh-CN': {
-        common: zhCommon,
-        settings: zhSettings,
-        auth: zhAuth,
-        sidebar: zhSidebar,
-        chat: zhChat,
-        codeEditor: zhCodeEditor,
-        tasks: zhTasks,
-      },
-      ja: {
-        common: jaCommon,
-        settings: jaSettings,
-        auth: jaAuth,
-        sidebar: jaSidebar,
-        chat: jaChat,
-        codeEditor: jaCodeEditor,
-        tasks: jaTasks,
-      },
       ru: {
         common: ruCommon,
         settings: ruSettings,
@@ -205,42 +101,6 @@ i18n
         chat: ruChat,
         codeEditor: ruCodeEditor,
         tasks: ruTasks,
-      },
-      de: {
-        common: deCommon,
-        settings: deSettings,
-        auth: deAuth,
-        sidebar: deSidebar,
-        chat: deChat,
-        codeEditor: deCodeEditor,
-        tasks: deTasks,
-      },
-      tr: {
-        common: trCommon,
-        settings: trSettings,
-        auth: trAuth,
-        sidebar: trSidebar,
-        chat: trChat,
-        codeEditor: trCodeEditor,
-        tasks: trTasks,
-      },
-      it: {
-        common: itCommon,
-        settings: itSettings,
-        auth: itAuth,
-        sidebar: itSidebar,
-        chat: itChat,
-        codeEditor: itCodeEditor,
-        tasks: itTasks,
-      },
-      'zh-TW': {
-        common: zhTWCommon,
-        settings: zhTWSettings,
-        auth: zhTWAuth,
-        sidebar: zhTWSidebar,
-        chat: zhTWChat,
-        codeEditor: zhTWCodeEditor,
-        tasks: zhTWTasks,
       },
     },
 
@@ -293,6 +153,29 @@ i18n
     },
   });
 
+// Догрузка языка по требованию: ресурсы ленивого языка приезжают сетью,
+// после чего повторный changeLanguage перерисовывает уже с переводом.
+// Запрос того же языка параллельно — дедуплицируем; гонку «сменил язык, пока
+// грузился» закрывает проверка i18n.language перед повторным вызовом.
+const languageLoads = new Map();
+const ensureLanguage = (lng) => {
+  const loader = lazyLanguageLoaders[lng];
+  if (!loader || i18n.hasResourceBundle(lng, 'common')) return Promise.resolve(false);
+  let task = languageLoads.get(lng);
+  if (!task) {
+    task = loader().then((modules) => {
+      modules.forEach((mod, index) => {
+        i18n.addResourceBundle(lng, LAZY_NAMESPACES[index], mod.default ?? mod, true, true);
+      });
+      return true;
+    }).finally(() => {
+      languageLoads.delete(lng);
+    });
+    languageLoads.set(lng, task);
+  }
+  return task.then(() => true);
+};
+
 // Save language preference when it changes
 i18n.on('languageChanged', (lng) => {
   try {
@@ -300,6 +183,17 @@ i18n.on('languageChanged', (lng) => {
   } catch (error) {
     console.error('Failed to save language preference:', error);
   }
+  void ensureLanguage(lng).then((loaded) => {
+    // Переизбираем язык только если бандл реально догрузился — иначе
+    // changeLanguage на уже выбранный язык снова эмитит languageChanged
+    // и цикл не останавливается никогда.
+    if (loaded && i18n.language === lng) {
+      void i18n.changeLanguage(lng);
+    }
+  });
 });
+
+// Сохранённый выбор мог быть ленивым языком — догружаем его сразу при старте.
+void ensureLanguage(getSavedLanguage());
 
 export default i18n;

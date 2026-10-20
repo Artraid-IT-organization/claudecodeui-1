@@ -94,6 +94,11 @@ export function AuthProvider({ children }: AuthProviderProps) {
    */
   const [statusCheckFailedAt, setStatusCheckFailedAt] = useState<number | null>(null);
   const statusRetriesRef = useRef(0);
+  // Ref для стабилизации checkAuthStatus: token меняется при refresh, но
+  // полная перепроверка при этом не нужна — она демонтировала приложение
+  // через isLoading (15.10.26).
+  const tokenRef = useRef(token);
+  tokenRef.current = token;
   const [pendingLoginLink, setPendingLoginLink] = useState<string | null>(null);
   const [inviteToken, setInviteToken] = useState<string | null>(null);
   const [inviteStatus, setInviteStatus] = useState<AuthContextValue['inviteStatus']>('idle');
@@ -224,9 +229,19 @@ export function AuthProvider({ children }: AuthProviderProps) {
     // Провал отмечается в catch, а успех — отсутствием провала: выходов из
     // try несколько (настройка, приглашение, вход по ссылке), и все они
     // проходят через finally.
+    //
+    // 15.10.26: `isLoading = true` демонтирует приложение целиком через
+    // ProtectedRoute → AuthLoadingScreen. Если пользователь уже вошёл
+    // (`user` есть), повторная проверка (retry при сетевом сбое, token
+    // refresh, visibilitychange) не должна выбивать его из рабочего
+    // экрана — иначе на Mac без VPN каждая медленная проверка создаёт
+    // видимый «сброс → загрузка → сброс».
+    const alreadyAuthenticated = !!user;
     let failed = false;
     try {
-      setIsLoading(true);
+      if (!alreadyAuthenticated) {
+        setIsLoading(true);
+      }
       setError(null);
 
       // A `/enter/<token>` visit is a magic-link login: exchange it for a
@@ -312,7 +327,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
         return rememberedLoginToken ? enterWithLoginLinkToken(rememberedLoginToken) : false;
       };
 
-      if (!token) {
+      if (!tokenRef.current) {
         await signInWithRememberedLink();
         return;
       }
@@ -335,19 +350,27 @@ export function AuthProvider({ children }: AuthProviderProps) {
       await checkOnboardingStatus();
     } catch (caughtError) {
       console.error('[Auth] Auth status check failed:', caughtError);
-      setError(AUTH_ERROR_MESSAGES.authStatusCheckFailed);
+      if (!alreadyAuthenticated) {
+        setError(AUTH_ERROR_MESSAGES.authStatusCheckFailed);
+      }
       // Связь подведёт — попробуем ещё: см. эффект повтора ниже.
       failed = true;
       setStatusCheckFailedAt(Date.now());
     } finally {
-      setIsLoading(false);
+      if (!alreadyAuthenticated) {
+        setIsLoading(false);
+      }
       if (!failed) {
         // Дошли до конца — ждать больше нечего, счётчик пауз обнуляется.
         statusRetriesRef.current = 0;
         setStatusCheckFailedAt(null);
       }
     }
-  }, [checkOnboardingStatus, clearSession, enterWithLoginLinkToken, setSession, token]);
+    // tokenRef вместо token: refresh токена не должен пересоздавать
+    // checkAuthStatus и перезапускать эффект — это демонтировало бы
+    // рабочее приложение через isLoading (15.10.26).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [checkOnboardingStatus, clearSession, enterWithLoginLinkToken, setSession]);
 
   useEffect(() => {
     if (IS_PLATFORM) {

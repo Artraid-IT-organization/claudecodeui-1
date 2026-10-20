@@ -38,7 +38,6 @@
  * сборки не делается (цикл невозможен), а новая сборка снимает запрет сама.
  */
 const RELOAD_GUARD_KEY = 'app-update-reload-target';
-const SW_RELOAD_GUARD_KEY = 'app-update-sw-reloaded';
 
 /**
  * Сборка, ожидающая решения человека на видимой странице. Лежит в
@@ -59,29 +58,33 @@ function currentBundleName(): string | null {
   return script ? (script.getAttribute('src') ?? '').split('/').pop() ?? null : null;
 }
 
-function reloadForBundle(latest: string): void {
+type ReloadGuardStorage = Pick<Storage, 'getItem' | 'setItem'>;
+
+export function claimReloadTarget(storage: ReloadGuardStorage, key: string, target: string): boolean {
   try {
-    if (sessionStorage.getItem(RELOAD_GUARD_KEY) === latest) {
-      return;
+    if (storage.getItem(key) === target) {
+      return false;
     }
-    sessionStorage.setItem(RELOAD_GUARD_KEY, latest);
+    storage.setItem(key, target);
+    return storage.getItem(key) === target;
   } catch {
-    // Приватный режим без хранилища: одна лишняя перезагрузка лучше, чем
-    // застрять на старой сборке.
+    return false;
   }
-  window.location.reload();
 }
 
-function reloadOnceForServiceWorker(): void {
-  try {
-    if (sessionStorage.getItem(SW_RELOAD_GUARD_KEY)) {
-      return;
-    }
-    sessionStorage.setItem(SW_RELOAD_GUARD_KEY, '1');
-  } catch {
-    // см. выше
-  }
-  window.location.reload();
+export function reloadOrMarkPending(
+  storage: ReloadGuardStorage,
+  key: string,
+  target: string,
+  _reload: () => void,
+  markPending: (target: string) => void,
+): void {
+  claimReloadTarget(storage, key, target);
+  markPending(target);
+}
+
+function reloadForBundle(latest: string): void {
+  reloadOrMarkPending(sessionStorage, RELOAD_GUARD_KEY, latest, () => window.location.reload(), markUpdatePending);
 }
 
 let pendingNotified = false;
@@ -165,13 +168,9 @@ export function watchServiceWorkerUpdates(): void {
     return;
   }
   navigator.serviceWorker.addEventListener('message', (event: MessageEvent) => {
-    if (event.data?.type !== 'sw:updated') {
+    if (event.data?.type !== 'sw:updated' && event.data?.type !== 'sw:stale-page') {
       return;
     }
-    if (document.visibilityState === 'hidden') {
-      reloadOnceForServiceWorker();
-    } else {
-      markUpdatePending('service-worker');
-    }
+    markUpdatePending('service-worker');
   });
 }

@@ -246,6 +246,54 @@ test('recordings past the retention period are not resurrected by a resume pass'
   assert.equal(calls.length, 0);
 });
 
+test('the same bytes kept twice stay one file and one recording', async () => {
+  const { service, archiveDir } = await makeArchive();
+
+  const first = await service.keep(audio);
+  const second = await service.keep({ ...audio, fileName: 'other-name.webm' });
+
+  assert.equal(second, first);
+  assert.equal((await fs.readdir(archiveDir)).filter((n) => n.endsWith('.webm')).length, 1);
+});
+
+test('a re-uploaded recording is not sent to Telegram a second time', async () => {
+  const { service, calls } = await makeArchive();
+  const kept = await service.keep(audio);
+
+  await service.publishAudio(kept);
+  await service.publishOutcome(kept, { text: 'текст' });
+  calls.length = 0;
+
+  // Телефон прислал те же байты повторно: ни нового файла, ни нового голосового.
+  const again = await service.keep(audio);
+  await service.publishAudio(again);
+  await service.publishOutcome(again, { text: 'текст' });
+
+  assert.equal(again, kept);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].url, /editMessageCaption$/);
+  assert.equal(calls[0].form.get('message_id'), '7001');
+});
+
+test('a retry after a failed upload still delivers the outcome through a fresh send', async () => {
+  let telegramUp = false;
+  const { service, calls } = await makeArchive({
+    fetchTelegram: (async (url: string, init?: RequestInit) => {
+      calls.push({ url, form: init?.body as FormData });
+      if (!telegramUp) return new Response('down', { status: 502 });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 7001 } }), { status: 200 });
+    }) as typeof fetch,
+  });
+  const kept = await service.keep(audio);
+
+  await service.publishAudio(kept);          // Telegram лежит — запись не ушла.
+  telegramUp = true;
+  await service.publishOutcome(kept, { text: 'текст' });  // повторная попытка с готовой подписью
+
+  assert.ok(calls.some((call) => /sendVoice$/.test(call.url)));
+  assert.equal(JSON.parse(await fs.readFile(`${kept!.audioPath}.tg.json`, 'utf8')).captionDone, true);
+});
+
 test('a recording too big for Telegram stays on disk instead of failing the upload', async () => {
   const { service, calls, warnings } = await makeArchive({
     convertToVoice: async (_input, output) => {

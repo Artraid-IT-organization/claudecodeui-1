@@ -6,6 +6,7 @@ import type { TFunction } from 'i18next';
 import { useSecondServerLabel } from '../../hooks/useServerScope';
 import { cn } from '../../../../lib/utils';
 import type { Project } from '../../../../types/app';
+import { scrollMovesAnchor } from '../../../../shared/scrollMovesAnchor';
 
 type SidebarProjectPickerTriggerProps = {
   projects: Project[];
@@ -78,7 +79,11 @@ export default function SidebarProjectPickerTrigger({
         setIsOpen(false);
       }
     };
-    const closeOnViewportChange = () => setIsOpen(false);
+    // Прокрутка ленты чата рядом кнопку не двигает — не закрывать (см. scrollMovesAnchor).
+    const closeOnViewportChange = (event: Event) => {
+      if (event.type === 'scroll' && !scrollMovesAnchor(event, triggerRef.current)) return;
+      setIsOpen(false);
+    };
 
     document.addEventListener('mousedown', closeOnOutsideClick);
     document.addEventListener('keydown', closeOnEscape);

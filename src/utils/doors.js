@@ -100,9 +100,31 @@ const isReadOnly = (options) => {
  */
 export const doorFetch = async (path, options = {}, { gate = false } = {}) => {
   if (!gate || !reserveOrigin() || !isReadOnly(options)) {
-    const response = await fetch(getDoorBase() + path, options);
-    markDoorWorked();
-    return response;
+    // Обычный запрос на чтение без сигнала отмены: если путь до текущего входа
+    // замёрз (провайдер рвёт соединение посередине), один раз перепробуем
+    // через другой вход. Мутирующие запросы не повторяем — повтор мог бы
+    // удвоить действие на сервере; запросы с сигналом не трогаем — там свой
+    // контроль времени у вызывающего.
+    if (!isReadOnly(options) || !reserveOrigin()) {
+      const response = await fetch(getDoorBase() + path, options);
+      markDoorWorked();
+      return response;
+    }
+    const startedOnReserve = useReserve;
+    try {
+      const response = await fetch(getDoorBase() + path, options);
+      markDoorWorked();
+      return response;
+    } catch {
+      // Меняем вход, только если его ещё не сменил параллельный запрос —
+      // иначе два сбоя вернули бы всех на тот же мёртвый адрес.
+      if (useReserve === startedOnReserve) {
+        flipDoor(`запрос не дошёл: ${path}`);
+      }
+      const response = await fetch(getDoorBase() + path, options);
+      markDoorWorked();
+      return response;
+    }
   }
 
   let lastError = null;

@@ -18,7 +18,6 @@ import { fileURLToPath } from 'node:url';
 
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 
-import { getActiveDevinSlot, getDevinSlotEnv, type DevinSlot } from '@/shared/devin-slots.js';
 import { parseFrontMatter } from '@/shared/frontmatter.js';
 import { getRequestRuntimeContext } from '@/shared/request-context.js';
 import type { ServerScope } from '@/shared/types.js';
@@ -345,6 +344,62 @@ export function normalizeProjectPath(inputPath: string): string {
   }
 
   return normalized.replace(/[\\/]+$/, '');
+}
+
+/**
+ * Приводит запрошенный рабочий каталог к зоне пользователя.
+ *
+ * Единственный расчёт «где может стартовать процесс не-владельца» — общий
+ * для создания сессии (sessions.service) и обоих путей запуска хода
+ * (chat-websocket: runProviderTurn и steerIntoRunningTurn). Потребители берут
+ * корень зоны из `resolveWebUserRuntimeContext(userId).workspaceRoot`
+ * (WS-путь) или из request runtime context (HTTP-путь).
+ *
+ * Семантика — та же, что у `projectsDb.isProjectPathInScope`: корень зоны
+ * приводится через realpath, кандидат — лексически. Это позволяет путям ВНУТРИ
+ * зоны оставаться симлинками наружу (комнаты team-access смонтированы как
+ * `workspace/work -> people/<имя>/home/work`): по букве пути каталог в зоне,
+ * по разрешённому — снаружи, и это задумано.
+ *
+ * - `scopeRootDir` пуст (владелец площадки, OPEN_REGISTRATION выключен,
+ *   пользователь не опознан) — запрошенный путь возвращается как был:
+ *   ограничения нет, поведение прежнее.
+ * - Запрошенный путь лежит внутри зоны И существует — возвращается он.
+ * - Иначе — корень зоны. Не ошибка: клиент мог прислать устаревший или
+ *   чужой путь (так чат, привязанный к исчезнувшему `/tmp/...`, не умирает
+ *   `spawn ENOENT`, а приземляется в зоне). Корень при этом гарантированно
+ *   создаётся — зона обязана работать у всех.
+ */
+export function resolveScopedWorkingDirectory(
+  requestedPath: string | null | undefined,
+  scopeRootDir: string | null | undefined,
+): string | undefined {
+  if (!scopeRootDir) {
+    return typeof requestedPath === 'string' && requestedPath.trim()
+      ? requestedPath.trim()
+      : undefined;
+  }
+
+  let normalizedRoot: string;
+  try {
+    normalizedRoot = normalizeProjectPath(fs.realpathSync(scopeRootDir));
+  } catch {
+    normalizedRoot = normalizeProjectPath(scopeRootDir);
+  }
+  const requested = typeof requestedPath === 'string'
+    ? normalizeProjectPath(requestedPath)
+    : '';
+
+  if (
+    requested
+    && (requested === normalizedRoot || requested.startsWith(`${normalizedRoot}${path.sep}`))
+    && fs.existsSync(requested)
+  ) {
+    return requested;
+  }
+
+  fs.mkdirSync(scopeRootDir, { recursive: true });
+  return scopeRootDir;
 }
 
 /**
@@ -1090,9 +1145,13 @@ export function unwrapJsonStringLiteral(value: string): string {
  * `~/.local/share/devin`). Devin keeps a single shared `sessions.db` plus
  * `transcripts/` under `cli/` inside it — provider readers use this root and
  * must never hand it out as a deletable per-session transcript path.
+ *
+ * `xdgDataHomeOverride` — Devin Connection Layer: у корпоративного канала
+ * (devin_connections.xdg_data_home) свой XDG_DATA_HOME, значит свои креды и
+ * своя sessions.db. Без параметра — машинный дефолт (legacy-канал).
  */
-export function getDevinDataDir(): string {
-  const xdgDataHome = process.env.XDG_DATA_HOME?.trim();
+export function getDevinDataDir(xdgDataHomeOverride?: string | null): string {
+  const xdgDataHome = xdgDataHomeOverride?.trim() || process.env.XDG_DATA_HOME?.trim();
   return path.join(xdgDataHome || path.join(os.homedir(), '.local', 'share'), 'devin');
 }
 
@@ -1101,8 +1160,20 @@ export function getDevinDataDir(): string {
  * Like OpenCode's `opencode.db`, it is shared across every Devin session on
  * this account — read-only access only.
  */
-export function getDevinDatabasePath(): string {
-  return path.join(getDevinDataDir(), 'cli', 'sessions.db');
+export function getDevinDatabasePath(xdgDataHomeOverride?: string | null): string {
+  return path.join(getDevinDataDir(xdgDataHomeOverride), 'cli', 'sessions.db');
+}
+
+/**
+ * Корень каталогов корпоративных Devin-каналов. Каждый канал живёт в
+ * `<root>/<id>` как самостоятельный XDG_DATA_HOME: `<root>/<id>/devin/
+ * credentials.toml` (0600, каталоги 0700), `<root>/<id>/devin/cli/sessions.db`.
+ * Legacy-канал (машинный `~/.local/share`) здесь не создаётся — он указывает
+ * на общий домашний каталог.
+ */
+export function getDevinConnectionsRoot(): string {
+  const configured = process.env.DEVIN_CONNECTIONS_ROOT?.trim();
+  return configured || path.join(os.homedir(), '.cloudcli-shared', 'devin-connections');
 }
 
 /**
@@ -1133,16 +1204,178 @@ export function resolveDevinCliCommand(): string {
 }
 
 /**
- * Devin models the owner allows (Egor, 03.10.26: "only SWE-2, the rest are not allowed").
- * One rule for the picker (devin-models.provider.ts) and for the run itself
- * (devin-runtime.provider.js): anything else would spend the shared Devin quota
- * on models the owner has not approved. Matches swe-2, swe-2-high, swe-2-medium, swe-2-max.
+ * Devin models the owner allows. 03.10.26: "only SWE-2"; 13.10.26 Egor: "хочу видеть выбор
+ * адаптив или разные модели" — now every ordinary catalog model is pickable, with its cost tier
+ * in the picker description (only SWE-2 is free; the rest spend credits). One rule for the picker
+ * (devin-models.provider.ts) and for the run itself (devin-runtime.provider.js).
+ * Still refused: `fusion-*` (575 two-model combinations — would bury the picker) and the legacy
+ * `MODEL_*` ids. Real availability per account is the slot's configOptions (devin-models.provider.ts).
  */
 export function isAllowedDevinModel(model: unknown): boolean {
-  return typeof model === 'string' && /^swe-2(-(high|medium|max|low))?$/i.test(model.trim());
+  if (typeof model !== 'string') {
+    return false;
+  }
+  const value = model.trim();
+  return value.length > 0 && !/^fusion-/i.test(value) && !/^MODEL_/.test(value);
 }
 
 export const DEVIN_DEFAULT_MODEL = 'swe-2-high';
+
+/**
+ * Метка служебного автопродолжения Devin-хода. ACP v1 умеет продолжить
+ * агента только через session/prompt, который записывается как реплика
+ * пользователя: чтобы такая реплика не выглядела сообщением человека, её
+ * текст начинается с HTML-комментария-метки (в markdown-ленте он сам по себе
+ * невидим) — а все места, превращающие историю Devin в нашу переписку,
+ * такие реплики фильтруют: `devin-sessions.provider` (лента истории),
+ * `devin-transcript` (экспорт «Продолжить в новом чате»), `devin-chain`
+ * (учёт ходов человека), `devin-rewind` (цель возврата), синхронизатор
+ * заголовков.
+ */
+export const DEVIN_AUTO_CONTINUE_TAG = '<!--cc2-auto-continue-->';
+
+/**
+ * Текст самого продолжения: велит агенту доделать исходную задачу, а не
+ * пересказывать понимание. Потребитель — `devin-runtime.provider.js`.
+ */
+export const DEVIN_AUTO_CONTINUE_PROMPT = `${DEVIN_AUTO_CONTINUE_TAG}\nПродолжи выполнение исходной задачи с того места, где остановился. Не пересказывай понимание задачи — сразу делай объявленную работу и доведи её до итогового результата, уточняющего вопроса или явной ошибки.`;
+
+/**
+ * True, если текст реплики — служебное автопродолжение, а не ввод человека.
+ * `includes`, а не `startsWith`: перед меткой могут стоять обёртки вложений.
+ */
+export function isDevinAutoContinueText(text: unknown): boolean {
+  return typeof text === 'string' && text.includes(DEVIN_AUTO_CONTINUE_TAG);
+}
+
+/**
+ * Result headings that signal a substantive final answer from Devin. Used by
+ * `isIncompleteDevinResponse` to distinguish a completed turn from a status-only
+ * preamble.
+ */
+const DEVIN_RESULT_HEADINGS = [
+  'ответ',
+  'итог',
+  'результат',
+  'таблица',
+  'как сделать',
+  'готово',
+  'не вышло',
+  'дальше',
+  'вывод',
+  'заключение',
+  'итоги',
+  'резюме',
+  'итоговый',
+  'рекомендации',
+  'варианты',
+  'возможные улучшения',
+  'версия',
+  'лучший вариант',
+  'выбранный вариант',
+  'готовый промпт',
+  'шорт-лист',
+  'список',
+  'сравнение',
+  'анализ',
+  'обзор',
+];
+
+/**
+ * True if the assistant text ends with a promise to continue working rather
+ * than with a finished statement. Only the tail is checked so that an early
+ * status line does not invalidate a later substantive answer.
+ */
+function hasContinuationTail(text: string): boolean {
+  const tail = text.slice(-1000);
+  const patterns = [
+    /сейчас (докину|сделаю|поищу|проверю|вернусь|приступлю|начну|продолжу)[^.!?]{0,200}[.!?]*$/iu,
+    /начинаю (работу|поиск|проверку|анализ|сравнение|исследование)[\s.!?]*$/iu,
+    /приступаю (к работе|к поиску|к проверке|к анализу|к сравнению|к исследованию)[\s.!?]*$/iu,
+    /вернусь(?:\s+(?:с|к|позже|через|к вам|к вопросу|к вам с))?[\s.!?]*$/iu,
+    /буду (искать|проверять|делать|сравнивать|работать|продолжать|дополнять)[\s.!?]*$/iu,
+    /скоро (вернусь|дам|покажу|напишу|ответ|сделаю)[\s.!?]*$/iu,
+    /(ещё не готово|пока не готово|продолжаю работу|в процессе|в работе|не закончено|не завершено|выполню позже|продолжу позже|обновлю позже)[\s.!?]*$/iu,
+    /(^|[\s.,;:!?—-])жду([\s.,;:!?—-]|$)/iu,
+  ];
+  return patterns.some((re) => re.test(tail));
+}
+
+/**
+ * True if the assistant text contains concrete deliverable structure that
+ * strongly indicates a finished answer: a recognized result heading, a fenced
+ * code block, a markdown table, a long numbered list, or several sections.
+ */
+function hasResultStructure(text: string): boolean {
+  const headingPattern = new RegExp(
+    `(^|\n)## (${DEVIN_RESULT_HEADINGS.map((h) => h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})($|\\s|[«"„(])`,
+    'mi',
+  );
+  if (headingPattern.test(text)) return true;
+
+  if (/```/s.test(text)) return true;
+  if (/\|[^\n]+\|\n\|[-:\s|]+\|/m.test(text)) return true;
+
+  const numberedItems = (text.match(/^\s*\d+[.)]\s+\S/mg) || []).length;
+  if (numberedItems >= 3) return true;
+
+  const bulletItems = (text.match(/^\s*[-*]\s+\S/mg) || []).length;
+  if (bulletItems >= 5) return true;
+
+  const sectionCount = (text.match(/(^|\n)##\s+/g) || []).length;
+  if (sectionCount >= 3 && text.length > 800) return true;
+
+  return false;
+}
+
+/**
+ * True if the text looks like the assistant stopped at the understanding
+ * preamble without producing any result structure.
+ */
+function looksLikeUnderstandingOnly(text: string): boolean {
+  const firstHeadingMatch = text.match(/^##\s+(.+?)(?:\s*\n|$)/i);
+  if (!firstHeadingMatch) return false;
+  const firstHeading = firstHeadingMatch[1].trim().toLowerCase();
+  if (firstHeading.startsWith('как я понял задачу') && !hasResultStructure(text)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Checks whether a Devin assistant turn ended with a real final answer or with
+ * a status-only / introductory block. Used by `devin-runtime.provider.js` to
+ * decide whether the run is complete, should be auto-continued, or should fail.
+ *
+ * A turn is incomplete when:
+ * - the text is missing or empty;
+ * - there were tool calls but no text after the last tool call;
+ * - the tail is an explicit promise to continue working;
+ * - the response is only the "Как я понял задачу" preamble with no result.
+ *
+ * A turn is considered complete when it contains a recognized result heading,
+ * a fenced code block, a table, a long list, or several sections.
+ */
+export function isIncompleteDevinResponse(
+  text: unknown,
+  hasToolCalls: boolean,
+  textAfterLastTool: string = '',
+): boolean {
+  if (typeof text !== 'string') return true;
+  const fullText = text.trim();
+  if (!fullText) return true;
+
+  const afterTool = String(textAfterLastTool).trim();
+  if (hasToolCalls && !afterTool) return true;
+
+  const content = hasToolCalls ? afterTool : fullText;
+
+  if (hasResultStructure(content)) return false;
+  if (hasContinuationTail(content)) return true;
+  if (looksLikeUnderstandingOnly(content)) return true;
+
+  return false;
+}
 
 /**
  * Whether a Devin CLI binary exists on this host. The site is published to
@@ -1165,14 +1398,16 @@ export function isDevinCliInstalled(): boolean {
  * minimal PATH: the child's PATH gains the well-known user bin dirs so tools
  * Devin itself shells out to (and Devin's own subprocess lookups) still work.
  */
-export function buildDevinChildEnv(slot: DevinSlot = getActiveDevinSlot()): Record<string, string | undefined> {
+export function buildDevinChildEnv(xdgDataHome?: string | null): Record<string, string | undefined> {
   const home = os.homedir();
   const extraPath = [path.join(home, '.local', 'bin'), path.join(home, 'bin')];
   const currentPath = process.env.PATH || '';
   const augmentedPath = [...extraPath, currentPath].join(path.delimiter);
-  // Слот Devin: второй аккаунт = другой XDG_DATA_HOME (см. devin-slots.ts).
-  // Без слота берётся активный; явный слот нужен проверке входа конкретного аккаунта.
-  return { ...process.env, PATH: augmentedPath, ...getDevinSlotEnv(slot) };
+  const env: Record<string, string | undefined> = { ...process.env, PATH: augmentedPath };
+  if (xdgDataHome) {
+    env.XDG_DATA_HOME = xdgDataHome;
+  }
+  return env;
 }
 
 // ---------------------------
@@ -1222,12 +1457,24 @@ export function sanitizeLeafDirectoryName(inputName: string, label = 'directory 
  * forever, since birthtime never changes after creation. The sidebar showed
  * a long-running chat as stuck "1d ago" indefinitely even while it was being
  * actively used, because the synchronizer stopped ever re-visiting it.
+ *
+ * `knownPaths` (optional) is the set of transcript paths already present in
+ * the sessions DB. When provided, a file that is NOT in the set is collected
+ * regardless of mtime: a transcript can land in the tree with an mtime older
+ * than the scan cursor (copied with preserved timestamps, appended during a
+ * scan between cursor read and tree walk), and mtime filtering alone would
+ * skip it forever — the file existed on disk but stayed invisible in the UI
+ * (audit 10.10.26: two Vince transcripts, one 50 MB, invisible for days).
+ * Corollary: a transcript whose DB row was deleted while the file was kept
+ * (`deletedFromDisk=false`) will be re-indexed — the file on disk is the
+ * source of truth.
  */
 export async function findFilesRecursivelyCreatedAfter(
   rootDir: string,
   extension: string,
   lastScanAt: Date | null,
-  fileList: string[] = []
+  fileList: string[] = [],
+  knownPaths?: ReadonlySet<string>
 ): Promise<string[]> {
   try {
     const entries = await readdir(rootDir, { withFileTypes: true });
@@ -1235,7 +1482,7 @@ export async function findFilesRecursivelyCreatedAfter(
       const fullPath = path.join(rootDir, entry.name);
 
       if (entry.isDirectory()) {
-        await findFilesRecursivelyCreatedAfter(fullPath, extension, lastScanAt, fileList);
+        await findFilesRecursivelyCreatedAfter(fullPath, extension, lastScanAt, fileList, knownPaths);
         continue;
       }
 
@@ -1249,7 +1496,7 @@ export async function findFilesRecursivelyCreatedAfter(
       }
 
       const fileStat = await stat(fullPath);
-      if (fileStat.mtime > lastScanAt) {
+      if (fileStat.mtime > lastScanAt || (knownPaths && !knownPaths.has(fullPath))) {
         fileList.push(fullPath);
       }
     }

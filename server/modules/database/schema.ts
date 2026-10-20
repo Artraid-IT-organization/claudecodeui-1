@@ -149,6 +149,19 @@ CREATE TABLE IF NOT EXISTS sessions (
     -- Ярлык-флажок на чате (меню «…» → «Повесить ярлык»). Только метка:
     -- порядок чатов от него не меняется.
     is_flagged INTEGER NOT NULL DEFAULT 0,
+    -- Галочка «сделано»: приглушает чат в списке, иконка слева становится
+    -- галочкой. Взаимоисключает флажок.
+    is_done INTEGER NOT NULL DEFAULT 0,
+    -- Из чата папки «Промпты» промпт уже ушёл кнопкой «В новый чат»:
+    -- иконка провайдера в строке становится серой. Ставится один раз,
+    -- обратно не снимается.
+    prompt_launched INTEGER NOT NULL DEFAULT 0,
+    -- Атрибуция: какой веб-пользователь инициировал чат (nullable —
+    -- наследие и строки, найденные наблюдателем на диске, автора не знают).
+    initiated_by_user_id INTEGER,
+    -- Через какой корпоративный канал Devin идёт чат (devin_connections.id).
+    -- NULL — всё, что не devin, и devin-чаты до появления Connection Layer.
+    devin_connection_id INTEGER,
     isArchived BOOLEAN DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -267,6 +280,62 @@ CREATE TABLE IF NOT EXISTS invite_tokens (
 );
 `;
 
+/**
+ * Корпоративные подключения Devin (Connection Layer).
+ *
+ * Одна строка = один серверный канал к Devin: каталог `xdg_data_home` — это
+ * XDG_DATA_HOME процесса `devin acp`, то есть у каждого подключения своё
+ * `credentials.toml`, своя `cli/sessions.db` и свои транскрипты. Сама креда в
+ * таблице НЕ хранится — только путь к каталогу и метаданные; файл кредов
+ * лежит на диске с правами 0600 в каталоге 0700.
+ *
+ * Выбор на запуск: `enabled=1`, вне cooldown, минимальный `priority`.
+ * `health_status`: 'ok' | 'auth_failed' | 'rate_limited' | 'error' | 'unknown';
+ * 'auth_failed' снимается только заменой креды, остальные — временем/успехом.
+ */
+export const DEVIN_CONNECTIONS_TABLE_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS devin_connections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    priority INTEGER NOT NULL DEFAULT 0,
+    xdg_data_home TEXT NOT NULL UNIQUE,
+    health_status TEXT NOT NULL DEFAULT 'unknown',
+    cooldown_until DATETIME,
+    last_error TEXT,
+    last_health_check_at DATETIME,
+    account_email TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+`;
+
+/**
+ * Дополнительные действующие токены входа `/enter/<token>` поверх
+ * `users.login_token`.
+ *
+ * Одна строка = одна ещё работающая ссылка человека. Заведена под перенос
+ * комнат team-access в общий инстанс (03–04.10.26): у людей остались
+ * закладки и иконки домашнего экрана со старыми ссылками их контейнеров —
+ * после переезда домена на cc2 те давали 401 и вечную перезагрузку
+ * «введите ссылку». Алиасы возвращают старым ссылкам жизнь, не трогая
+ * основной `login_token`.
+ *
+ * Семантика регенерации сохранена: `setLoginToken` удаляет и алиасы
+ * пользователя — «перевыпустить ссылку» обязан гасить ВСЕ ранее
+ * действовавшие ссылки, иначе это была бы видимость отзыва.
+ */
+export const LOGIN_TOKEN_ALIASES_TABLE_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS login_token_aliases (
+    token TEXT PRIMARY KEY NOT NULL,
+    user_id INTEGER NOT NULL,
+    label TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+`;
+
 export const INIT_SCHEMA_SQL = `
 -- Initialize authentication database
 PRAGMA foreign_keys = ON;
@@ -319,4 +388,8 @@ ${VOICE_TRANSCRIPTS_TABLE_SCHEMA_SQL}
 ${PROVIDER_MODELS_TABLE_SCHEMA_SQL}
 CREATE INDEX IF NOT EXISTS idx_provider_models_provider_order
 ON provider_models(provider, sort_order, id);
+
+${DEVIN_CONNECTIONS_TABLE_SCHEMA_SQL}
+
+${LOGIN_TOKEN_ALIASES_TABLE_SCHEMA_SQL}
 `;

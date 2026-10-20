@@ -29,6 +29,7 @@ import { parseFilesInputTag, parseImagesInputTag } from '@/shared/image-attachme
 import {
   AppError,
   getDevinDatabasePath,
+  isDevinAutoContinueText,
   readJsonRecord,
   readObjectRecord,
   readOptionalString,
@@ -100,7 +101,11 @@ function devinUserText(chatMessageJson: string): string | null {
   if (!message || readOptionalString(message.role) !== 'user') return null;
   const metadata = readObjectRecord(message.metadata);
   if (metadata?.is_user_input !== true) return null;
-  return cleanUserText(message.content);
+  const text = cleanUserText(message.content);
+  // Служебное автопродолжение нельзя выбрать целью возврата — это не реплика
+  // человека, и «вернуться» к ней не имеет смысла.
+  if (text && isDevinAutoContinueText(text)) return null;
+  return text;
 }
 
 /** Лента кладёт в номер сообщения номер узла (`devin_<nodeId>`). */
@@ -274,8 +279,10 @@ export async function rewindDevinSession(input: {
   providerSessionId: string;
   messageId: string | null;
   text: string | null;
+  /** XDG_DATA_HOME канала чата (devin_connections.xdg_data_home) — у второго аккаунта своя sessions.db. */
+  xdgDataHome?: string | null;
 }): Promise<DevinRewindResult> {
-  const dbPath = getDevinDatabasePath();
+  const dbPath = getDevinDatabasePath(input.xdgDataHome ?? null);
   if (!fsSync.existsSync(dbPath)) {
     throw new AppError('Хранилище бесед Devin недоступно.', { code: 'REWIND_NO_TRANSCRIPT', statusCode: 404 });
   }

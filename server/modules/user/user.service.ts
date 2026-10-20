@@ -2,16 +2,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { readFile } from 'node:fs/promises';
 
-import { AppError, getClaudeConfigDir, getClaudeJsonPath, isCodexAllowedForWebUser, isDevinAllowedForWebUser, isPlatformOwnerWebUser } from '@/shared/utils.js';
-import {
-  cancelDevinLogin,
-  getLiveLimits,
-  readCodexAccountLimits,
-  readDevinAccount,
-  selectDevinSlot,
-  startDevinLogin,
-  submitDevinLoginCode,
-} from '@/modules/providers/index.js';
+import { AppError, getClaudeConfigDir, getClaudeJsonPath, isCodexAllowedForWebUser, isPlatformOwnerWebUser } from '@/shared/utils.js';
+import { devinConnectionsDb } from '@/modules/database/index.js';
+import { getLiveLimits, readCodexAccountLimits, readDevinAccountLimits } from '@/modules/providers/index.js';
 import { getWebUserClaudeConfigDir } from '@/shared/web-user-paths.js';
 import { resolveWebUserRuntimeContext } from '@/shared/web-user-runtime.js';
 import { getOfficialUsage } from '@/modules/user/official-usage.js';
@@ -57,13 +50,6 @@ type UserDependencies = {
 };
 
 /** Creates user-profile workflows with explicit repository and Git adapters. */
-/** Devin на машине один и тратит квоту хозяина: гостю общего экземпляра — 403. */
-function assertDevinOwner(userId: number): void {
-  if (!isDevinAllowedForWebUser(userId)) {
-    throw new AppError('Devin доступен только хозяину площадки.', { code: 'FORBIDDEN', statusCode: 403 });
-  }
-}
-
 export function createUserService(dependencies: UserDependencies) {
   return {
     async getGitConfig(userId: number) {
@@ -269,54 +255,21 @@ export function createUserService(dependencies: UserDependencies) {
     },
 
     /**
-     * Подписка Devin — «четвёртый аккаунт» хозяина (Егор 03.10.26): имя входа
-     * и признак «вошёл». Вход в Devin на машине один, поэтому гостю общего
-     * экземпляра отвечаем «нет». Окон лимитов Devin не публикует.
+     * Подписка Devin — машинная креда `devin/credentials.toml`: почта, тариф
+     * и окна квоты (день, неделя — пятичасового у Devin нет). Креда одна на
+     * сервер, поэтому гостю общего экземпляра отвечаем «нет», как и с Codex
+     * (isCodexAllowedForWebUser — тот же предикат «хостовый вход = владельца»).
      */
     async getDevinAccount(userId: number) {
-      if (!isDevinAllowedForWebUser(userId)) {
-        return { success: true, available: false, name: null, models: 'SWE-2', fetchedAtMs: null, slot: 1, accounts: [], canAddSecond: false };
+      if (!isCodexAllowedForWebUser(userId)) {
+        return { success: true, available: false, email: null, planName: null, fetchedAtMs: null, limits: [] };
       }
-      return { success: true, ...(await readDevinAccount()) };
-    },
-
-    /**
-     * Аккаунты Devin хозяина: выбор активного и вход во второй (07.10.26).
-     * Гостю общего экземпляра — 403: Devin на машине один, его квота — хозяина.
-     */
-    async selectDevinAccountSlot(userId: number, slot: unknown) {
-      assertDevinOwner(userId);
-      if (slot !== 1 && slot !== 2) {
-        throw new AppError('Слот должен быть 1 или 2.', { code: 'BAD_REQUEST', statusCode: 400 });
-      }
-      try {
-        return { success: true, ...(await selectDevinSlot(slot)) };
-      } catch (error) {
-        throw new AppError(error instanceof Error ? error.message : 'Не удалось переключить аккаунт Devin.', { code: 'BAD_REQUEST', statusCode: 400 });
-      }
-    },
-
-    async startDevinAccountLogin(userId: number) {
-      assertDevinOwner(userId);
-      try {
-        return { success: true, ...(await startDevinLogin()) };
-      } catch (error) {
-        throw new AppError(error instanceof Error ? error.message : 'Не удалось начать вход в Devin.', { code: 'DEVIN_LOGIN_FAILED', statusCode: 502 });
-      }
-    },
-
-    async submitDevinAccountLoginCode(userId: number, code: unknown) {
-      assertDevinOwner(userId);
-      if (typeof code !== 'string') {
-        throw new AppError('Нужен код со страницы входа.', { code: 'BAD_REQUEST', statusCode: 400 });
-      }
-      return { success: true, ...(await submitDevinLoginCode(code)) };
-    },
-
-    cancelDevinAccountLogin(userId: number) {
-      assertDevinOwner(userId);
-      cancelDevinLogin();
-      return { success: true };
+      // Панель «Расход» показывает креды ПЕРВОГО годного канала Connection
+      // Layer; у прибитых чатов своя креда — своя, но здесь нужна главная.
+      const primary = devinConnectionsDb.list().find(
+        (conn) => conn.enabled && conn.health_status !== 'auth_failed',
+      );
+      return { success: true, ...(await readDevinAccountLimits(primary?.xdg_data_home ?? null)) };
     },
 
     async getOwnerAccountEmail(userId: number) {
@@ -353,19 +306,7 @@ export function createUserService(dependencies: UserDependencies) {
 
       const activeSlot = dependencies.users.getActiveOwnerAccountSlot(userId);
 
-      const readSlotInfo = async (slot: number): Promise<OwnerAccountInfo> => {
-        try {
-          const configDir = getWebUserClaudeConfigDir(userId, slot);
-          const claudeJsonPath = path.join(configDir, '.claude.json');
-          const raw = await readFile(claudeJsonPath, 'utf-8');
-          const parsed = JSON.parse(raw) as { oauthAccount?: { emailAddress?: string } };
-          return { slot, email: parsed.oauthAccount?.emailAddress ?? null, available: true };
-        } catch {
-          return { slot, email: null, available: false };
-        }
-      };
-
-      const accounts = await Promise.all([readSlotInfo(1), readSlotInfo(2)]);
+      const accounts = await Promise.all([readOwnerSlotInfo(userId, 1), readOwnerSlotInfo(userId, 2)]);
       return { success: true, activeSlot, accounts };
     },
 
@@ -410,17 +351,7 @@ export function createUserService(dependencies: UserDependencies) {
 
       // Return the same shape as getOwnerAccounts so the client can update in place.
       const activeSlot = slot;
-      const readSlotInfo = async (s: number): Promise<OwnerAccountInfo> => {
-        try {
-          const dir = getWebUserClaudeConfigDir(userId, s);
-          const raw = await readFile(path.join(dir, '.claude.json'), 'utf-8');
-          const parsed = JSON.parse(raw) as { oauthAccount?: { emailAddress?: string } };
-          return { slot: s, email: parsed.oauthAccount?.emailAddress ?? null, available: true };
-        } catch {
-          return { slot: s, email: null, available: false };
-        }
-      };
-      const accounts = await Promise.all([readSlotInfo(1), readSlotInfo(2)]);
+      const accounts = await Promise.all([readOwnerSlotInfo(userId, 1), readOwnerSlotInfo(userId, 2)]);
       return { success: true, activeSlot, accounts };
     },
   };
@@ -431,3 +362,19 @@ type OwnerAccountInfo = {
   email: string | null;
   available: boolean;
 };
+
+/**
+ * Состояние одного слота Claude хозяина. Слот доступен только с вошедшим
+ * аккаунтом: файл `.claude.json` может существовать и без `oauthAccount`
+ * (пустой слот) — тогда в пикере его быть не должно.
+ */
+async function readOwnerSlotInfo(userId: number, slot: number): Promise<OwnerAccountInfo> {
+  try {
+    const raw = await readFile(path.join(getWebUserClaudeConfigDir(userId, slot), '.claude.json'), 'utf-8');
+    const email = (JSON.parse(raw) as { oauthAccount?: { emailAddress?: string } }).oauthAccount?.emailAddress ?? null;
+    return { slot, email, available: email !== null };
+  } catch {
+    return { slot, email: null, available: false };
+  }
+}
+

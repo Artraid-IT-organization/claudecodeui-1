@@ -27,6 +27,16 @@ function exportable(messages: ChatMessage[]): ChatMessage[] {
   return messages.filter((m) => !m.isThinking && String(m.content ?? '').trim() !== '');
 }
 
+/**
+ * ISO-подобная метка времени «YYYY-MM-DD HH:mm» — однозначно читается и
+ * человеком, и моделью, в отличие от локализованного «Oct 16, 2026, 2:24 PM».
+ */
+function formatTimestampISO(date: Date | string | number): string {
+  const d = typeof date === 'string' || typeof date === 'number' ? new Date(date) : date;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 function escapeHTML(value: string): string {
   return value
     .replace(/&/g, '&amp;')
@@ -55,28 +65,22 @@ export function exportToMarkdown(
     markdown += `---\n\n`;
   }
 
-  // Messages
+  // Messages. Заголовок сообщения — роль + время в одной строке: файл
+  // пересылают другому ИИ на разбор, метки user/assistant читаются любой
+  // моделью однозначно, а «You»/«Claude» и <small>-теги — шум.
   for (const msg of exportable(messages)) {
-    if (msg.type === 'user') {
-      markdown += '## You\n\n';
-    } else if (msg.type === 'assistant') {
-      markdown += '## Claude\n\n';
-    } else if (msg.type === 'error') {
-      markdown += '## ⚠️ Error\n\n';
-    } else if (msg.type === 'tool') {
-      markdown += '## 🔧 Tool\n\n';
-    } else {
-      continue;
-    }
+    const role =
+      msg.type === 'user' ? 'user' :
+      msg.type === 'assistant' ? 'assistant' :
+      msg.type === 'error' ? 'error' :
+      msg.type === 'tool' ? 'tool' : null;
+    if (!role) continue;
+
+    const stamp = includeMeta && msg.timestamp ? ` · ${formatTimestampISO(msg.timestamp)}` : '';
+    markdown += `## ${role}${stamp}\n\n`;
 
     const content = typeof msg.content === 'string' ? msg.content : String(msg.content ?? '');
-    markdown += `${content}\n\n`;
-
-    if (includeMeta && msg.timestamp) {
-      markdown += `<small>${formatTimestamp(msg.timestamp)}</small>\n\n`;
-    }
-
-    markdown += '---\n\n';
+    markdown += `${content}\n\n---\n\n`;
   }
 
   return markdown;

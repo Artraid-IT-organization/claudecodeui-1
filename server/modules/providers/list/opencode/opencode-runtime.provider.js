@@ -10,6 +10,7 @@ import {
 } from '@/shared/image-attachments.js';
 import { notifyRunFailed, notifyRunStopped } from '@/modules/notifications/index.js';
 import { createCompleteMessage, createNormalizedMessage, flattenPromptForWindowsShell, getOpenCodeDatabasePath } from '@/shared/utils.js';
+import { wrapInAgentRoom } from '@/shared/agent-rooms.js';
 
 // cross-spawn resolves .cmd shims/PATHEXT on Windows and delegates to
 // child_process.spawn everywhere else.
@@ -287,10 +288,12 @@ async function spawnOpenCode(command, options = {}, ws, context) {
         args.push(flattenPromptForWindowsShell(promptWithAttachments));
       }
 
-      opencodeProcess = spawnFunction('opencode', args, {
+      // Своя комната (agent-rooms): агент не делит потолок памяти с сайтом.
+      const room = wrapInAgentRoom('opencode', args, { ...process.env, ...permissionOptions.env }, sessionId);
+      opencodeProcess = spawnFunction(room.command, room.args, {
         cwd: workingDir,
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env, ...permissionOptions.env },
+        env: room.env,
       });
 
       activeOpenCodeProcesses.set(processKey, opencodeProcess);

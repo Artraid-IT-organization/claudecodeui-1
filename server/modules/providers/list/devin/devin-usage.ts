@@ -30,6 +30,7 @@ import {
   readJsonRecord,
   readObjectRecord,
   buildDevinChildEnv,
+  getDevinDatabasePath,
   readOptionalString,
   resolveDevinCliCommand,
 } from '@/shared/utils.js';
@@ -246,9 +247,9 @@ function devinChainNodeIds(
  */
 export function readDevinTokenUsage(
   providerSessionId: string,
-  options: { modelHint?: string | null } = {},
+  options: { modelHint?: string | null; xdgDataHome?: string | null } = {},
 ): DevinTokenUsage | null {
-  const db = openDevinDatabase();
+  const db = openDevinDatabase(getDevinDatabasePath(options.xdgDataHome ?? null));
   if (!db) {
     return null;
   }

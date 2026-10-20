@@ -4,8 +4,7 @@ import { promises as fsPromises } from 'node:fs';
 
 import chokidar, { type FSWatcher } from 'chokidar';
 
-import { projectsDb, sessionsDb } from '@/modules/database/index.js';
-import { chatGroupsDb } from '@/modules/database/repositories/chat-groups.js';
+import { chatGroupsDb, devinConnectionsDb, projectsDb, sessionsDb } from '@/modules/database/index.js';
 import { isSurvivorRunning } from '@/modules/providers/list/claude/survivor-runs.js';
 import { sessionSynchronizerService } from '@/modules/providers/services/session-synchronizer.service.js';
 import { broadcastRealtimeEvent, canReceiveProviderEvents, connectedClients, WS_OPEN_STATE } from '@/modules/websocket/index.js';
@@ -38,8 +37,9 @@ const PROVIDER_WATCH_PATHS: Array<{ provider: LLMProvider; rootPath: string }> =
   },
   {
     provider: 'devin',
-    // Devin keeps one shared sqlite database — watch the data dir and let
-    // isWatcherTargetFile keep only sessions.db (and its WAL journal).
+    // Devin keeps one sqlite database per corporate connection — watch the
+    // machine default here; every connection's <xdg>/devin/cli is appended at
+    // watch start (see initializeSessionsWatcher).
     rootPath: path.join(getDevinDataDir(), 'cli'),
   },
 ];
@@ -193,6 +193,8 @@ async function buildSessionUpsertedEvent(updatedProviderSessionId: string): Prom
       // возвращало бы перенесённый чат обратно в «Проекты» до перезагрузки.
       serverScope: groupedRow.server_scope ?? null,
       flagged: Boolean(groupedRow.is_flagged),
+      done: Boolean(groupedRow.is_done),
+      promptLaunched: Boolean(groupedRow.prompt_launched),
     },
     project: project
       ? {
@@ -323,7 +325,19 @@ export async function initializeSessionsWatcher(): Promise<void> {
     failures: initialSync.failures,
   });
 
-  for (const { provider, rootPath } of PROVIDER_WATCH_PATHS) {
+  const watchPaths = [...PROVIDER_WATCH_PATHS];
+  try {
+    // Connection Layer: у каждого канала свой каталог и своя sessions.db —
+    // watcher должен слушать все, иначе чаты второго канала не появятся сами.
+    for (const conn of devinConnectionsDb.list()) {
+      if (conn.enabled) {
+        watchPaths.push({ provider: 'devin', rootPath: path.join(getDevinDataDir(conn.xdg_data_home), 'cli') });
+      }
+    }
+  } catch {
+    // Реестра может ещё не быть на старых базах — вотчер живёт без него.
+  }
+  for (const { provider, rootPath } of watchPaths) {
     try {
       await fsPromises.mkdir(rootPath, { recursive: true });
 

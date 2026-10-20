@@ -2,7 +2,9 @@
   "codeBlock": {
     "copy": "복사",
     "copied": "복사됨",
-    "copyCode": "코드 복사"
+    "copyCode": "코드 복사",
+    "runInNewChat": "새 채팅",
+    "runInNewChatTitle": "새 채팅에 삽입하고 실행"
   },
   "copyMessage": {
     "copy": "메시지 복사",

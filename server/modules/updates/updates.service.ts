@@ -129,6 +129,31 @@ function writeJson(file: string, value: unknown): void {
 }
 
 /**
+ * Протухшее `running` → `failed`. Скрипт выкатки обязан сам закрывать
+ * apply.json, но если процесс убит, сервер зависнет или просто сигнал не
+ * дошёл — файл остаётся `running` навечно, и плашка «Установка обновления…»
+ * зависает. Таймаут здесь — последний рубеж: при чтении статуса сервер
+ * проверяет возраст `running` и переводит в `failed`, если процесс выкатки
+ * давно не жив.
+ */
+function expireStaleApply(apply: ApplyState | null): ApplyState | null {
+  if (!apply || apply.state !== 'running' || !apply.startedTs) return apply;
+  if (Date.now() - apply.startedTs > APPLY_TIMEOUT_MS) {
+    const expired: ApplyState = {
+      ...apply,
+      state: 'failed',
+      finishedAt: new Date().toISOString(),
+      detail: `установка не завершилась за ${Math.round(APPLY_TIMEOUT_MS / 60_000)} мин — сброшено автоматически`,
+    };
+    try {
+      writeJson(path.join(stateDir(), 'apply.json'), expired);
+    } catch { /* чтение важнее записи — покажем failed даже без файла */ }
+    return expired;
+  }
+  return apply;
+}
+
+/**
  * Что сейчас показывать человеку. Модуль не настроен (нет apply-команды) —
  * `configured: false`, и интерфейс вообще не показывает плашку: на копиях без
  * обновлений лишний элемент в сайдбаре был бы только шумом.
@@ -136,7 +161,7 @@ function writeJson(file: string, value: unknown): void {
 export function getUpdateStatus(): UpdateStatus {
   const configured = Boolean(applyCmd());
   const pending = readPending();
-  const apply = readApply();
+  const apply = expireStaleApply(readApply());
   const dismissed = readDismissedIds();
 
   const applying = apply?.state === 'running' ? apply : null;
@@ -281,13 +306,13 @@ ${conflictPart}
  * «Обсудить с чатом»: новый чат, первым сообщением — бриф с фактами пула.
  * Отправка серверной очередью: ход начинается сразу, вкладка не нужна.
  */
-export function openDiscussChat(userId: string | null): { sessionId: string } {
+export async function openDiscussChat(userId: string | null): Promise<{ sessionId: string }> {
   const pending = readPending();
   if (!pending) {
     throw new AppError('Сейчас нет ожидающего обновления — обсуждать нечего.', { statusCode: 409 });
   }
 
-  const { sessionId } = sessionsService.createAppSession(DISCUSS_PROVIDER, discussCwd(), DISCUSS_SESSION_NAME);
+  const { sessionId } = await sessionsService.createAppSession(DISCUSS_PROVIDER, discussCwd(), DISCUSS_SESSION_NAME);
   queueChatMessage({
     id: `upd_${Date.now().toString(36)}`,
     sessionId,

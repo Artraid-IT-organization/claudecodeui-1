@@ -11,6 +11,7 @@ import {
   AppError,
   isCodexAllowedForWebUser,
   isPlatformOwnerWebUser,
+  normalizeProjectPath,
   normalizeServerScope,
 } from '@/shared/utils.js';
 
@@ -26,6 +27,10 @@ type SessionSummary = {
   serverScope: ServerScope | null;
   /** Ярлык-флажок на чате. */
   flagged: boolean;
+  /** Галочка «сделано» на чате. */
+  done: boolean;
+  /** Промпт из чата «Промптов» уже ушёл кнопкой «В новый чат». */
+  promptLaunched: boolean;
 };
 
 type SessionRepositoryRow = {
@@ -38,6 +43,8 @@ type SessionRepositoryRow = {
   group_label?: string | null;
   server_scope?: ServerScope | null;
   is_flagged?: number | null;
+  is_done?: number | null;
+  prompt_launched?: number | null;
 };
 
 export type ProjectListItem = {
@@ -162,6 +169,8 @@ function mapSessionRowToSummary(row: SessionRepositoryRow): SessionSummary {
     groupLabel: row.group_label ?? null,
     serverScope: row.server_scope ?? null,
     flagged: Boolean(row.is_flagged),
+    done: Boolean(row.is_done),
+    promptLaunched: Boolean(row.prompt_launched),
   };
 }
 
@@ -231,6 +240,18 @@ function readProjectSessionScopeTotals(projectPath: string): Record<string, numb
 
   const totals: Record<string, number> = {};
   for (const row of rows) {
+    const key = `${providerBucket(row.provider)}:${row.serverScope}`;
+    totals[key] = (totals[key] ?? 0) + row.count;
+  }
+  return totals;
+}
+
+/** Тот же формат scopeTotals, но из заранее собранной пачки — без SQL на папку. */
+function scopeTotalsForProject(
+  grouped: Array<{ provider: string; serverScope: ServerScope; count: number }>,
+): Record<string, number> {
+  const totals: Record<string, number> = {};
+  for (const row of grouped) {
     const key = `${providerBucket(row.provider)}:${row.serverScope}`;
     totals[key] = (totals[key] ?? 0) + row.count;
   }
@@ -327,6 +348,33 @@ export async function getProjectsWithSessions(
     isStarred?: number;
     server_scope?: ServerScope | null;
   }>;
+  // Порции и счётчики чатов для всех папок — одной пачкой запросов: на
+  // ~110 папках это было ~3 запроса на папку, и список на занятом процессоре
+  // отвечал секундами (14.10.26). Один запрос на всё — и порядок не меняется.
+  const projectPaths = projectRows.map((r) => r.project_path);
+  const requestContext = getRequestRuntimeContext();
+  const canUseCodex = requestContext === undefined
+    || isCodexAllowedForWebUser(requestContext.userId);
+  const visibility = canUseCodex ? 'shared-codex' : 'hide-codex';
+  const pagination = normalizeSessionPagination({
+    limit: options.sessionsLimit,
+    offset: options.sessionsOffset,
+  });
+  const sessionsPages = sessionsDb.getSessionsByProjectPathsPage(
+    projectPaths,
+    pagination.limit,
+    pagination.offset,
+    visibility,
+  );
+  const sessionCounts = sessionsDb.countSessionsByProjectPaths(
+    projectPaths,
+    visibility,
+  );
+  const sessionScopeTotals = sessionsDb.countSessionsByProjectPathsGrouped(
+    projectPaths,
+    visibility,
+  );
+
   const totalProjects = projectRows.length;
   const projects: ProjectListItem[] = [];
   let processedProjects = 0;
@@ -349,10 +397,15 @@ export async function getProjectsWithSessions(
         ? row.custom_project_name
         : await generateDisplayName(path.basename(projectPath) || projectPath, projectPath);
 
-    const sessionsPage = readProjectSessionsPageByPath(projectPath, {
-      limit: options.sessionsLimit,
-      offset: options.sessionsOffset,
-    });
+    const sessRows = sessionsPages.get(normalizeProjectPath(projectPath)) ?? [];
+    const sessionsPage = {
+      sessions: sessRows.map(mapSessionRowToSummary),
+      hasMore: (sessionCounts.get(normalizeProjectPath(projectPath)) ?? 0) > pagination.offset + sessRows.length,
+      total: sessionCounts.get(normalizeProjectPath(projectPath)) ?? 0,
+      scopeTotals: scopeTotalsForProject(
+        sessionScopeTotals.get(normalizeProjectPath(projectPath)) ?? [],
+      ),
+    };
 
     projects.push({
       projectId,
@@ -365,7 +418,7 @@ export async function getProjectsWithSessions(
       sessionMeta: {
         hasMore: sessionsPage.hasMore,
         total: sessionsPage.total,
-        scopeTotals: readProjectSessionScopeTotals(projectPath),
+        scopeTotals: sessionsPage.scopeTotals ?? {},
       },
     });
   }

@@ -5,7 +5,7 @@ import path from 'node:path';
 import pty, { type IPty } from 'node-pty';
 import { WebSocket, type RawData } from 'ws';
 
-import { getActiveDevinSlot, getDevinSlotEnv } from '@/shared/devin-slots.js';
+import { devinConnectionsDb, sessionsDb } from '@/modules/database/index.js';
 import type { AuthenticatedWebSocketRequest } from '@/shared/types.js';
 import { isPlatformOwnerWebUser, OPEN_REGISTRATION, parseIncomingJsonObject } from '@/shared/utils.js';
 import {
@@ -13,6 +13,7 @@ import {
   resolveWebUserRuntimeContext,
   withoutInheritedClaudeAuth,
 } from '@/shared/web-user-runtime.js';
+import { wrapInAgentRoom } from '@/shared/agent-rooms.js';
 
 type ShellIncomingMessage = {
   type?: string;
@@ -523,31 +524,43 @@ export function handleShellConnection(
         const termRows = readNumber(data.rows, 24);
         const prioritizedPath = prioritizeUserNpmGlobalBin(process.env);
 
-        shellProcess = (dependencies.spawnPty ?? pty.spawn)(shell, shellArgs, {
+        const ptyEnv: NodeJS.ProcessEnv = {
+          // Гостю — без ключей Claude сервера: они владельца площадки.
+          ...withoutInheritedClaudeAuth(process.env, runtimeContext),
+          [prioritizedPath.key]: prioritizedPath.value,
+          TERM: 'xterm-256color',
+          COLORTERM: 'truecolor',
+          FORCE_COLOR: '3',
+          // Свой каталог настроек — иначе вход в терминале лёг бы в общий.
+          // Проверка выше не пускает сюда неопознанного пользователя, так
+          // что на площадке с открытой регистрацией значение здесь есть
+          // всегда; на одноаккаунтной остаётся окружение процесса.
+          ...(runtimeContext.claudeConfigDir
+            ? { CLAUDE_CONFIG_DIR: runtimeContext.claudeConfigDir }
+            : {}),
+          ...(runtimeContext.anthropicApiKey
+            ? { ANTHROPIC_API_KEY: runtimeContext.anthropicApiKey }
+            : {}),
+          // Devin в терминале — с XDG_DATA_HOME канала чата (Connection
+          // Layer): `devin` CLI в шелле видит креды и историю той линии.
+          ...(provider === 'devin' && sessionId
+            ? (() => {
+                const connId = sessionsDb.getSessionById(sessionId)?.devin_connection_id;
+                const conn = connId != null ? devinConnectionsDb.getById(connId) : null;
+                return conn ? { XDG_DATA_HOME: conn.xdg_data_home } : {};
+              })()
+            : {}),
+        };
+        // Оболочка терминала — тоже в комнате (agent-rooms): команды,
+        // набранные в ней (сборки, тесты), не едят потолок памяти сайта.
+        // systemd-run --scope сохраняет PTY — проверено пробой 14.10.26.
+        const room = wrapInAgentRoom(shell, shellArgs, ptyEnv, sessionId);
+        shellProcess = (dependencies.spawnPty ?? pty.spawn)(room.command, room.args, {
           name: 'xterm-256color',
           cols: termCols,
           rows: termRows,
           cwd: resolvedProjectPath,
-          env: {
-            // Гостю — без ключей Claude сервера: они владельца площадки.
-            ...withoutInheritedClaudeAuth(process.env, runtimeContext),
-            [prioritizedPath.key]: prioritizedPath.value,
-            TERM: 'xterm-256color',
-            COLORTERM: 'truecolor',
-            FORCE_COLOR: '3',
-            // Свой каталог настроек — иначе вход в терминале лёг бы в общий.
-            // Проверка выше не пускает сюда неопознанного пользователя, так
-            // что на площадке с открытой регистрацией значение здесь есть
-            // всегда; на одноаккаунтной остаётся окружение процесса.
-            ...(runtimeContext.claudeConfigDir
-              ? { CLAUDE_CONFIG_DIR: runtimeContext.claudeConfigDir }
-              : {}),
-            ...(runtimeContext.anthropicApiKey
-              ? { ANTHROPIC_API_KEY: runtimeContext.anthropicApiKey }
-              : {}),
-            // Devin в терминале входит под тем же аккаунтом, что и чаты (слот 1 или 2).
-            ...(provider === 'devin' ? getDevinSlotEnv(getActiveDevinSlot()) : {}),
-          },
+          env: room.env,
         });
 
         ptySessionsMap.set(ptySessionKey, {

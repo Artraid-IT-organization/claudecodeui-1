@@ -13,6 +13,7 @@ import { noteRun } from '../utils/liveRunCursor';
 import { isSubagentToolName } from '../tools/configs/toolConfigs';
 import { toolInputDescription } from '../utils/workStretch';
 import { reportCatchupProbe } from '../utils/catchupProbe';
+import type { StreamingScheduler } from './streamingScheduler';
 
 const isActionablePermissionRequest = (request: { toolName?: unknown } | null | undefined): boolean => {
   return request?.toolName !== 'ExitPlanMode' && request?.toolName !== 'exit_plan_mode';
@@ -31,15 +32,12 @@ interface UseChatRealtimeHandlersArgs {
   setTokenBudget: (budget: Record<string, unknown> | null) => void;
   pendingPermissionRequests: PendingPermissionRequest[];
   setPendingPermissionRequests: Dispatch<SetStateAction<PendingPermissionRequest[]>>;
-  /** All five are keyed by session id — see the comment on their declaration
-   *  in ChatInterface: one client can stream two sessions at once. */
-  streamTimerRef: MutableRefObject<Map<string, number>>;
-  accumulatedStreamRef: MutableRefObject<Map<string, string>>;
-  /** Mirrors streamTimerRef/accumulatedStreamRef for the live thinking block. */
-  thinkingStreamTimerRef: MutableRefObject<Map<string, number>>;
-  accumulatedThinkingRef: MutableRefObject<Map<string, string>>;
   /** When the current thinking block's first delta arrived; drives the measured "Thought for Ns". */
   thinkingStartedAtRef: MutableRefObject<Map<string, number>>;
+  /** Frame-coalesced scheduler for live assistant text. */
+  streamSchedulerRef: MutableRefObject<StreamingScheduler | null>;
+  /** Frame-coalesced scheduler for live thinking text. */
+  thinkingSchedulerRef: MutableRefObject<StreamingScheduler | null>;
   /**
    * Highest live `seq` observed per session. Essential for reconnect catch-up:
    * `chat.subscribe` sends this value as `lastSeq` so the server replays only
@@ -78,11 +76,9 @@ export function useChatRealtimeHandlers({
   setTokenBudget,
   pendingPermissionRequests,
   setPendingPermissionRequests,
-  streamTimerRef,
-  accumulatedStreamRef,
-  thinkingStreamTimerRef,
-  accumulatedThinkingRef,
   thinkingStartedAtRef,
+  streamSchedulerRef,
+  thinkingSchedulerRef,
   lastSeqRef,
   statusCheckSentAtRef,
   onSessionProcessing,
@@ -140,8 +136,7 @@ export function useChatRealtimeHandlers({
       // that is already in flight to the same socket via the run's normal
       // live broadcast — the same `stream_delta`/`thinking_delta` run then
       // arrives twice. Without this guard each duplicate re-runs
-      // `accumulatedStreamRef.current += text` / `accumulatedThinkingRef.
-      // current += text`, splicing a repeated fragment into the middle of
+      // the stream/thinking scheduler buffers, splicing a repeated fragment into the middle of
       // the live buffer (observed live: "I'll look at the file first."
       // replayed from partway through corrupted the buffer into "I'll
       // look'll look at the file first."), which then gets persisted as-is
@@ -186,6 +181,18 @@ export function useChatRealtimeHandlers({
             });
           }
 
+          // Исход прошлого хода из журнала сервера: ход, кончившийся, пока
+          // страница была мертва (iOS выгружает её в фоне), показываем
+          // плашкой «чем всё закончилось», а не мёртвой тишиной ленты.
+          const lastRun = msg.lastRun as { status?: string; error?: string | null; finishedAt?: string | null } | null | undefined;
+          sessionStore.setRunOutcome(sid, lastRun && lastRun.status && lastRun.status !== 'completed'
+            ? {
+              status: lastRun.status as 'failed' | 'aborted' | 'interrupted',
+              error: typeof lastRun.error === 'string' ? lastRun.error : null,
+              finishedAt: typeof lastRun.finishedAt === 'string' ? lastRun.finishedAt : null,
+            }
+            : null);
+
           if (msg.isProcessing) {
             // Этап приходит только для чата, пережившего перезапуск сайта
             // (сервер читает хвост переписки); у живого — из потока.
@@ -197,6 +204,12 @@ export function useChatRealtimeHandlers({
               }
               : undefined);
           } else {
+            // «Хода нет» по серверу — а буфер мог уцелеть от хода, умершего
+            // без complete (перезапуск сайта посреди стрима). Стираем, иначе
+            // первый блок следующего ответа начнётся с хвоста прошлого.
+            streamSchedulerRef.current?.drop(sid);
+            thinkingSchedulerRef.current?.drop(sid);
+            thinkingStartedAtRef.current.delete(sid);
             // Idle ack: ignore it if a newer request started after the
             // subscribe was sent — the ack describes the older state.
             onSessionIdle?.(sid, {
@@ -300,7 +313,30 @@ export function useChatRealtimeHandlers({
           // Ход, заведённый сервером из очереди: нажатия человека не было, и
           // узнать о начале работы странице больше неоткуда.
           if (!sid) return;
+          // Новый ход — новые буферы: уцелевший от нештатно оборванного хода
+          // текст не должен открывать первую строку свежего ответа.
+          streamSchedulerRef.current?.drop(sid);
+          thinkingSchedulerRef.current?.drop(sid);
+          thinkingStartedAtRef.current.delete(sid);
+          // Плашка исхода прошлого хода снимается новой работой.
+          sessionStore.setRunOutcome(sid, null);
           onSessionProcessing?.(sid);
+          return;
+        }
+
+        case 'run_terminal': {
+          // Терминальный исход хода — рассылка всем вкладкам (не только той,
+          // чей сокет держал поток). Плашка исхода: неуспех показываем,
+          // нормальный конец — снимаем.
+          if (!sid) return;
+          const status = typeof msg.status === 'string' ? msg.status : '';
+          sessionStore.setRunOutcome(sid, status && status !== 'completed'
+            ? {
+              status: status as 'failed' | 'aborted' | 'interrupted',
+              error: typeof msg.error === 'string' ? msg.error : null,
+              finishedAt: typeof msg.finishedAt === 'string' ? msg.finishedAt : null,
+            }
+            : null);
           return;
         }
 
@@ -329,25 +365,26 @@ export function useChatRealtimeHandlers({
       // here first) — a no-op when nothing thinking has accumulated.
       const flushThinking = () => {
         if (!sid) return;
-        const timer = thinkingStreamTimerRef.current.get(sid);
-        if (timer) {
-          clearTimeout(timer);
-          thinkingStreamTimerRef.current.delete(sid);
-        }
-        const accumulated = accumulatedThinkingRef.current.get(sid);
+        const accumulated = thinkingSchedulerRef.current?.read(sid);
         if (accumulated) {
           const startedAt = thinkingStartedAtRef.current.get(sid);
           const durationSeconds = startedAt !== undefined
             ? Math.max(0, Math.round((Date.now() - startedAt) / 1000))
             : undefined;
-          sessionStore.updateThinkingStreaming(sid, accumulated, provider);
+          thinkingSchedulerRef.current?.flush(sid);
           sessionStore.finalizeThinkingStreaming(sid, durationSeconds);
         }
-        accumulatedThinkingRef.current.delete(sid);
+        // drop, не cancel: буфер размышления закрытого блока обязан уйти
+        // вместе с ним — иначе следующий блок начнётся со старого текста
+        // и каждая финализация напечатает всё более длинную копию.
+        thinkingSchedulerRef.current?.drop(sid);
         thinkingStartedAtRef.current.delete(sid);
       };
 
-      // --- Streaming: buffer for performance ---
+      // --- Streaming: coalesce deltas until the next paint frame ---
+      // Мелкие дельты накапливаются до следующего кадра отрисовки, а не до
+      // фиксированных 100 мс: при быстром потоке это убирает лишнюю паузу,
+      // а при медленном рендере не даёт куче фрагментов срастись в рывок.
       if (msg.kind === 'thinking_delta') {
         const text = (msg.content as string) || '';
         if (!sid) return;
@@ -358,19 +395,10 @@ export function useChatRealtimeHandlers({
         // размышления, когда текста ещё нет (он придёт пересказом в конце).
         onSessionProcessing?.(sid, { phase: 'thinking', detail: null, statusText: null, canInterrupt: true });
         if (!text) return;
-        if (!accumulatedThinkingRef.current.has(sid)) {
+        if (!thinkingSchedulerRef.current?.read(sid)) {
           thinkingStartedAtRef.current.set(sid, Date.now());
         }
-        accumulatedThinkingRef.current.set(sid, (accumulatedThinkingRef.current.get(sid) ?? '') + text);
-        if (!thinkingStreamTimerRef.current.has(sid)) {
-          thinkingStreamTimerRef.current.set(sid, window.setTimeout(() => {
-            thinkingStreamTimerRef.current.delete(sid);
-            const buffered = accumulatedThinkingRef.current.get(sid);
-            if (buffered) {
-              sessionStore.updateThinkingStreaming(sid, buffered, provider);
-            }
-          }, 100));
-        }
+        thinkingSchedulerRef.current?.schedule(sid, text);
         // Deltas are NOT appended to the transcript, for any session, active
         // or not. `appendRealtime` stores one message per call, so routing raw
         // deltas through it turned a single sentence into a column of
@@ -384,16 +412,7 @@ export function useChatRealtimeHandlers({
         const text = (msg.content as string) || '';
         if (!text || !sid) return;
         onSessionProcessing?.(sid, { phase: 'writing', detail: null, statusText: null, canInterrupt: true });
-        accumulatedStreamRef.current.set(sid, (accumulatedStreamRef.current.get(sid) ?? '') + text);
-        if (!streamTimerRef.current.has(sid)) {
-          streamTimerRef.current.set(sid, window.setTimeout(() => {
-            streamTimerRef.current.delete(sid);
-            const buffered = accumulatedStreamRef.current.get(sid);
-            if (buffered) {
-              sessionStore.updateStreaming(sid, buffered, provider);
-            }
-          }, 100));
-        }
+        streamSchedulerRef.current?.schedule(sid, text);
         // Not appended to the transcript — see the thinking_delta comment.
         return;
       }
@@ -404,17 +423,16 @@ export function useChatRealtimeHandlers({
         // the one actually holding content does anything (see flushThinking
         // and the backend's stream_end comment for why that's safe).
         if (sid) {
-          const timer = streamTimerRef.current.get(sid);
-          if (timer) {
-            clearTimeout(timer);
-            streamTimerRef.current.delete(sid);
-          }
-          const buffered = accumulatedStreamRef.current.get(sid);
+          const buffered = streamSchedulerRef.current?.read(sid);
+          streamSchedulerRef.current?.flush(sid);
           if (buffered) {
-            sessionStore.updateStreaming(sid, buffered, provider);
+            sessionStore.finalizeStreaming(sid);
           }
-          sessionStore.finalizeStreaming(sid);
-          accumulatedStreamRef.current.delete(sid);
+          // Блок закрыт — буфер под него стираем целиком. Без этого следующий
+          // текстовый блок начинался со ВСЕГО уже показанного текста хода, и
+          // каждая граница (у Devin — каждый вызов инструмента) печатала ленту
+          // заново нарастающей копией (дубли 14.10.26).
+          streamSchedulerRef.current?.drop(sid);
         }
         flushThinking();
         return;
@@ -493,17 +511,14 @@ export function useChatRealtimeHandlers({
         case 'complete': {
           // Flush any remaining streaming state
           if (sid) {
-            const timer = streamTimerRef.current.get(sid);
-            if (timer) {
-              clearTimeout(timer);
-              streamTimerRef.current.delete(sid);
-            }
-            const buffered = accumulatedStreamRef.current.get(sid);
+            const buffered = streamSchedulerRef.current?.read(sid);
+            streamSchedulerRef.current?.flush(sid);
             if (buffered) {
-              sessionStore.updateStreaming(sid, buffered, provider);
               sessionStore.finalizeStreaming(sid);
             }
-            accumulatedStreamRef.current.delete(sid);
+            // Ход кончился — буфер не должен дожить до следующего: иначе
+            // первая строка нового ответа открывалась бы текстом прошлого.
+            streamSchedulerRef.current?.drop(sid);
           }
           flushThinking();
 
@@ -615,11 +630,9 @@ export function useChatRealtimeHandlers({
     setTokenBudget,
     pendingPermissionRequests,
     setPendingPermissionRequests,
-    streamTimerRef,
-    accumulatedStreamRef,
-    thinkingStreamTimerRef,
-    accumulatedThinkingRef,
     thinkingStartedAtRef,
+    streamSchedulerRef,
+    thinkingSchedulerRef,
     lastSeqRef,
     statusCheckSentAtRef,
     onSessionProcessing,
@@ -628,4 +641,5 @@ export function useChatRealtimeHandlers({
     requestLatestMessages,
     sessionStore,
   ]);
+
 }

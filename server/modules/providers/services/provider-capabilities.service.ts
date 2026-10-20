@@ -152,18 +152,11 @@ export const providerCapabilitiesService = {
   },
 
   listAllProviderCapabilities(): ProviderCapabilities[] {
-    // Devin's credentials are machine-global, so the provider only exists for
-    // the platform owner; on multi-tenant instances guests must not even see
-    // it in the picker's capability map.
-    let ownerOnlyOk = true;
-    if (OPEN_REGISTRATION) {
-      const userId = getRequestRuntimeContext()?.userId;
-      const numericUserId = userId === undefined || userId === null ? NaN : Number(userId);
-      ownerOnlyOk = Number.isFinite(numericUserId) && isPlatformOwnerWebUser(numericUserId);
-    }
-
+    // Devin работает через корпоративный Connection Layer (devin_connections):
+    // сервер выбирает канал сам, пользователю логиниться не нужно — провайдер
+    // виден всем авторизованным. Управление каналами — владельцу, см.
+    // /api/providers/devin/connections.
     return Object.values(PROVIDER_CAPABILITIES)
-      .filter((entry) => entry.provider !== 'devin' || ownerOnlyOk)
       .map(withResolvedDefault);
   },
 };

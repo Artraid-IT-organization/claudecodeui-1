@@ -45,7 +45,15 @@ const PROVIDER_LABELS: Record<LLMProvider, string> = {
   opencode: 'OpenCode',
 };
 
-type CopyState = 'loading' | 'idle' | 'copying' | 'copied' | 'error';
+type CopyState = 'idle' | 'copying' | 'copied' | 'error';
+type SessionMark = 'none' | 'flag' | 'done';
+
+function deriveSessionMark(session: SessionWithProvider): SessionMark {
+  if (session.flagged) return 'flag';
+  if (session.done) return 'done';
+  return 'none';
+}
+
 export default function SidebarSessionItem({
   project,
   session,
@@ -74,8 +82,6 @@ export default function SidebarSessionItem({
   const editingContainerRef = useRef<HTMLDivElement>(null);
   const [isMobileOptionsOpen, setIsMobileOptionsOpen] = useState(false);
   const [copyState, setCopyState] = useState<CopyState>('idle');
-  const [providerSessionId, setProviderSessionId] = useState<string | null>(null);
-  const providerIdRequestRef = useRef(0);
   const showAttentionIndicator = needsAttention && !isSelected;
   const showRecentIndicator = !showAttentionIndicator && !isProcessing && sessionView.isActive;
   const providerLabel = PROVIDER_LABELS[session.__provider];
@@ -126,28 +132,29 @@ export default function SidebarSessionItem({
     }
   };
 
-  // Ярлык-флажок. Меняем сразу на экране, не дожидаясь сервера; при
-  // следующей загрузке списка значение придёт из базы. Ошибка — возвращаем
-  // как было.
-  const [flaggedOverride, setFlaggedOverride] = useState<boolean | null>(null);
-  const isFlagged = flaggedOverride ?? Boolean(session.flagged);
+  // Метка чата (флажок / галочка / ничего). Меняем сразу на экране,
+  // не дожидаясь сервера; при следующей загрузке списка значение придёт из базы.
+  // Ошибка — возвращаем как было.
+  const [markOverride, setMarkOverride] = useState<SessionMark | null>(null);
+  const currentMark = markOverride ?? deriveSessionMark(session);
+  const isFlagged = currentMark === 'flag';
+  const isDone = currentMark === 'done';
   useEffect(() => {
-    setFlaggedOverride(null);
-  }, [session.flagged]);
-  const flagLabel = isFlagged
-    ? t('sessions.removeFlag', { defaultValue: 'Снять ярлык' })
-    : t('sessions.addFlag', { defaultValue: 'Повесить ярлык' });
-  const toggleFlag = async () => {
-    const next = !isFlagged;
-    setFlaggedOverride(next);
+    setMarkOverride(null);
+  }, [session.flagged, session.done]);
+
+  const setMark = async (next: SessionMark) => {
+    setMarkOverride(next);
     try {
-      const response = await api.setSessionFlagged(session.id, next);
+      const response = await api.setSessionMark(session.id, next);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
     } catch (error) {
-      setFlaggedOverride(!next);
-      console.error('[Sidebar] Не удалось изменить ярлык чата:', error);
+      setMarkOverride(deriveSessionMark(session));
+      console.error('[Sidebar] Не удалось изменить метку чата:', error);
     }
   };
+  const toggleFlag = () => { void setMark(isFlagged ? 'none' : 'flag'); };
+  const toggleDone = () => { void setMark(isDone ? 'none' : 'done'); };
 
   // Sessions are owned by a project identified by `projectId` (DB primary key)
   // after the projectName → projectId migration.
@@ -164,39 +171,9 @@ export default function SidebarSessionItem({
     onDeleteSession(project.projectId, session.id, sessionView.sessionName, session.__provider);
   };
 
-  const loadProviderSessionId = async () => {
-    const requestId = ++providerIdRequestRef.current;
-    setCopyState('loading');
-    try {
-      const response = await api.providerSessionId(session.id);
-      const payload = await response.json();
-      const loadedSessionId = payload?.data?.sessionId;
-      if (!response.ok || typeof loadedSessionId !== 'string' || !loadedSessionId) {
-        throw new Error('Provider session ID is unavailable');
-      }
-
-      if (requestId !== providerIdRequestRef.current) return;
-      setProviderSessionId(loadedSessionId);
-      setCopyState('idle');
-    } catch {
-      if (requestId !== providerIdRequestRef.current) return;
-      setProviderSessionId(null);
-      setCopyState('error');
-    }
-  };
-
-  const resetCopyState = () => {
-    providerIdRequestRef.current += 1;
-    setCopyState('idle');
-    setProviderSessionId(null);
-  };
-
   const setOptionsOpen = (open: boolean) => {
-    if (open) {
-      setProviderSessionId(null);
-      void loadProviderSessionId();
-    } else {
-      resetCopyState();
+    if (!open) {
+      setCopyState('idle');
     }
   };
 
@@ -217,40 +194,27 @@ export default function SidebarSessionItem({
     setMobileOptionsOpen(false);
   };
 
-  const copyProviderSessionId = async () => {
-    if (!providerSessionId) {
-      setCopyState('error');
-      return;
-    }
-
+  const copyChatId = async () => {
     setCopyState('copying');
-    const didCopy = await copyTextToClipboard(providerSessionId);
+    const didCopy = await copyTextToClipboard(session.id);
     setCopyState(didCopy ? 'copied' : 'error');
   };
 
   const handleCopyAction = () => {
-    if (copyState === 'error' && !providerSessionId) {
-      void loadProviderSessionId();
-    } else {
-      void copyProviderSessionId();
-    }
+    void copyChatId();
   };
 
-  const isCopyPending = copyState === 'loading' || copyState === 'copying';
+  const isCopyPending = copyState === 'copying';
   const CopyStateIcon = copyState === 'copied' ? Check : Copy;
-  const copyLabel = copyState === 'loading'
-    ? `Loading ${providerLabel} session ID…`
-    : copyState === 'copied'
-      ? `${providerLabel} session ID copied`
-      : copyState === 'error'
-        ? providerSessionId
-          ? `Couldn't copy ${providerLabel} session ID`
-          : `${providerLabel} session ID unavailable`
-        : `Copy ${providerLabel} session ID`;
+  const copyLabel = copyState === 'copied'
+    ? 'ID чата скопирован'
+    : copyState === 'error'
+      ? 'Не удалось скопировать ID чата'
+      : 'Копировать ID чата';
 
-  // Ярлык встаёт на место значка Claude слева: квадратик тот же, поэтому
+  // Метка встаёт на место значка Claude слева: квадратик тот же, поэтому
   // название чата не становится короче ни на пиксель.
-  const flagTileContent = isFlagged ? (
+  const markTileContent = isFlagged ? (
     <Flag
       className="h-3 w-3 text-white"
       fill="currentColor"
@@ -258,8 +222,20 @@ export default function SidebarSessionItem({
       role="img"
       aria-label={t('sessions.flagged', { defaultValue: 'С ярлыком' })}
     />
+  ) : isDone ? (
+    <Check
+      className="h-3 w-3 text-muted-foreground"
+      strokeWidth={2.5}
+      role="img"
+      aria-label={t('sessions.done', { defaultValue: 'С галочкой' })}
+    />
   ) : (
-    <LLMProviderLogo provider={session.__provider} className="h-3 w-3" />
+    // promptLaunched — из чата «Промптов» промпт уже ушёл «В новый чат»:
+    // иконка серая, без новых цветов и элементов в строке.
+    <LLMProviderLogo
+      provider={session.__provider}
+      className={cn('h-3 w-3', session.promptLaunched && 'opacity-40 grayscale')}
+    />
   );
 
   return (
@@ -297,6 +273,7 @@ export default function SidebarSessionItem({
               ? 'border-green-500/30 bg-green-50/5 dark:bg-green-900/5'
               : 'border-border/30',
             isFlagged && 'border-red-500/50',
+            isDone && 'opacity-60',
           )}
           onClick={selectMobileSession}
         >
@@ -304,10 +281,10 @@ export default function SidebarSessionItem({
             <div
               className={cn(
                 'w-5 h-5 rounded-md flex items-center justify-center flex-shrink-0',
-                isFlagged ? 'bg-red-500' : isSelected ? 'bg-primary/10' : 'bg-muted/50',
+                isFlagged ? 'bg-red-500' : isDone ? 'bg-muted/40' : isSelected ? 'bg-primary/10' : 'bg-muted/50',
               )}
             >
-              {flagTileContent}
+              {markTileContent}
             </div>
 
             <div className="min-w-0 flex-1">
@@ -461,14 +438,36 @@ export default function SidebarSessionItem({
                   type="button"
                   onClick={() => {
                     setMobileOptionsOpen(false);
-                    void toggleFlag();
+                    toggleFlag();
                   }}
                   className="flex min-h-12 w-full items-center gap-3 rounded-xl border border-border bg-muted/35 px-4 py-3 text-left text-foreground transition-colors active:bg-muted"
                 >
                   {isFlagged
                     ? <FlagOff className="h-5 w-5 flex-shrink-0" />
                     : <Flag className="h-5 w-5 flex-shrink-0" />}
-                  <span className="text-sm font-medium">{flagLabel}</span>
+                  <span className="text-sm font-medium">
+                    {isFlagged
+                      ? t('sessions.removeFlag', { defaultValue: 'Снять ярлык' })
+                      : t('sessions.addFlag', { defaultValue: 'Повесить ярлык' })}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMobileOptionsOpen(false);
+                    toggleDone();
+                  }}
+                  className="flex min-h-12 w-full items-center gap-3 rounded-xl border border-border bg-muted/35 px-4 py-3 text-left text-foreground transition-colors active:bg-muted"
+                >
+                  {isDone
+                    ? <X className="h-5 w-5 flex-shrink-0" />
+                    : <Check className="h-5 w-5 flex-shrink-0" />}
+                  <span className="text-sm font-medium">
+                    {isDone
+                      ? t('sessions.removeDone', { defaultValue: 'Снять галочку' })
+                      : t('sessions.addDone', { defaultValue: 'Отметить галочкой' })}
+                  </span>
                 </button>
 
                 {!isProcessing && (
@@ -513,6 +512,7 @@ export default function SidebarSessionItem({
                 ? 'border-green-500/30 bg-green-50/5 hover:bg-green-50/10 dark:bg-green-900/5 dark:hover:bg-green-900/10'
                 : 'hover:bg-accent/50',
             isFlagged && 'border-red-500/50',
+            isDone && 'opacity-60',
           )}
           // Left-click keeps in-app navigation; Ctrl/Cmd/middle-click and the
           // native right-click menu use the href to open a new tab/window.
@@ -526,10 +526,10 @@ export default function SidebarSessionItem({
             <div
               className={cn(
                 'flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md',
-                isFlagged ? 'bg-red-500' : isSelected ? 'bg-primary/10' : 'bg-muted/50',
+                isFlagged ? 'bg-red-500' : isDone ? 'bg-muted/40' : isSelected ? 'bg-primary/10' : 'bg-muted/50',
               )}
             >
-              {flagTileContent}
+              {markTileContent}
             </div>
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
@@ -651,9 +651,19 @@ export default function SidebarSessionItem({
                   },
                   {
                     key: 'flag',
-                    label: flagLabel,
+                    label: isFlagged
+                      ? t('sessions.removeFlag', { defaultValue: 'Снять ярлык' })
+                      : t('sessions.addFlag', { defaultValue: 'Повесить ярлык' }),
                     icon: isFlagged ? FlagOff : Flag,
-                    onSelect: () => { void toggleFlag(); },
+                    onSelect: () => { toggleFlag(); },
+                  },
+                  {
+                    key: 'done',
+                    label: isDone
+                      ? t('sessions.removeDone', { defaultValue: 'Снять галочку' })
+                      : t('sessions.addDone', { defaultValue: 'Отметить галочкой' }),
+                    icon: isDone ? X : Check,
+                    onSelect: () => { toggleDone(); },
                   },
                   ...(secondServerLabel ? [{
                     key: 'server-scope',

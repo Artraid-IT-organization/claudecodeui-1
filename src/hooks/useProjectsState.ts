@@ -3,6 +3,7 @@ import { markDetachedRun } from '../utils/detachedRuns';
 import type { NavigateFunction } from 'react-router-dom';
 
 import { api } from '../utils/api';
+import { DEFAULT_PROVIDER } from '../utils/defaultProvider';
 import type { ServerEvent } from '../contexts/WebSocketContext';
 import {
   effectiveScope,
@@ -20,6 +21,7 @@ import type {
 } from '../types/app';
 
 import type { SessionActivityMap } from './useSessionProtection';
+import { readSelectedProviderRaw } from '../utils/selectedProvider';
 
 type UseProjectsStateArgs = {
   sessionId?: string;
@@ -88,13 +90,12 @@ type SessionDetailsApiPayload = {
 
 type ProjectSessionPage = Pick<Project, 'sessions' | 'sessionMeta'>;
 
-const DEFAULT_PROVIDER: LLMProvider = 'claude';
 
 const serialize = (value: unknown) => JSON.stringify(value ?? null);
 
 const readSelectedProvider = (): LLMProvider => {
   try {
-    const storedProvider = localStorage.getItem('selected-provider');
+    const storedProvider = readSelectedProviderRaw();
     return storedProvider ? storedProvider as LLMProvider : DEFAULT_PROVIDER;
   } catch {
     return DEFAULT_PROVIDER;

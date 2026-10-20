@@ -6,7 +6,7 @@ import { Button } from '../../../../shared/view/ui';
 import type { SessionActivityMap } from '../../../../hooks/useSessionProtection';
 import type { Project, ProjectSession, LLMProvider } from '../../../../types/app';
 import type { SessionWithProvider } from '../../types/types';
-import { getSessionTime, groupByRecency } from '../../utils/utils';
+import { getSessionTime, groupByRecency, sessionTitleMatches } from '../../utils/utils';
 
 import { useSessionMessageSearch } from '../../../command-palette/sources/useSessionMessageSearch';
 
@@ -23,29 +23,9 @@ import { useServerScope } from '../../hooks/useServerScope';
  * ниже подгружаются чаты, где искомое встречается в самой переписке.
  *
  * Названия бывают и по-русски, и латиницей (папка «sozidateli-bot»), а Егор
- * пишет голосом по-русски, поэтому сравнение идёт ещё и в транслите.
+ * пишет голосом по-русски, поэтому сравнение идёт ещё и в транслите
+ * (sessionTitleMatches — в utils/utils.ts, им пользуется и лента бесед).
  */
-const TRANSLIT: Record<string, string> = {
-  а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i', й: 'y',
-  к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f',
-  х: 'h', ц: 'ts', ч: 'ch', ш: 'sh', щ: 'sch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya',
-};
-
-function normalizeForSearch(value: string): string {
-  return value.toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim();
-}
-
-function toLatin(value: string): string {
-  return [...value].map((ch) => TRANSLIT[ch] ?? ch).join('');
-}
-
-function sessionTitleMatches(title: string, query: string): boolean {
-  const q = normalizeForSearch(query);
-  if (!q) return true;
-  const t = normalizeForSearch(title);
-  return t.includes(q) || toLatin(t).includes(toLatin(q));
-}
-
 type SessionGroupBucket = {
   groupId: string;
   groupLabel: string;

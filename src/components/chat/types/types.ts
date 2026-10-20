@@ -45,6 +45,8 @@ export interface ChatMessage {
   type: string;
   /** Store-assigned NormalizedMessage id, when the source row carried one (e.g. live thinking/stream rows use a well-known id so their list key stays stable while they update in place). */
   id?: string;
+  /** NormalizedMessage id строки транскрипта без побочки по ключам ленты (user/assistant текст): для rewind и оценки формата. */
+  sourceId?: string;
   content?: string;
   displayText?: string;
   timestamp: string | number | Date;
@@ -74,6 +76,8 @@ export interface ChatMessage {
   parentToolUseId?: string;
   /** Пометка локальной служебной строки ('connection-lost') — снимается через sessionStore.removeRealtimeWhere. */
   clientNotice?: string;
+  /** Номер этой отправки: по нему серверное эхо `queued_<номер>` встаёт на место пузыря вместо второй строки. */
+  clientMessageId?: string;
   isSubagentContainer?: boolean;
   subagentState?: {
     childTools: SubagentChildTool[];
@@ -158,4 +162,6 @@ export interface ChatInterfaceProps {
   onStartNewChat?: (project: Project) => void;
   onTaskClick?: (...args: unknown[]) => void;
   onShowAllTasks?: (() => void) | null;
+  /** Mobile sidebar drawer state: used to hide the chat composer while the drawer is open. */
+  isMobileSidebarOpen?: boolean;
 }

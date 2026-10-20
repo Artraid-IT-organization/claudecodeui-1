@@ -11,6 +11,7 @@
  * запросы агента (session/request_permission) после перезапуска.
  */
 import { spawn } from 'node:child_process';
+import { verifyAgentRoom, wrapInAgentRoom } from '@/shared/agent-rooms.js';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
@@ -31,10 +32,17 @@ function resolveSupervisorScriptPath(): string {
   throw new Error(`devin-acp-supervisor script not found next to ${here}`);
 }
 
-/** Каталог сокетов/спеков супервизоров; CLOUDCLI_DEVIN_RUNS_DIR — для тестов. */
+/**
+ * Каталог сокетов/спеков супервизоров; CLOUDCLI_DEVIN_RUNS_DIR — для тестов.
+ * По умолчанию — рядом с базой сайта (DATABASE_PATH), как и live-runs
+ * (survivor-runs.js): копия сайта со своей базой не видит ходы боя. У боя база
+ * в ~/.cloudcli-shared — его каталог прежний.
+ */
 export function devinRunsDir(): string {
-  return process.env.CLOUDCLI_DEVIN_RUNS_DIR?.trim()
-    || path.join(os.homedir(), '.cloudcli-shared', 'devin-runs');
+  if (process.env.CLOUDCLI_DEVIN_RUNS_DIR?.trim()) return process.env.CLOUDCLI_DEVIN_RUNS_DIR.trim();
+  const db = process.env.DATABASE_PATH?.trim();
+  const root = db ? path.dirname(path.resolve(db)) : path.join(os.homedir(), '.cloudcli-shared');
+  return path.join(root, 'devin-runs');
 }
 
 export type SupervisedDevinSpec = {
@@ -42,6 +50,8 @@ export type SupervisedDevinSpec = {
   args: string[];
   cwd: string;
   env: Record<string, string | undefined>;
+  /** id чата в приложении — для имени комнаты (юнита systemd). */
+  appSessionId?: string | null;
 };
 
 /** Тот кусок ChildProcess, который нужен рантайму и survivor-реестру. */
@@ -264,10 +274,17 @@ export async function spawnSupervisedDevin(
   // env несёт креды — спек только для супервизора, читается один раз и стирается.
   fs.writeFileSync(specPath, JSON.stringify({ ...spec, socketPath, runId }), { mode: 0o600 });
 
-  const supervisor = spawn(process.execPath, [resolveSupervisorScriptPath(), specPath], {
+  // Супервизор — в своей комнате (agent-rooms): агент внутри неё рождается в том
+  // же cgroup и не делит потолок памяти с сервером сайта.
+  const room = wrapInAgentRoom(
+    process.execPath, [resolveSupervisorScriptPath(), specPath], undefined, spec.appSessionId,
+  );
+  const supervisor = spawn(room.command, room.args, {
     detached: true,
     stdio: 'ignore',
+    env: room.env,
   });
+  verifyAgentRoom(supervisor.pid, room.room);
   supervisor.unref();
   supervisor.once('error', () => {
     // Сам спавн не удался — соединение ниже исчерпает retries и бросит.

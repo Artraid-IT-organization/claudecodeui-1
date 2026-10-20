@@ -13,6 +13,7 @@ import cors from 'cors';
 
 import { installProcessGuards } from '@/shared/process-guards.js';
 import { adoptSurvivors, markShuttingDown } from '@/modules/providers/list/claude/survivor-runs.js';
+import { agentRoomsAvailable } from '@/shared/agent-rooms.js';
 import { warmSearchIndexes } from '@/modules/providers/services/session-conversations-search.service.js';
 import { broadcastRealtimeEvent } from '@/modules/websocket/services/websocket-state.service.js';
 import { AppError, findApplicationRoot, getClaudeJsonPath, getModuleDirectory, IS_PLATFORM, OPEN_REGISTRATION, terminalTextStyles } from '@/shared/utils.js';
@@ -25,8 +26,8 @@ import {
     startSessionActivitySync,
     stopSessionActivitySync,
 } from '@/modules/providers/index.js';
-import { userDb, initializeDatabase, sessionsDb  } from '@/modules/database/index.js';
-import { chatRunRegistry, createWebSocketServer, dispatchChatQueues } from '@/modules/websocket/index.js';
+import { userDb, initializeDatabase, sessionsDb, chatRunsDb  } from '@/modules/database/index.js';
+import { chatRunRegistry, createWebSocketServer, dispatchChatQueues, reconcilePersistedRuns, startRunWatchdog } from '@/modules/websocket/index.js';
 
 import { getConnectableHost } from '../shared/networkHosts.js';
 
@@ -49,6 +50,7 @@ import { promptPresetsRoutes } from './modules/presets/index.js';
 import { chatGroupsRoutes } from './modules/chat-groups/index.js';
 import { handoffRoutes } from './modules/handoff/index.js';
 import { openTabsRoutes } from './modules/open-tabs/index.js';
+import { messageFeedbackRoutes } from './modules/message-feedback/index.js';
 import { updatesRoutes } from './modules/updates/index.js';
 import { startChatGroupClassifier } from './modules/chat-groups/chat-group-classifier.js';
 import { userRoutes } from './modules/user/index.js';
@@ -67,6 +69,11 @@ import { worktreesRoutes } from './modules/worktrees/index.js';
 import browserUseMcpRoutes from './modules/browser-use/browser-use-mcp.routes.js';
 import { browserUseService } from './modules/browser-use/browser-use.service.js';
 import { configureWebPush } from './modules/notifications/index.js';
+import {
+  createMacStatusRouter,
+  createMacStatusService,
+  getMacStatusConfig,
+} from './modules/mac-status/index.js';
 
 // Модули загружаются раньше любого кода, поэтому защита ставится сразу
 // после блока импортов — до первого запроса и до открытия сокетов.
@@ -151,6 +158,8 @@ const agentRoutes = createAgentModule({
     queryOpenCode,
 });
 
+const macStatusService = createMacStatusService(getMacStatusConfig());
+
 // Single WebSocket server that handles chat, shell, and plugin proxy paths.
 const wss = createWebSocketServer(server, {
     verifyClient: {
@@ -193,9 +202,7 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 // Public health check endpoint (no authentication required)
 app.get('/health', (req, res) => {
     const activeRuns = chatRunRegistry.listRunningRuns();
-    const restartBlockingRuns = activeRuns.filter(
-        (run) => !chatRunRegistry.isRestartSafeProvider(run.provider),
-    );
+    const restartBlockingRuns = chatRunRegistry.listRestartBlockingRuns();
     res.json({
         status: 'ok',
         timestamp: new Date().toISOString(),
@@ -208,6 +215,8 @@ app.get('/health', (req, res) => {
         activeRuns: activeRuns.length,
         restartBlockingRuns: restartBlockingRuns.length,
         draining: chatRunRegistry.isShutdownDraining(),
+        // Комнаты агентов живы — сторожи (~/self-heal) читают это без разбора журнала.
+        agentRooms: agentRoomsAvailable(),
     });
 });
 
@@ -216,6 +225,9 @@ app.use('/api', validateApiKey);
 
 // Authentication routes (public)
 app.use('/api/auth', authRoutes);
+
+// MacBook connection status (public endpoint used by the header indicator)
+app.use('/api/mac-status', createMacStatusRouter(macStatusService));
 
 // Resolves the authenticated user's own CLAUDE_CONFIG_DIR/workspace/API key
 // for the rest of the request (OPEN_REGISTRATION instances only - a no-op
@@ -255,6 +267,8 @@ app.use('/api/chat-groups', withUserRuntimeContext, chatGroupsRoutes);
 // «Продолжить в новом чате»: выжимка главного из длинного чата.
 app.use('/api/handoff', withUserRuntimeContext, handoffRoutes);
 app.use('/api/open-tabs', withUserRuntimeContext, openTabsRoutes);
+// Лайк/дизлайк формата ответа — референс ~/response-format-memory, upsert по message_id.
+app.use('/api/messages', withUserRuntimeContext, messageFeedbackRoutes);
 // Плашка «Обновить»: пул изменений с другого сервера — применить/отложить/разобрать.
 app.use('/api/updates', withUserRuntimeContext, updatesRoutes);
 
@@ -525,6 +539,9 @@ async function startServer() {
             console.log(`${terminalTextStyles.tip('[TIP]')}  Run "cloudcli status" for full configuration details`);
             console.log('');
 
+            // Start monitoring MacBook SOCKS tunnel (127.0.0.1:1080 by default).
+            macStatusService.start();
+
             // Start watching the projects folder for changes. Skipped on
             // OPEN_REGISTRATION: with no fixed CLAUDE_CONFIG_DIR for this
             // instance, the watcher's boot-time root falls back to the
@@ -575,7 +592,32 @@ async function startServer() {
                     });
                     broadcastRealtimeEvent(event, provider || 'claude');
                 },
-                onGone: (appSessionId, provider) => {
+                onGone: (appSessionId, provider, endedCleanly) => {
+                    // Ход вёл процесс прошлого сервера — его строка в
+                    // chat_runs наша. «Нет процесса» ≠ «дожил»: убитый
+                    // обрывом пайпа/памяти агент — это обрыв, а не ответ.
+                    // endedCleanly: claude/codex судим по хвосту переписки,
+                    // devin финала снаружи не видно — считаем доехавшим.
+                    const endedStatus = endedCleanly === false ? 'interrupted' : 'completed';
+                    const endedError = endedCleanly === false
+                        ? 'Процесс агента оборвался до конца хода — результата не было.'
+                        : null;
+                    try {
+                        chatRunsDb.finishRunningForSession(appSessionId, { status: endedStatus, error: endedError });
+                    } catch { /* журнала может и не быть — старые ходы без строки */ }
+                    if (endedCleanly === false) {
+                        try {
+                            broadcastRealtimeEvent(JSON.stringify({
+                                kind: 'run_terminal',
+                                sessionId: appSessionId,
+                                provider,
+                                status: 'interrupted',
+                                error: endedError,
+                                finishedAt: new Date().toISOString(),
+                                timestamp: new Date().toISOString(),
+                            }), provider || 'claude');
+                        } catch { /* вкладок нет — подписка покажет из журнала */ }
+                    }
                     // Порядок важен: страница не перечитывает переписку, пока
                     // считает чат работающим. Сначала «чат свободен», потом
                     // «перечитай» — иначе последний ответ агента не появлялся
@@ -592,8 +634,8 @@ async function startServer() {
                         sessionId: appSessionId,
                         actualSessionId: appSessionId,
                         provider,
-                        exitCode: 0,
-                        success: true,
+                        exitCode: endedCleanly === false ? 1 : 0,
+                        success: endedCleanly !== false,
                         timestamp: new Date().toISOString(),
                     });
                     broadcastRealtimeEvent(idle, provider || 'claude');
@@ -631,6 +673,20 @@ async function startServer() {
             });
             // Survivor map is now authoritative: queued messages cannot race
             // a still-running process from the previous server generation.
+
+            // Журнал chat_runs: строки «running», оставшиеся после усыновления
+            // без живого процесса, — оборванные ходы прошлого сервера (авария,
+            // OOM, kill). Закрываем их с причиной и возвращаем недошедшие
+            // сообщения в очередь — до обхода очередей.
+            try {
+                reconcilePersistedRuns();
+            } catch (error) {
+                console.warn('[run-reconcile] сверка журнала ходов не удалась:', error instanceof Error ? error.message : error);
+            }
+            // Сторож идущих ходов: «running» с мёртвым процессом получает
+            // видимый терминальный статус, а не вечное молчание ленты.
+            startRunWatchdog();
+
             dispatchChatQueues();
 
             // Выжимки переписки для поиска — заранее и не сразу после старта:
@@ -668,9 +724,7 @@ async function startServer() {
                 const waitingSince = Date.now();
                 let lastProgressLog = 0;
                 while (true) {
-                    const blockingRuns = chatRunRegistry
-                        .listRunningRuns()
-                        .filter((run) => !chatRunRegistry.isRestartSafeProvider(run.provider));
+                    const blockingRuns = chatRunRegistry.listRestartBlockingRuns();
                     if (blockingRuns.length === 0) {
                         break;
                     }
@@ -691,6 +745,16 @@ async function startServer() {
                     console.log(`[shutdown-drain] активные ходы закончились за ${Math.round((Date.now() - waitingSince) / 1000)} с — перезапускаюсь`);
                 }
 
+                // Ходы, чей prompt так и не доехал до выживающего процесса
+                // (зависшая сборка, поздний SIGTERM), умирают вместе с нами —
+                // их сообщения возвращаем в серверную очередь: обход очередей
+                // после подъёма отправит их заново.
+                try {
+                    chatRunRegistry.requeueUnanchoredRuns();
+                } catch (err) {
+                    console.error('[shutdown-drain] возврат недоставленных сообщений в очередь не удался:', getErrorMessage(err));
+                }
+
                 try {
                     await browserUseService.stopAllSessions();
                 } catch (err) {
@@ -700,6 +764,11 @@ async function startServer() {
                     await stopAllPlugins();
                 } catch (err) {
                     console.error('[Plugins] Error stopping plugins during shutdown:', getErrorMessage(err));
+                }
+                try {
+                    macStatusService.stop();
+                } catch (err) {
+                    console.error('[MacStatus] Error stopping monitor during shutdown:', getErrorMessage(err));
                 }
                 try {
                     await removeLocalServerMarker();
@@ -723,9 +792,7 @@ async function startServer() {
         // вход снова. Скрипт ждёт draining=true при restartBlockingRuns=0 — это
         // наступит, когда ходы закончатся и придёт следующий сигнал.
         process.on('SIGUSR2', () => {
-            const blocking = chatRunRegistry
-                .listRunningRuns()
-                .filter((run) => !chatRunRegistry.isRestartSafeProvider(run.provider));
+            const blocking = chatRunRegistry.listRestartBlockingRuns();
             if (blocking.length > 0) {
                 // Аренду не выдаём и не продлеваем: выданная сама погаснет за 2 мин.
                 return;

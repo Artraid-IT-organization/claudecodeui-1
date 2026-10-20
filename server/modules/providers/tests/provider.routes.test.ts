@@ -139,6 +139,30 @@ test('conversation search streams title matches before transcript results', asyn
   });
 });
 
+test('conversation search limits title matches to the selected provider space', async () => {
+  await withProviderServer(async (baseUrl, workspacePath) => {
+    sessionsDb.createAppSession('devin-match', 'devin', workspacePath, 'ГИБДД штрафы');
+    sessionsDb.createAppSession('claude-match', 'claude', workspacePath, 'ГИБДД проверка');
+    sessionsDb.createAppSession('codex-match', 'codex', workspacePath, 'ГИБДД архив');
+
+    const response = await fetch(
+      `${baseUrl}/api/providers/search/sessions?q=${encodeURIComponent('гибдд')}&limit=50&space=devin`,
+    );
+    const eventStream = await response.text();
+    const titleEvent = eventStream.split('\n\n').find((event) => event.startsWith('event: title-results'));
+    assert.ok(titleEvent);
+    const dataLine = titleEvent.split('\n').find((line) => line.startsWith('data: '));
+    assert.ok(dataLine);
+    const payload = JSON.parse(dataLine.slice('data: '.length)) as {
+      titleResults: Array<{ sessionId: string; provider: string }>;
+    };
+
+    assert.equal(payload.titleResults.length, 1);
+    assert.equal(payload.titleResults[0]?.sessionId, 'devin-match');
+    assert.equal(payload.titleResults[0]?.provider, 'devin');
+  });
+});
+
 test('reasoning effort is persisted and returned with the active session model', async () => {
   await withProviderServer(async (baseUrl, workspacePath) => {
     sessionsDb.createAppSession('effort-session', 'codex', workspacePath);

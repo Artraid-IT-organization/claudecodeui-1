@@ -5,6 +5,7 @@ import { Check, ChevronDown, Loader2, type LucideIcon } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 
 import { Button } from './Button';
+import { scrollMovesAnchor } from '../../scrollMovesAnchor';
 
 type ButtonVariant = 'default' | 'destructive' | 'outline' | 'secondary' | 'ghost' | 'link';
 type ButtonSize = 'default' | 'sm' | 'lg' | 'icon';
@@ -120,6 +121,10 @@ export default function ActionMenu({
       // Прокрутка САМОГО меню не должна его закрывать: длинный список групп
       // листается внутри, а слушатель висит на всём окне с перехватом.
       if (event.type === 'scroll' && menuRef.current?.contains(event.target as Node)) {
+        return;
+      }
+      // Прокрутка ленты чата рядом кнопку не двигает — не закрывать (см. scrollMovesAnchor).
+      if (event.type === 'scroll' && !scrollMovesAnchor(event, triggerRef.current)) {
         return;
       }
       setMenuOpen(false);

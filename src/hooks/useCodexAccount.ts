@@ -2,6 +2,18 @@ import { useCallback, useEffect, useState } from 'react';
 
 import { api } from '../utils/api';
 
+import { SELECT_PROVIDER_EVENT } from './providerSelection';
+import { reportProviderProbe } from './providerProbe';
+import { readSelectedProviderRaw } from '../utils/selectedProvider';
+
+export {
+  CONTINUE_IN_PROVIDER_EVENT,
+  SELECT_PROVIDER_EVENT,
+  selectChatProvider,
+  switchChatProvider,
+  type ChatProviderChoice,
+} from './providerSelection';
+
 export type CodexUsageWindow = {
   kind: string;
   percent: number;
@@ -21,40 +33,15 @@ export type CodexAccount = {
 /** Сервер держит ответ две минуты; чаще спрашивать бессмысленно. */
 const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 
-/** Событие выбора помощника для нового чата: из меню аккаунтов в поле ввода. */
-export const SELECT_PROVIDER_EVENT = 'ccui:select-provider';
-
-/**
- * Выбор в меню аккаунтов (а не синхронизация при открытии чата): открытый чат
- * другого помощника сменяется новым пустым чатом выбранного. Переписка не
- * переносится — каждый помощник держит свой список чатов (useServerScope).
- */
-export const CONTINUE_IN_PROVIDER_EVENT = 'ccui:continue-in-provider';
-
-/** Выбор помощника человеком в меню аккаунтов: запомнить и открыть его список. */
-export type ChatProviderChoice = 'claude' | 'codex' | 'devin';
-
-export function switchChatProvider(provider: ChatProviderChoice): void {
-  selectChatProvider(provider);
-  window.dispatchEvent(new CustomEvent(CONTINUE_IN_PROVIDER_EVENT, { detail: provider }));
-}
-
-/**
- * Выбрать помощника (claude / codex / devin) для следующего нового чата — так же, как
- * это делает выбор модели на пустом экране: запись в localStorage плюс событие
- * для уже открытого поля ввода.
- */
-export function selectChatProvider(provider: ChatProviderChoice): void {
-  localStorage.setItem('selected-provider', provider);
-  window.dispatchEvent(new CustomEvent(SELECT_PROVIDER_EVENT, { detail: provider }));
-}
-
 /** Какой помощник выбран сейчас и его смена — для отметки в меню аккаунтов. */
 export function useSelectedChatProvider(): string {
-  const [provider, setProvider] = useState(() => localStorage.getItem('selected-provider') || 'claude');
+  const [provider, setProvider] = useState(() => readSelectedProviderRaw() || 'claude');
   useEffect(() => {
     const onSelect = (event: Event) => setProvider(String((event as CustomEvent).detail || 'claude'));
-    const onStorage = () => setProvider(localStorage.getItem('selected-provider') || 'claude');
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === 'selected-provider') reportProviderProbe('prov-storage', { to: String(event.newValue), was: String(event.oldValue) });
+      setProvider(readSelectedProviderRaw() || 'claude');
+    };
     window.addEventListener(SELECT_PROVIDER_EVENT, onSelect);
     window.addEventListener('storage', onStorage);
     return () => {
@@ -93,58 +80,3 @@ export function useCodexAccount(): CodexAccount | null {
   return account;
 }
 
-export type DevinAccountEntry = {
-  slot: 1 | 2;
-  available: boolean;
-  name: string | null;
-};
-
-export type DevinAccount = {
-  /** Верхний уровень — АКТИВНЫЙ аккаунт Devin (слот `slot`). */
-  available: boolean;
-  name: string | null;
-  /** Единственное семейство моделей, разрешённое на этом аккаунте. */
-  models: string;
-  fetchedAtMs: number | null;
-  slot: 1 | 2;
-  /** Оба слота Devin: у кого есть вход — те попадают в меню. */
-  accounts: DevinAccountEntry[];
-  /** Второго аккаунта ещё нет — в меню показать «Добавить аккаунт Devin». */
-  canAddSecond: boolean;
-};
-
-/** Событие «аккаунты Devin изменились» (вошли во второй, переключили): хук перечитает ответ сразу. */
-export const DEVIN_ACCOUNT_CHANGED_EVENT = 'ccui:devin-account-changed';
-
-/**
- * Подписка Devin хозяина (GET /api/user/devin-account): имя входа и признак
- * «вошёл». Окон лимитов Devin не публикует, поэтому полос в «Расходе» нет.
- * У гостя и без входа — `available: false`, и тогда пункта в меню аккаунтов нет.
- */
-export function useDevinAccount(): DevinAccount | null {
-  const [account, setAccount] = useState<DevinAccount | null>(null);
-
-  const load = useCallback(async () => {
-    try {
-      const response = await api.user.devinAccount();
-      if (response.ok) {
-        setAccount((await response.json()) as DevinAccount);
-      }
-    } catch {
-      // Справочные данные: молча пропускаем.
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-    const timer = window.setInterval(() => void load(), REFRESH_INTERVAL_MS);
-    const onChanged = () => void load();
-    window.addEventListener(DEVIN_ACCOUNT_CHANGED_EVENT, onChanged);
-    return () => {
-      window.clearInterval(timer);
-      window.removeEventListener(DEVIN_ACCOUNT_CHANGED_EVENT, onChanged);
-    };
-  }, [load]);
-
-  return account;
-}

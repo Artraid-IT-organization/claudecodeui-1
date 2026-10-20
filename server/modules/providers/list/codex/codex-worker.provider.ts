@@ -19,6 +19,7 @@ import {
   forgetSurvivableProcess,
   registerSurvivableProcess,
 } from '@/modules/providers/list/claude/survivor-runs.js';
+import { verifyAgentRoom, wrapInAgentRoom } from '@/shared/agent-rooms.js';
 
 export type CodexWorkerJob = {
   appSessionId: string;
@@ -56,9 +57,12 @@ const CODEX_WORKER_NOTIFY_MARKER = 'cloudcli-worker';
 const CODEX_RUN_COMPLETE_NOTIFY_MARKER = 'cloudcli-run-complete';
 const execFileAsync = promisify(execFile);
 
+// Тот же каталог, что у survivor-runs.js: рядом с базой сайта.
 function liveRunsDir(): string {
-  return process.env.CLOUDCLI_LIVE_RUNS_DIR
-    || path.join(os.homedir(), '.cloudcli-shared', 'live-runs');
+  if (process.env.CLOUDCLI_LIVE_RUNS_DIR) return process.env.CLOUDCLI_LIVE_RUNS_DIR;
+  const db = process.env.DATABASE_PATH?.trim();
+  const root = db ? path.dirname(path.resolve(db)) : path.join(os.homedir(), '.cloudcli-shared');
+  return path.join(root, 'live-runs');
 }
 
 function safeSessionPart(value: string): string {
@@ -174,13 +178,16 @@ export async function launchCodexWorker(job: Omit<CodexWorkerJob, 'eventPath'>):
   await writeFile(eventPath, '', { encoding: 'utf8', mode: 0o600 });
 
   const launch = workerLaunchArgs();
-  const child = spawn(launch.command, launch.args, {
+  // Своя комната (agent-rooms): воркер Codex не делит потолок памяти с сайтом.
+  const room = wrapInAgentRoom(launch.command, launch.args, process.env, job.appSessionId);
+  const child = spawn(room.command, room.args, {
     cwd: job.workingDirectory,
-    env: process.env,
+    env: room.env,
     detached: true,
     stdio: ['pipe', 'ignore', 'ignore'],
     windowsHide: true,
   });
+  verifyAgentRoom(child.pid ?? undefined, room.room);
   if (!child.pid) {
     throw new Error('Codex worker did not return a PID.');
   }

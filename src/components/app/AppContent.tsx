@@ -19,6 +19,10 @@ import { ensureLatestBuild, watchServiceWorkerUpdates } from '../../lib/appUpdat
 import { api, authenticatedFetch } from '../../utils/api';
 import type { AppTab, Project } from '../../types/app';
 import { effectiveScope, useServerScope, type ServerScope } from '../sidebar/hooks/useServerScope';
+import { isPromptsProject, resolveMainChatProject } from '../sidebar/utils/utils';
+import { RunInNewChatProvider } from '../../contexts/RunInNewChatContext';
+import { notifyPendingFirstMessage, queuePendingFirstMessage } from '../chat/hooks/useChatComposerState';
+import { writeSelectedProvider } from '../../utils/selectedProvider';
 
 type RunningSessionApiItem = {
   sessionId?: unknown;
@@ -109,7 +113,7 @@ function AppContentInner() {
   // Егор 22.09.26: надпись «2-й сервер» должна значить ровно одно — я сейчас
   // в папке второго сервера. Без этой сверки блок оставался от прошлого
   // нажатия, и новый чат заводился во втором сервере незаметно для человека.
-  const [, setServerScope] = useServerScope();
+  const [serverScope, setServerScope] = useServerScope();
   // Блок папки берётся из общего списка папок: чат, открытый по ссылке или
   // вкладкой сверху, приносит папку из другого ответа сервера, где этого
   // признака нет, — и папка второго сервера выглядела бы обычной.
@@ -145,6 +149,42 @@ function AppContentInner() {
     ));
     return (starred ?? busiest).projectId;
   }, [projects, scopeOfProject, selectedProject]);
+
+  /*
+   * Кнопка «В новый чат» на копируемом блоке в чате папки «Промпты»
+   * (Егор 19.10.26): готовый промпт нельзя скопировать руками быстро — выделить,
+   * открыть другой чат, вставить. Нажатие ставит текст как первое сообщение
+   * нового чата ОСНОВНОЙ папки и открывает его; подхват и отправка — обычным
+   * путём посылки внутри композера (слот pendingHandoff, тот же, что у
+   * выжимки handoff: номер, очередь и защита от потери — как у набранного).
+   */
+  const runPromptInNewChat = useCallback(
+    (text: string) => {
+      const target = resolveMainChatProject(projects, serverScope);
+      if (!target || !text.trim()) return;
+      queuePendingFirstMessage(target.projectId, text);
+      // Чат-источник в «Промптах» помечаем promptLaunched: строка в блоке
+      // получает серую иконку — видно, что промпт уже ушёл в работу.
+      // Ставим до перехода, пока selectedSession ещё исходный; запрос
+      // идемпотентен, повторное нажатие безопасно.
+      if (selectedSession?.id) {
+        void api
+          .setSessionPromptLaunched(selectedSession.id)
+          .then(() => refreshProjectsSilently())
+          .catch(() => {});
+      }
+      handleNewSession(target);
+      notifyPendingFirstMessage();
+    },
+    [projects, serverScope, handleNewSession, selectedSession, refreshProjectsSilently],
+  );
+  const runInNewChatEnabled = isPromptsProject(selectedProject);
+  // Значение контекста мемоизировано: без этого каждый ререндер AppContent
+  // пересоздавал бы объект и заставлял перерисовываться все блоки кода ленты.
+  const runInNewChatValue = useMemo(
+    () => ({ enabled: runInNewChatEnabled, run: runPromptInNewChat }),
+    [runInNewChatEnabled, runPromptInNewChat],
+  );
 
   // Окна командной строки. Живут рядом с чатами: своя вкладка наверху, свой
   // крестик, несколько сразу. Открываются одной дверью — запросом вкладки
@@ -365,7 +405,7 @@ function AppContentInner() {
       }
 
       if (typeof message.provider === 'string' && message.provider.trim()) {
-        localStorage.setItem('selected-provider', message.provider);
+        writeSelectedProvider(message.provider);
       }
 
       setActiveTab('chat');
@@ -764,6 +804,7 @@ function AppContentInner() {
           onReorderTerminal={moveTerminal}
           activities={processingSessions}
         />
+        <RunInNewChatProvider value={runInNewChatValue}>
         <MainContent
           projects={projects}
           selectedProject={selectedProject}
@@ -799,7 +840,9 @@ function AppContentInner() {
           onSessionArchived={removeSessionFromList}
           onSessionRestored={() => void refreshProjectsSilently()}
           attentionSessionIds={attentionSessionIds}
+          isMobileSidebarOpen={isMobile && sidebarOpen}
         />
+        </RunInNewChatProvider>
       </div>
 
       <CommandPalette

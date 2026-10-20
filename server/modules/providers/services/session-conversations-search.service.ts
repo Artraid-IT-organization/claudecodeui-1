@@ -5,6 +5,7 @@ import { spawn } from 'cross-spawn';
 import { rgPath } from '@vscode/ripgrep';
 
 import { projectsDb, sessionsDb } from '@/modules/database/index.js';
+import { providerRegistry } from '@/modules/providers/provider.registry.js';
 import {
   ensureSearchIndex,
   readIndexedSummaries,
@@ -12,12 +13,14 @@ import {
   type RecordExtractor,
   type SearchableRole,
 } from '@/modules/providers/services/session-search-index.service.js';
+import { getRequestRuntimeContext } from '@/shared/request-context.js';
 import { canonicalizeAccountDir, getActiveAccountDir } from '@/shared/session-scope.js';
 import type { ServerScope } from '@/shared/types.js';
-import { isTranscriptServiceText, normalizeServerScope, stripInjectedContext } from '@/shared/utils.js';
+import { isPlatformOwnerWebUser, isTranscriptServiceText, normalizeServerScope, OPEN_REGISTRATION, stripInjectedContext } from '@/shared/utils.js';
 
 type AnyRecord = Record<string, any>;
 type SearchableProvider = 'claude' | 'codex';
+type ResultProvider = SearchableProvider | 'devin';
 
 type SearchSnippetHighlight = {
   start: number;
@@ -29,13 +32,13 @@ type SessionConversationMatch = {
   snippet: string;
   highlights: SearchSnippetHighlight[];
   timestamp: string | null;
-  provider: SearchableProvider;
+  provider: ResultProvider;
   messageUuid?: string | null;
 };
 
 type SessionConversationResult = {
   sessionId: string;
-  provider: SearchableProvider;
+  provider: ResultProvider;
   sessionSummary: string;
   matches: SessionConversationMatch[];
 };
@@ -69,6 +72,7 @@ type SearchSessionConversationsInput = {
   signal?: AbortSignal;
   projectId?: string | null;
   serverScope?: ServerScope | null;
+  providerSpace?: 'codex' | 'devin' | 'claude' | null;
   onTitleResults?: (results: SessionTitleSearchResult[]) => void;
   onProgress?: (update: SessionConversationSearchProgressUpdate) => void;
 };
@@ -630,6 +634,7 @@ function extractorFor(provider: SearchableProvider): RecordExtractor {
 type SearchScope = {
   projectId?: string | null;
   serverScope?: ServerScope | null;
+  providerSpace?: 'codex' | 'devin' | 'claude' | null;
 };
 
 /**
@@ -641,6 +646,19 @@ type SearchScope = {
 function filterSessionsByScope(rows: SessionRepositoryRow[], scope: SearchScope): SessionRepositoryRow[] {
   let filtered = rows;
 
+  if (OPEN_REGISTRATION) {
+    const requestContext = getRequestRuntimeContext();
+    if (requestContext !== undefined) {
+      const userId = Number(requestContext.userId);
+      if (!Number.isFinite(userId) || !isPlatformOwnerWebUser(userId)) {
+        const activeAccountDir = getActiveAccountDir();
+        filtered = filtered.filter((row) =>
+          row.initiated_by_user_id === userId
+          || (row.account_dir != null && row.account_dir === activeAccountDir));
+      }
+    }
+  }
+
   if (scope.projectId) {
     const project = projectsDb.getProjectById(scope.projectId);
     if (!project) {
@@ -648,6 +666,12 @@ function filterSessionsByScope(rows: SessionRepositoryRow[], scope: SearchScope)
     }
     const projectPath = project.project_path.trim();
     filtered = filtered.filter((row) => (row.project_path ?? '').trim() === projectPath);
+  }
+
+  if (scope.providerSpace === 'codex' || scope.providerSpace === 'devin') {
+    filtered = filtered.filter((row) => row.provider === scope.providerSpace);
+  } else if (scope.providerSpace === 'claude') {
+    filtered = filtered.filter((row) => row.provider !== 'codex' && row.provider !== 'devin');
   }
 
   if (scope.serverScope) {
@@ -1033,6 +1057,56 @@ export async function searchConversations(
   let totalMatches = 0;
   let scannedFiles = 0;
 
+  const devinSessions = activeSessions.filter((session) => session.provider === 'devin');
+  const totalWork = devinSessions.length + totalFiles;
+  for (const session of devinSessions) {
+    if (totalMatches >= safeLimit || isAborted()) break;
+    scannedFiles += 1;
+    const history = await providerRegistry.resolveProvider('devin').sessions.fetchHistory(session.session_id, {
+      providerSessionId: session.provider_session_id ?? session.session_id,
+      limit: null,
+      offset: 0,
+    });
+    const matches: SessionConversationMatch[] = [];
+    for (const message of history.messages) {
+      if (matches.length >= MAX_MATCHES_PER_SESSION || totalMatches + matches.length >= safeLimit) break;
+      if ((message.role !== 'user' && message.role !== 'assistant') || typeof message.content !== 'string') continue;
+      if (!matcher.matchesQuery(message.content)) continue;
+      const snippet = matcher.buildSnippet(message.content);
+      matches.push({
+        role: message.role,
+        ...snippet,
+        timestamp: message.timestamp ?? null,
+        provider: 'devin',
+        messageUuid: message.id ?? null,
+      });
+    }
+    if (matches.length === 0) continue;
+    const projectKey = makeProjectKey(session.project_path ?? null);
+    const metadata = projectMetadata(projectKey);
+    const sessionResult: SessionConversationResult = {
+      sessionId: session.session_id,
+      provider: 'devin',
+      sessionSummary: session.custom_name || session.session_id,
+      matches,
+    };
+    totalMatches += matches.length;
+    const aggregate = resultsByProject.get(projectKey) ?? {
+      projectId: metadata.projectId,
+      projectName: projectKey,
+      projectDisplayName: metadata.projectDisplayName,
+      sessions: [],
+    };
+    aggregate.sessions.push(sessionResult);
+    resultsByProject.set(projectKey, aggregate);
+    onProjectResult?.({
+      projectResult: { ...aggregate, sessions: [sessionResult] },
+      totalMatches,
+      scannedProjects: scannedFiles,
+      totalProjects: totalWork,
+    });
+  }
+
   const batches = [
     files.slice(0, SEARCH_FIRST_BATCH),
     ...chunkArray(files.slice(SEARCH_FIRST_BATCH), SEARCH_NEXT_BATCH),
@@ -1102,7 +1176,7 @@ export async function searchConversations(
           },
           totalMatches,
           scannedProjects: scannedFiles,
-          totalProjects: totalFiles,
+          totalProjects: totalWork,
         });
       }
     }
@@ -1258,7 +1332,11 @@ export const sessionConversationsSearchService = {
       input.onProgress ?? null,
       input.signal ?? null,
       input.onTitleResults ?? null,
-      { projectId: input.projectId ?? null, serverScope: input.serverScope ?? null },
+      {
+        projectId: input.projectId ?? null,
+        serverScope: input.serverScope ?? null,
+        providerSpace: input.providerSpace ?? null,
+      },
     );
   },
 

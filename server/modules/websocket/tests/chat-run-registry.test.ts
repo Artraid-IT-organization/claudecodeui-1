@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { closeConnection, initializeDatabase, sessionsDb } from '@/modules/database/index.js';
+import { chatMessageQueueDb, closeConnection, initializeDatabase, sessionsDb } from '@/modules/database/index.js';
 import { chatRunRegistry } from '@/modules/websocket/services/chat-run-registry.service.js';
 import { connectedClients } from '@/modules/websocket/services/websocket-state.service.js';
 
@@ -384,5 +384,118 @@ test('каждое событие работы несёт метку этой р
       // новой как «уже виденные» — и не показывала плашку «работает».
       assert.equal(event.runStartedAt, run.startedAt);
     }
+  });
+});
+
+test('незаякоренный ход держит перезапуск; заякоренный живучий — нет', async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createAppSession('app-anchor-1', 'devin', '/workspace/demo');
+    sessionsDb.createAppSession('app-anchor-2', 'opencode', '/workspace/demo');
+    const connection = new FakeConnection();
+
+    const devinRun = chatRunRegistry.startRun({
+      appSessionId: 'app-anchor-1',
+      provider: 'devin',
+      providerSessionId: null,
+      connection,
+      userId: null,
+    });
+    assert.ok(devinRun);
+
+    // Живучий провайдер в сборке (session/new ещё идёт, prompt не отправлен) —
+    // перезапуск сейчас убил бы и агента, и принятое сообщение: мешает.
+    assert.deepEqual(
+      chatRunRegistry.listRestartBlockingRuns().map((run) => run.sessionId),
+      ['app-anchor-1'],
+    );
+
+    chatRunRegistry.markRunPromptAnchored(devinRun);
+    assert.deepEqual(chatRunRegistry.listRestartBlockingRuns(), []);
+
+    // Неживучий провайдер мешает до конца хода — якорь на него не действует.
+    const opencodeRun = chatRunRegistry.startRun({
+      appSessionId: 'app-anchor-2',
+      provider: 'opencode',
+      providerSessionId: null,
+      connection,
+      userId: null,
+    });
+    assert.ok(opencodeRun);
+    chatRunRegistry.markRunPromptAnchored(opencodeRun);
+    assert.deepEqual(
+      chatRunRegistry.listRestartBlockingRuns().map((run) => run.sessionId),
+      ['app-anchor-2'],
+    );
+  });
+});
+
+test('щит незаякоренного хода ограничен по времени — зависшая сборка не вечна', async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createAppSession('app-anchor-old', 'devin', '/workspace/demo');
+    const run = chatRunRegistry.startRun({
+      appSessionId: 'app-anchor-old',
+      provider: 'devin',
+      providerSessionId: null,
+      connection: new FakeConnection(),
+      userId: null,
+    });
+    assert.ok(run);
+    run.startedAt = Date.now() - 10 * 60 * 1000;
+
+    assert.deepEqual(chatRunRegistry.listRestartBlockingRuns(), []);
+  });
+});
+
+test('гашение возвращает недоставленное сообщение в очередь', async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createAppSession('app-requeue-1', 'devin', '/workspace/demo');
+    sessionsDb.createAppSession('app-requeue-2', 'devin', '/workspace/demo');
+    const connection = new FakeConnection();
+
+    const lostRun = chatRunRegistry.startRun({
+      appSessionId: 'app-requeue-1',
+      provider: 'devin',
+      providerSessionId: null,
+      connection,
+      userId: 'u-9',
+      pendingMessage: {
+        id: 'msg-lost-1',
+        userId: 'u-9',
+        content: '# Роль Ты — помощник',
+        options: { model: 'swe-2-high' },
+      },
+    });
+    assert.ok(lostRun);
+
+    const deliveredRun = chatRunRegistry.startRun({
+      appSessionId: 'app-requeue-2',
+      provider: 'devin',
+      providerSessionId: null,
+      connection,
+      userId: 'u-9',
+      pendingMessage: {
+        id: 'msg-safe-1',
+        userId: 'u-9',
+        content: 'дошло до агента',
+        options: {},
+      },
+    });
+    assert.ok(deliveredRun);
+    chatRunRegistry.markRunPromptAnchored(deliveredRun);
+
+    assert.equal(chatRunRegistry.requeueUnanchoredRuns(), 1);
+
+    const queued = chatMessageQueueDb.list('app-requeue-1');
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0]?.id, 'msg-lost-1');
+    assert.equal(queued[0]?.content, '# Роль Ты — помощник');
+    assert.deepEqual(queued[0]?.options, { model: 'swe-2-high' });
+
+    // Заякоренный ход не возвращается — его сообщение уже у агента.
+    assert.equal(chatMessageQueueDb.list('app-requeue-2').length, 0);
+
+    // Повторный вызов не дублирует строку.
+    assert.equal(chatRunRegistry.requeueUnanchoredRuns(), 0);
+    assert.equal(chatMessageQueueDb.list('app-requeue-1').length, 1);
   });
 });

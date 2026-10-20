@@ -1,8 +1,8 @@
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 
 import {
   appendFilesInputTag,
@@ -17,21 +17,25 @@ import {
   connectSupervisedDevin,
   spawnSupervisedDevin,
 } from '@/modules/providers/list/devin/devin-acp-client.js';
+import { wrapInAgentRoom } from '@/shared/agent-rooms.js';
+import { sessionsDb } from '@/modules/database/index.js';
+import {
+  devinConnectionsService,
+  classifyDevinFailure,
+  isFailoverableFailure,
+} from '@/modules/providers/services/devin-connections.service.js';
 import {
   buildDevinChildEnv,
   createCompleteMessage,
   createNormalizedMessage,
   DEVIN_DEFAULT_MODEL,
+  DEVIN_AUTO_CONTINUE_PROMPT,
   isAllowedDevinModel,
+  isIncompleteDevinResponse,
   resolveDevinCliCommand,
 } from '@/shared/utils.js';
-import {
-  devinSlotHasCredentials,
-  getActiveDevinSlot,
-  setActiveDevinSlot,
-} from '@/shared/devin-slots.js';
 import { mapPermissionModeToDevinMode } from '@/modules/providers/list/devin/devin-sessions.provider.js';
-import { readDevinTokenUsage, resolveDevinContextWindow } from '@/modules/providers/list/devin/devin-usage.js';
+import { readDevinTokenUsage } from '@/modules/providers/list/devin/devin-usage.js';
 
 /**
  * Live Devin ACP processes keyed by the app-facing session id.
@@ -58,34 +62,38 @@ const reattachedDevinSurvivors = new Map();
 
 /** How long `abort` lets Devin wind down before SIGKILLing it. */
 const ABORT_GRACE_MS = 3_000;
-/**
- * Как часто во время хода счётчик читается из sessions.db Devin — ACP
- * `usage_update` и `session/prompt.usage` у Devin нет (04.10.26, живые
- * sock-журналы), поэтому свежесть держим опросом его же базы.
- */
+/** Devin пишет расход ответа в свою sessions.db — живой счётчик раз в 4 с. */
 const DEVIN_USAGE_POLL_MS = 4_000;
+/**
+ * session_locked с ЖИВЫМ держателем (11.10.26): беседу обрабатывает другой
+ * процесс `devin acp` — это «чат занят», а не ошибка. Ждём конца держателя
+ * (он пишет в ту же sessions.db), потом session/load идёт как обычно.
+ */
+const LOCK_HOLDER_POLL_MS = 2_000;
+const LOCK_HOLDER_WAIT_MS = 30 * 60_000;
+const LOCK_ZOMBIE_RETRIES = 3;
 /** initialize/session/new must answer promptly; a hung handshake = broken CLI. */
 const HANDSHAKE_TIMEOUT_MS = 60_000;
 /** Devin logs progress to stderr (INFO lines) — keep the tail for error text. */
 const STDERR_TAIL_BYTES = 4_000;
-/** Пауза перед повтором хода на другом слоте: процесс должен умереть и отпустить замок сессии. */
-const FAILOVER_KILL_WAIT_MS = 1_500;
 /**
- * session_locked с ЖИВЫМ держателем (11.10.26): беседу обрабатывает
- * другой ACP-процесс, чей ход ещё идёт — «чат занят», а не ошибка.
- * Сколько секунд между проверками «не отпустил ли он замок».
+ * Сколько раз ход продолжается служебным prompt после восстановимого обрыва
+ * (статусный финал, max_tokens). Дальше — видимая ошибка, иначе модель могла
+ * бы уйти в цикл продолжений (предел как у Whale/Kimi: 2).
  */
-const LOCK_HOLDER_POLL_MS = 2_000;
-/** Потолок ожидания живого держателя: ходы Devin длятся десятки минут. */
-const LOCK_HOLDER_WAIT_MS = 30 * 60_000;
-/** Повторы при зомби-замке (держатель мёртв, замок ещё не снят). */
-const LOCK_ZOMBIE_RETRIES = 3;
+const MAX_AUTO_CONTINUES = 2;
+const ACP_EVENT_QUIET_MS = 75;
+const ACP_EVENT_DRAIN_MAX_MS = 500;
 
-/**
- * Жив ли процесс-держатель замка беседы и это ли `devin acp`
- * (PID мог достаться другой программе — та же проверка, что
- * survivor-runs делает для переживших агентов).
- */
+async function waitForAcpEventDrain(run) {
+  const deadline = Date.now() + ACP_EVENT_DRAIN_MAX_MS;
+  while (Date.now() < deadline) {
+    const quietFor = Date.now() - (run.lastAcpUpdateAt || 0);
+    if (quietFor >= ACP_EVENT_QUIET_MS) return;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(ACP_EVENT_QUIET_MS - quietFor, deadline - Date.now())));
+  }
+}
+
 function isDevinPidAlive(pid) {
   try {
     process.kill(pid, 0);
@@ -101,35 +109,59 @@ function isDevinPidAlive(pid) {
 }
 
 /**
- * Ошибка «у аккаунта кончилась квота/лимит» — живой вид (журнал 07.10.26):
- * `session/prompt` отвечает error -32010 «Reached free model rate limit…»,
- * data `{cognition.ai/errorKind:'unavailable', cognition.ai/retryable:true}`.
- * Тот же текст ловим в хвосте stderr на случай, если процесс умер до ответа.
+ * Сохраняет в ход значения опции `model` из configOptions сессии (ответ
+ * session/new / session/load или событие config_option_update). Это список
+ * реально доступных каналу моделей — честнее каталога CLI. Ключ — канал
+ * (Connection Layer), а не слот: `devin-model-options-<connId>.json`.
  */
-function isDevinQuotaError(error) {
-  const kind = error?.data?.['cognition.ai/errorKind'];
-  const message = error instanceof Error ? error.message : String(error ?? '');
-  return kind === 'unavailable' || /rate limit|limit will reset|quota|insufficient|credits|billing/i.test(message);
+const channelModelOptions = new Map(); // connId -> Set<string>
+// Путь считается на каждый вызов: тесты подменяют HOME после загрузки модуля.
+const channelModelsFile = (connId) => path.join(os.homedir(), '.cloudcli-shared', `devin-model-options-${connId}.json`);
+
+function rememberChannelModelOptions(connId, options) {
+  if (!(options instanceof Set) || options.size === 0 || connId == null) return;
+  const key = String(connId);
+  channelModelOptions.set(key, options);
+  try {
+    fs.mkdirSync(path.dirname(channelModelsFile(key)), { recursive: true });
+    fs.writeFileSync(channelModelsFile(key), JSON.stringify([...options]));
+  } catch { /* список останется в памяти процесса — некритично */ }
 }
 
-function isDevinQuotaText(text) {
-  return /rate limit|limit will reset|quota|insufficient|credits|billing/i.test(String(text || ''));
-}
-
-function sendMessage(ws, data) {
-  if (ws && typeof ws.send === 'function') {
-    try {
-      ws.send(data);
-    } catch (error) {
-      console.error('Error sending Devin stream message:', error);
+// Используется devin-models.provider.ts: пикер моделей пересекает каталог
+// `devin models list` с реальным списком каналов (union — модель показываем,
+// если её держит хотя бы один канал; точный выбор всё равно клампится ходом).
+export function readChannelModelOptions() {
+  const union = new Set();
+  for (const set of channelModelOptions.values()) for (const v of set) union.add(v);
+  try {
+    const dir = path.join(os.homedir(), '.cloudcli-shared');
+    for (const name of fs.readdirSync(dir)) {
+      const m = /^devin-model-options-(.+)\.json$/.exec(name);
+      if (!m) continue;
+      try {
+        const values = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+        if (Array.isArray(values)) for (const v of values) union.add(String(v));
+      } catch { /* битый файл пропускаем */ }
     }
-  }
+  } catch { /* каталога ещё нет */ }
+  return union.size ? union : null;
+}
+
+function noteConfigOptions(run, configOptions) {
+  if (!Array.isArray(configOptions)) return;
+  const model = configOptions.find((o) => o && o.id === 'model');
+  if (!model) return;
+  const values = (model.options || []).map((o) => String(o?.value || '')).filter(Boolean);
+  if (values.length) run.modelOptions = new Set(values);
+  if (typeof model.currentValue === 'string' && model.currentValue) run.modelCurrent = model.currentValue;
+  rememberChannelModelOptions(run.lane?.id, run.modelOptions);
 }
 
 /**
- * Шлёт вкладке актуальный `token_budget` чата Devin из его sessions.db
- * (заполненность окна по последнему ответу живой цепи). Повтор с тем же
- * `used` не шлём — счётчик и так стоит. Раньше здесь стояло
+ * Шлёт вкладке актуальный `token_budget` чата Devin из sessions.db его
+ * канала (заполненность окна по последнему ответу живой цепи). Повтор с тем
+ * же `used` не шлём — счётчик и так стоит. Раньше здесь стояло
  * `total = used` из prompt.usage, и кнопка показывала «150K/150K».
  */
 function emitDevinTokenBudget(ws, run, appSessionId, { force = false } = {}) {
@@ -139,7 +171,10 @@ function emitDevinTokenBudget(ws, run, appSessionId, { force = false } = {}) {
   }
   let usage = null;
   try {
-    usage = readDevinTokenUsage(devinSessionId, { modelHint: run.resolvedModel });
+    usage = readDevinTokenUsage(devinSessionId, {
+      modelHint: run.resolvedModel,
+      xdgDataHome: run.lane?.xdg_data_home ?? null,
+    });
   } catch {
     return; // база занята/недоступна — следующий тик или конец хода дочитает
   }
@@ -164,6 +199,16 @@ function emitDevinTokenBudget(ws, run, appSessionId, { force = false } = {}) {
       contextWindow: usage.contextWindow,
     },
   }));
+}
+
+function sendMessage(ws, data) {
+  if (ws && typeof ws.send === 'function') {
+    try {
+      ws.send(data);
+    } catch (error) {
+      console.error('Error sending Devin stream message:', error);
+    }
+  }
 }
 
 /**
@@ -210,7 +255,6 @@ function createAcpConnection(child, { onNotification, onRequest, onClose }) {
           if (msg.error) {
             const err = new Error(msg.error.message || `JSON-RPC error ${msg.error.code}`);
             err.code = msg.error.code;
-            err.data = msg.error.data;
             waiter.reject(err);
           } else {
             waiter.resolve(msg.result ?? {});
@@ -462,58 +506,134 @@ function answerPermissionRequest(request, devinMode, ws, sessionId, run, connect
 }
 
 /**
- * Сохраняет в ход значения опции `model` из configOptions сессии (ответ
- * session/new / session/load или событие config_option_update). Это список
- * реально доступных аккаунту моделей — он уже каталога CLI.
+ * Тег ошибки, по которому ход переезжает на другую подписку: сбой случился
+ * ДО первого живого вывода — в UI от этого хода ещё ничего не показано,
+ * поэтому повтор честный (без дублей и потерь).
  */
-function noteConfigOptions(run, configOptions) {
-  if (!Array.isArray(configOptions)) return;
-  const model = configOptions.find((o) => o && o.id === 'model');
-  if (!model) return;
-  const values = (model.options || []).map((o) => String(o?.value || '')).filter(Boolean);
-  if (values.length) run.modelOptions = new Set(values);
-  if (typeof model.currentValue === 'string' && model.currentValue) run.modelCurrent = model.currentValue;
-  rememberSlotModelOptions(run.slot, run.modelOptions);
-}
+const FAILOVER_TAG = '__devinFailover';
+// Модель не приняла запрос (invalid_argument) до живого вывода — тот же ход повторяем на DEVIN_DEFAULT_MODEL
+// той же подпиской, аккаунт не меняем (Егор 13.10.26: на adaptive ошибка, на High заработало).
+const MODEL_FALLBACK_TAG = '__devinModelFallback';
+
+/** Сколько всего попыток у хода: по одной на подписку, с запасом на будущие. */
+const MAX_TURN_ATTEMPTS = 4;
 
 /**
- * Реальный список моделей активного слота — для пикера выбора модели
- * (devin-models.provider.ts пересекает с ним каталог CLI). Живёт в памяти
- * процесса и в файле, чтобы пережить перезапуск сервера.
+ * Runs one Devin turn over ACP — обёртка выбора линии и подписки.
+ *
+ * ЛИНИЯ (`sessions.devin_connection_id`) — каталог с sessions.db чата, она
+ * не меняется никогда. ПОДПИСКА — креда, которая платит за этот ход:
+ * выбранная в пикере → своя креда линии → первая годная
+ * (`pickCredentialForLane`). Чужая подписка подаётся теневым XDG
+ * (`prepareTurnDataHome`), поэтому чат продолжает свою историю под любой
+ * подпиской. Новый чат: линией становится канал первой подписки, на которой
+ * Devin выделил сессию.
+ *
+ * Фоллбэк: лимит/auth/сбой до первого живого вывода гасит подписку
+ * (`recordOutcome`, cooldown до названного Devin времени сброса), и тот же
+ * ход повторяется на следующей годной подписке на той же линии. Человек
+ * видит строку «подписка X исчерпана — продолжаю на Y». После того как ответ
+ * начал идти, повтора нет (иначе дубль). Попыток не больше MAX_TURN_ATTEMPTS.
  */
-const slotModelOptions = new Map(); // slot -> Set<string>
-// Путь считается на каждый вызов: тесты подменяют HOME после загрузки модуля.
-const slotModelsFile = (slot) => path.join(os.homedir(), '.cloudcli-shared', `devin-model-options-${slot}.json`);
+async function queryDevin(command, options = {}, ws, context) {
+  const { sessionId } = options;
+  // Подписка, выбранная человеком в пикере; нерабочая — молча уступает авто-выбору.
+  const preferredConnectionId = Number(options.devinConnectionId) > 0 ? Number(options.devinConnectionId) : null;
+  let providerSessionId = context.resolveProviderSessionId(sessionId);
+  const boundConnectionId = sessionId
+    ? (sessionsDb.getSessionById(sessionId)?.devin_connection_id ?? null)
+    : null;
+  // Наследие до Layer'а: resume-сессия без привязки — ищем канал, чья
+  // sessions.db её хранит, иначе session/load уйдёт в чужую базу.
+  const hostedConnectionId = boundConnectionId == null && providerSessionId
+    ? (devinConnectionsService.findConnectionHostingSession(providerSessionId)?.id ?? null)
+    : boundConnectionId;
 
-function rememberSlotModelOptions(slot, options) {
-  if (!(options instanceof Set) || options.size === 0 || slot == null) return;
-  slotModelOptions.set(String(slot), options);
-  try {
-    fs.mkdirSync(path.dirname(slotModelsFile(slot)), { recursive: true });
-    fs.writeFileSync(slotModelsFile(slot), JSON.stringify([...options]));
-  } catch { /* список останется в памяти процесса — некритично */ }
-}
-
-// Используется devin-models.provider.ts (тот же модуль): пикер моделей
-// пересекает каталог `devin models list` с реальным списком активного слота.
-export function readSlotModelOptions(slot) {
-  const key = String(slot);
-  const cached = slotModelOptions.get(key);
-  if (cached) return cached;
-  try {
-    const raw = fs.readFileSync(slotModelsFile(slot), 'utf8');
-    const values = JSON.parse(raw);
-    if (Array.isArray(values) && values.length) {
-      const set = new Set(values.map(String));
-      slotModelOptions.set(key, set);
-      return set;
+  let lane = null;
+  const attempted = [];
+  let lastError = null;
+  let turnOptions = options;
+  for (let attempt = 0; attempt < MAX_TURN_ATTEMPTS; attempt++) {
+    let connection;
+    let dataHome;
+    try {
+      if (lane == null && hostedConnectionId != null) {
+        lane = devinConnectionsService.resolveLaneForSession(hostedConnectionId);
+      }
+      connection = lane != null
+        ? devinConnectionsService.pickCredentialForLane(lane, attempted, preferredConnectionId)
+        : devinConnectionsService.pickConnection(attempted, preferredConnectionId);
+      dataHome = devinConnectionsService.prepareTurnDataHome(lane ?? connection, connection);
+    } catch (error) {
+      // Каналов нет вовсе или все перепробованы — причину показываем, а не
+      // молча заканчиваем ход.
+      const failure = lastError ?? (error instanceof Error ? error : new Error(String(error)));
+      sendMessage(ws, createNormalizedMessage({
+        provider: 'devin',
+        sessionId: sessionId || providerSessionId || null,
+        kind: 'error',
+        content: `Devin недоступен: ${failure.message}`,
+      }));
+      throw failure;
     }
-  } catch { /* файла ещё нет — до первой сессии список неизвестен */ }
-  return null;
+    attempted.push(connection.id);
+
+    try {
+      await attemptDevinTurn(
+        command, turnOptions, ws, context, { lane: lane ?? connection, credential: connection, dataHome },
+        providerSessionId, attempt + 1 < MAX_TURN_ATTEMPTS,
+      );
+      return;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      devinConnectionsService.recordOutcome(connection.id, 'failed', lastError.message);
+      // Сбой после начала живого ответа повтор не лечит — ход заканчивается ошибкой.
+      if (!lastError[FAILOVER_TAG] && !lastError[MODEL_FALLBACK_TAG]) {
+        throw lastError;
+      }
+      // Новый чат успел получить сессию на этой линии — повтор продолжает её же,
+      // под другой подпиской, а не заводит вторую.
+      if (lastError.devinSessionId) {
+        providerSessionId = lastError.devinSessionId;
+        lane = lane ?? connection;
+      }
+      if (lastError[MODEL_FALLBACK_TAG]) {
+        // Та же подписка, другая модель: подписка здорова, не считаем её «испробованной».
+        attempted.pop();
+        turnOptions = { ...turnOptions, forceModel: DEVIN_DEFAULT_MODEL };
+        console.log(`[Devin] ход чата ${sessionId || '-'}: модель ${lastError.requestedModel || '?'} не приняла запрос — повтор на ${DEVIN_DEFAULT_MODEL}`);
+        sendMessage(ws, createNormalizedMessage({
+          provider: 'devin',
+          sessionId: sessionId || null,
+          kind: 'status',
+          text: `Модель ${lastError.requestedModel || ''} не приняла запрос — повторяю на ${DEVIN_DEFAULT_MODEL}. Чтобы не терять время, выберите SWE-2 High в списке моделей.`,
+        }));
+        continue;
+      }
+      // Без имени подписки: строку видит и гость, а реестр подписок — только владелец.
+      const reason = classifyDevinFailure(lastError.message) === 'rate_limit'
+        ? 'У текущей подписки Devin исчерпан лимит'
+        : 'Текущая подписка Devin не отвечает';
+      console.log(`[Devin] ход чата ${sessionId || '-'}: подписка #${connection.id} (${connection.name}) — ${reason}, переход на другую (попытка заняла ${lastError.attemptMs ?? '?'}мс)`);
+      sendMessage(ws, createNormalizedMessage({
+        provider: 'devin',
+        sessionId: sessionId || null,
+        kind: 'status',
+        text: `${reason} — продолжаю на другой подписке`,
+      }));
+    }
+  }
+  sendMessage(ws, createNormalizedMessage({
+    provider: 'devin',
+    sessionId: sessionId || providerSessionId || null,
+    kind: 'error',
+    content: `Devin недоступен: ${lastError?.message || 'no usable connection'}`,
+  }));
+  throw lastError ?? new Error('Devin run failed: no usable connection');
 }
 
 /**
- * Runs one Devin turn over ACP.
+ * Один ход через конкретный канал (`devin_connections` row).
  *
  * Devin's `acp` mode speaks JSON-RPC over stdio and handles one session at a
  * time, so each turn owns a fresh `devin acp` process: `session/load` revives
@@ -527,7 +647,10 @@ export function readSlotModelOptions(slot) {
  * - exactly one terminal `complete` per turn — the registry drops duplicates
  *   emitted after an abort.
  */
-async function queryDevin(command, options = {}, ws, context) {
+async function attemptDevinTurn(command, options = {}, ws, context, route, providerSessionId, allowFailover = false) {
+  // route.lane — где живёт sessions.db чата; route.credential — чья подписка
+  // платит; route.dataHome — XDG_DATA_HOME процесса (линия или её тень).
+  const { lane, credential: devinConn, dataHome } = route;
   const {
     sessionId,
     sessionSummary,
@@ -537,14 +660,7 @@ async function queryDevin(command, options = {}, ws, context) {
     images,
     files,
     permissionMode = 'default',
-    // Внутренние флаги повтора на другом аккаунте (авто-фейловер по лимиту):
-    // devinSessionIdOverride — беседа, уже созданная первой попыткой;
-    // slotFailoverDone — повтор был, второй раз не переключаемся.
-    devinSessionIdOverride,
-    slotFailoverDone,
   } = options;
-
-  const providerSessionId = devinSessionIdOverride ?? context.resolveProviderSessionId(sessionId);
 
   // Register the run BEFORE the async resolves: `chat.abort` can land while
   // resolveResumeModel is still awaiting — the run must already exist so
@@ -559,43 +675,49 @@ async function queryDevin(command, options = {}, ws, context) {
     sessionCreatedSent: Boolean(providerSessionId),
     terminalFailure: null,
     startedAt: Date.now(),
-    // Слот, под которым пошёл этот ход, и флаг «убиваем сами ради повтора на
-    // другом аккаунте» — onClose такого процесса не должен гасить ход.
-    slot: getActiveDevinSlot(),
-    slotRetryPending: false,
+    // Замеры фаз запуска: spawn/init/session/firstOutput — в журнал на finish.
+    timing: {},
     unregisterSurvivor: null,
     finishRun: null,
-    usageTimer: null,
-    lastEmittedUsage: null,
-    resolvedModel: null,
+    failoverRequested: false,
+    // Линия чата (Connection Layer): счётчик токенов читает sessions.db из её
+    // каталога, не из машинного дефолта.
+    lane,
     // Значения опции 'model' из configOptions сессии (Set<string>) и её
-    // currentValue. Каталог `devin models list` шире: он знает модели, которых
-    // у аккаунта слота нет (слот 2: нет swe-2-medium/max, 10.10.26) — выбор их
-    // в пикере кончался «Invalid params» на каждом ходу и тихой работой на
-    // другой модели. null = список ещё не прислали (старый CLI) — тогда
-    // set_config_option шлём вслепую, как раньше.
+    // текущее значение — нужны, чтобы не отправлять set_config_option на
+    // модель, которой у канала нет.
     modelOptions: null,
     modelCurrent: null,
     modelSetFailed: new Set(),
     modelDowngradeNotified: false,
+    // Первый живой вывод хода (дельта, мысль, запрос разрешения) ушёл в UI.
+    liveOutputSent: false,
   };
+  // Повтор на другой подписке честен, пока человек не увидел ни строчки
+  // этого хода: лимит Devin отвечает ошибкой на session/prompt сразу, до
+  // вывода. Сессия при этом уже может существовать — она в линии, и
+  // следующая попытка её загрузит.
+  const canFailoverNow = () => allowFailover && !run.aborted && !run.liveOutputSent && !run.failoverRequested;
+  // Фаза запуска отмечается один раз — первый вызов побеждает.
+  const markPhase = (name) => { if (run.timing[name] === undefined) run.timing[name] = Date.now(); };
+  const noteLiveOutput = () => { if (!run.liveOutputSent) { run.liveOutputSent = true; markPhase('firstOutput'); } };
   const sessionKey = sessionId || providerSessionId;
   run.sessionKey = sessionKey;
   if (sessionKey) {
     activeDevinRuns.set(sessionKey, run);
   }
 
-  // Only SWE-2 may run (owner's rule, 03.10.26): an old chat, a stale tab or a hand-made
-  // request naming another model is run on the default SWE-2 instead of spending the quota elsewhere.
-  const requestedModel = await context.resolveResumeModel(sessionId, model);
+  // Каталог разрешён почти весь (Егор 13.10.26), отклоняются только fusion-*/MODEL_* —
+  // старый чат или ручной запрос с такой моделью идёт на модели по умолчанию.
+  const requestedModel = options.forceModel || await context.resolveResumeModel(sessionId, model);
   // Пустая модель тоже заменяется: иначе Devin взял бы модель из своего конфига, а защита держалась бы на внешнем файле.
   const resolvedModel = !requestedModel || !isAllowedDevinModel(requestedModel) ? DEVIN_DEFAULT_MODEL : requestedModel;
   run.resolvedModel = resolvedModel;
   if (resolvedModel !== requestedModel) {
-    console.warn(`[Devin] model "${requestedModel}" is not allowed (SWE-2 only) — running ${DEVIN_DEFAULT_MODEL}`);
+    console.warn(`[Devin] model "${requestedModel}" is not in the allowed catalog — running ${DEVIN_DEFAULT_MODEL}`);
   }
   // Команды Devin, меняющие модель изнутри чата ("/model opus", "/fusion", "/adaptive"), обошли бы
-  // правило «только SWE-2» — до запуска агента такой ход отклоняем.
+  // выбор модели из пикера — до запуска агента такой ход отклоняем.
   if (/^\s*\/(model|fusion|adaptive)\b/i.test(String(command ?? ''))) {
     if (sessionKey) {
       activeDevinRuns.delete(sessionKey);
@@ -604,7 +726,7 @@ async function queryDevin(command, options = {}, ws, context) {
       provider: 'devin',
       sessionId: sessionId || null,
       kind: 'error',
-      content: 'Смена модели Devin запрещена: на этом аккаунте работает только SWE-2.',
+      content: 'Смена модели Devin командой запрещена — выберите модель в списке моделей чата.',
     }));
     sendMessage(ws, createCompleteMessage({
       provider: 'devin',
@@ -617,7 +739,8 @@ async function queryDevin(command, options = {}, ws, context) {
   const workingDirectory = cwd || projectPath || process.cwd();
   const devinMode = mapPermissionModeToDevinMode(permissionMode);
 
-  const childEnv = buildDevinChildEnv(run.slot);
+  // XDG_DATA_HOME = линия чата (своя креда) или её тень с кредой подписки.
+  const childEnv = buildDevinChildEnv(dataHome);
 
   // `devin --permission-mode dangerous acp`: the flag is a top-level option
   // (dangerous = alias of bypass), accepted before the subcommand. It covers
@@ -645,16 +768,20 @@ async function queryDevin(command, options = {}, ws, context) {
       args,
       cwd: workingDirectory,
       env: childEnv,
+      appSessionId: sessionKey || null,
     });
   } catch (supervisorError) {
     console.warn('[Devin] supervisor unavailable, direct spawn:', supervisorError?.message || supervisorError);
-    child = spawn(devinCommand, args, {
+    // Запасной прямой запуск — тоже в своей комнате, иначе агент сидит в группе сайта.
+    const room = wrapInAgentRoom(devinCommand, args, childEnv, sessionKey);
+    child = spawn(room.command, room.args, {
       cwd: workingDirectory,
-      env: childEnv,
+      env: room.env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
   }
   run.child = child;
+  markPhase('spawn');
 
   // Without an 'error' listener a spawn ENOENT (no devin CLI on PATH) is an
   // uncaughtException — it previously took the whole server down per send.
@@ -680,6 +807,9 @@ async function queryDevin(command, options = {}, ws, context) {
       socketPath: child.socketPath || null,
       runId: child.runId || null,
       supervisorPid: child.supervisorPid || null,
+      // Линия, чья sessions.db трогает этот ход — новый сервер читает прогресс
+      // из базы линии, а не из машинного дефолта (survivorProgressStamp).
+      devinDataHome: lane.xdg_data_home || null,
     },
   });
 
@@ -688,6 +818,17 @@ async function queryDevin(command, options = {}, ws, context) {
       return; // exactly one `complete` per turn
     }
     run.finishRun = true;
+    // Хронометраж запуска одной строкой: видно, где тонет «Запускаю чат» —
+    // поднятие процесса, рукопожатие, загрузка беседы или ожидание первого вывода.
+    const rel = (name) => (run.timing[name] != null ? `${run.timing[name] - run.startedAt}мс` : '-');
+    console.log(`[Devin] timing чат ${sessionId || '-'}: spawn=${rel('spawn')} init=${rel('init')} session=${rel('session')} first=${rel('firstOutput')} total=${Date.now() - run.startedAt}мс exit=${exitCode}`);
+    if (!aborted) {
+      devinConnectionsService.recordOutcome(
+        devinConn.id,
+        exitCode === 0 ? 'ok' : 'failed',
+        run.lastErrorDetail,
+      );
+    }
 
     // Ход кончился — висящие запросы разрешений гасим, чтобы баннеры во
     // вкладках не остались навсегда, а агент (если жив) получил cancelled.
@@ -735,6 +876,7 @@ async function queryDevin(command, options = {}, ws, context) {
             socketPath: child.socketPath || null,
             runId: child.runId || null,
             supervisorPid: child.supervisorPid || null,
+            devinDataHome: lane.xdg_data_home || null,
           },
         });
         console.warn(`[Devin] процесс ${child.pid} пережил конец хода — оставил живую запись для усыновления (чат ${sessionKey || '?'})`);
@@ -752,89 +894,43 @@ async function queryDevin(command, options = {}, ws, context) {
     }));
   };
 
+  // Уборка неудачной попытки без `complete` в UI: ход продолжается на другом
+  // канале, и сказать «закончилось» было бы ложью.
+  const silentCleanup = () => {
+    if (sessionKey) {
+      activeDevinRuns.delete(sessionKey);
+    }
+    cancelPendingPermissions(sessionKey, ws, sessionId || run.devinSessionId);
+    if (run.unregisterSurvivor) {
+      run.unregisterSurvivor();
+      run.unregisterSurvivor = null;
+    }
+    try {
+      child.kill('SIGKILL');
+    } catch {
+      // already gone
+    }
+  };
+
   return await new Promise((resolve, reject) => {
-    /**
-     * Лимит активного аккаунта → тот же ход заново на другом слоте (Егор
-     * 07.10.26: «токены переключаются сами, чаты те же»). Чат не теряется:
-     * sessions.db у слотов общая, созданную беседу передаём через
-     * devinSessionIdOverride, и повторная попытка делает session/load в неё.
-     * Активный слот переключаем насовсем — следующие ходы сразу идут на
-     * живой аккаунт. Один раз на сообщение: если и второй слот ограничен —
-     * ошибка показывается как раньше. true = повтор запущен, вызывающему
-     * коду гасить ход не нужно.
-     */
-    const failoverToOtherSlot = (error, extraText = '') => {
-      if (slotFailoverDone || run.aborted || run.finishRun || run.slotRetryPending) {
-        return false;
-      }
-      if (!isDevinQuotaError(error) && !isDevinQuotaText(extraText)) {
-        return false;
-      }
-      const nextSlot = run.slot === 2 ? 1 : 2;
-      if (!devinSlotHasCredentials(nextSlot)) {
-        return false; // второго входа нет — переключаться некуда
-      }
-      run.slotRetryPending = true;
-      try {
-        setActiveDevinSlot(nextSlot);
-      } catch (switchError) {
-        // Файл слота не записался (диск/права) — остаёмся на текущем и
-        // показываем исходную ошибку лимита, без повтора.
-        console.warn('[Devin] не удалось переключить слот:', switchError?.message || switchError);
-        run.slotRetryPending = false;
-        return false;
-      }
-      console.warn(`[Devin] лимит слота ${run.slot} — переключаюсь на слот ${nextSlot} и повторяю ход (${sessionKey || 'новый чат'})`);
-      sendMessage(ws, createNormalizedMessage({
-        provider: 'devin',
-        sessionId: sessionId || run.devinSessionId || null,
-        kind: 'status',
-        text: 'У аккаунта Devin кончился лимит — переключаюсь на другой аккаунт и повторяю…',
-      }));
-      cancelPendingPermissions(sessionKey, ws, sessionId || run.devinSessionId);
-      if (run.unregisterSurvivor) {
-        run.unregisterSurvivor();
-        run.unregisterSurvivor = null;
-      }
-      if (run.usageTimer) {
-        clearInterval(run.usageTimer);
-        run.usageTimer = null;
-      }
-      // Из activeDevinRuns запись НЕ убираем: надгробие нужно, чтобы «стоп»,
-      // нажатый в окне до повтора, находил ход и ставил run.aborted (иначе
-      // повтор молча пошёл бы дальше на втором аккаунте).
-      try { child.kill('SIGKILL'); } catch { /* уже умер */ }
-      // Ждём смерть процесса, чтобы замок сессии отпустил, затем повтор.
-      // Уже мёртвому процессу (close случился до failover — ошибка лимита
-      // пришла через stderr) ждать нечего — повторяем сразу.
-      let resumed = false;
-      const resume = () => {
-        if (resumed) {
-          return;
-        }
-        resumed = true;
-        if (run.aborted) {
-          finish(0, true);
-          resolve();
-          return;
-        }
-        resolve(queryDevin(command, {
-          ...options,
-          devinSessionIdOverride: run.devinSessionId || providerSessionId || undefined,
-          slotFailoverDone: true,
-        }, ws, context));
-      };
-      if (connection.isClosed()) {
-        setImmediate(resume);
-      } else {
-        child.once('close', resume);
-        // Без unref: единственный остающийся таймер обязан дожить до повтора.
-        setTimeout(resume, FAILOVER_KILL_WAIT_MS);
-      }
-      return true;
+    const requestFailover = (message, tag = FAILOVER_TAG) => {
+      run.failoverRequested = true;
+      // Поздний onClose убитого процесса обязан молчать: complete хода теперь
+      // принадлежит следующей попытке на другом канале.
+      run.finishRun = true;
+      silentCleanup();
+      const error = new Error(message);
+      error[tag] = true;
+      error.requestedModel = resolvedModel;
+      // Сколько заняла неудачная попытка — в журнале видно цену перебора подписок.
+      error.attemptMs = Date.now() - run.startedAt;
+      // Сессия, которую Devin успел выделить на линии: повтор её загрузит.
+      error.devinSessionId = run.devinSessionId || null;
+      reject(error);
     };
 
     const hardFail = (message, extra = {}) => {
+      run.lastErrorDetail = message;
       sendMessage(ws, createNormalizedMessage({
         provider: 'devin',
         sessionId: run.devinSessionId || sessionId || null,
@@ -853,22 +949,39 @@ async function queryDevin(command, options = {}, ws, context) {
         }
         const params = msg.params || {};
         const update = params.update || {};
-        // Список доступных аккаунту моделей приходит и событием (после
-        // session/set_config_option, смены слота) — держим его свежим.
+        run.lastAcpUpdateAt = Date.now();
+        // Список доступных каналу моделей приходит и событием (после
+        // session/set_config_option) — держим его свежим.
         if (update.sessionUpdate === 'config_option_update') {
           noteConfigOptions(run, update.configOptions);
         }
         if (run.muted) {
-          return; // session/load replays history — never leak it as live deltas
+          return; // session/load replays history — never leak it into this turn
+        }
+        // Накапливаем текст текущего ответа для защиты от тихого обрывания
+        // после статусных блоков (см. isIncompleteDevinResponse).
+        if (update.sessionUpdate === 'agent_message_chunk') {
+          const chunkBlock = update.content;
+          const text = chunkBlock && typeof chunkBlock.text === 'string' ? chunkBlock.text : '';
+          if (text) {
+            run.turnAssistantText = (run.turnAssistantText || '') + text;
+            run.turnTextAfterLastTool = (run.turnTextAfterLastTool || '') + text;
+          }
+        }
+        if (update.sessionUpdate === 'tool_call') {
+          run.turnHasToolCalls = true;
+          run.turnTextAfterLastTool = '';
         }
         const normalized = context.normalizeMessage(params.update ?? params, sessionId || run.devinSessionId || null);
         for (const message of normalized) {
+          noteLiveOutput();
           sendMessage(ws, message);
         }
       },
 
       onRequest: (msg) => {
         if (msg.method === 'session/request_permission') {
+          noteLiveOutput();
           const result = answerPermissionRequest(msg, devinMode, ws, sessionId || run.devinSessionId, run, connection);
           if (result) {
             connection.respond(msg.id, result);
@@ -881,14 +994,18 @@ async function queryDevin(command, options = {}, ws, context) {
       },
 
       onClose: () => {
-        if (run.finishRun || run.slotRetryPending) {
-          return; // retryPending: процесс убит нами ради повтора на другом слоте
+        if (run.finishRun || run.promptResponseReceived) {
+          return;
         }
         const tail = connection.getStderrTail();
+        run.lastErrorDetail = tail?.trim().split('\n').pop() || null;
         const message = run.aborted
           ? 'Devin run aborted'
           : `Devin exited before finishing the turn${tail ? `: ${tail.trim().split('\n').pop()}` : ''}`;
-        if (!run.aborted && failoverToOtherSlot(null, `${message} ${tail || ''}`)) {
+        // Канал умер до выделения сессии (типично: отозванная креда — CLI
+        // печатает 'Authentication required' и выходит) — отдаём ход другому.
+        if (canFailoverNow() && isFailoverableFailure(classifyDevinFailure(message))) {
+          requestFailover(message);
           return;
         }
         if (!run.aborted) {
@@ -914,6 +1031,7 @@ async function queryDevin(command, options = {}, ws, context) {
         clientCapabilities: {},
         clientInfo: { name: 'cc2-claude-ui', version: '1.0.0' },
       }, HANDSHAKE_TIMEOUT_MS);
+      markPhase('init');
 
       if (spawnError.error) {
         throw spawnError.error;
@@ -930,17 +1048,17 @@ async function queryDevin(command, options = {}, ws, context) {
           //   ошибка + потеря сообщения сыпались на каждую отправку. Ждём
           //   конца держателя (он пишет в ту же sessions.db) и грузим сессию —
           //   для человека это обычная очередь «ответ → следующее сообщение».
-          let loadResult;
           let lockWaitNotified = false;
           let zombieRetries = 0;
           const lockWaitDeadline = Date.now() + LOCK_HOLDER_WAIT_MS;
           for (;;) {
             try {
-              loadResult = await connection.call('session/load', {
+              const loadResult = await connection.call('session/load', {
                 sessionId: providerSessionId,
                 cwd: workingDirectory,
                 mcpServers: [],
               }, HANDSHAKE_TIMEOUT_MS);
+              noteConfigOptions(run, loadResult?.configOptions);
               break;
             } catch (loadError) {
               const retryable = loadError?.data?.['cognition.ai/retryable'] === true
@@ -971,8 +1089,12 @@ async function queryDevin(command, options = {}, ws, context) {
               await new Promise((r) => setTimeout(r, 3000));
             }
           }
+          // Наследие без привязки (чаты до Connection Layer) прибивается к
+          // линии, из чьей sessions.db оно реально поднялось.
+          if (sessionId && sessionsDb.getSessionById(sessionId)?.devin_connection_id == null) {
+            sessionsDb.setSessionDevinConnection(sessionId, lane.id);
+          }
           loaded = true;
-          noteConfigOptions(run, loadResult?.configOptions);
         } catch (error) {
           // Беседы с таким номером у Devin нет — продолжать нечего, истории
           // тоже. Начинаем новую вместо ошибки (04.10.26: чат с ложным номером
@@ -992,10 +1114,15 @@ async function queryDevin(command, options = {}, ws, context) {
           cwd: workingDirectory,
           mcpServers: [],
         }, HANDSHAKE_TIMEOUT_MS);
-
         noteConfigOptions(run, created?.configOptions);
+
         const newId = created?.sessionId;
         if (newId) {
+          // Чат прибивается к ЛИНИИ в момент выделения сессии: его sessions.db
+          // живёт в её каталоге; платить за ходы дальше может любая подписка.
+          if (sessionId) {
+            sessionsDb.setSessionDevinConnection(sessionId, lane.id);
+          }
           run.devinSessionId = newId;
           if (typeof ws.setSessionId === 'function') {
             ws.setSessionId(newId);
@@ -1014,6 +1141,7 @@ async function queryDevin(command, options = {}, ws, context) {
         }
       }
 
+      markPhase('session');
       if (devinMode) {
         try {
           await connection.call('session/set_mode', {
@@ -1028,21 +1156,21 @@ async function queryDevin(command, options = {}, ws, context) {
       if (resolvedModel) {
         // `--model` only covers fresh sessions; a loaded session keeps its
         // stored model unless we set the config option explicitly.
-        // The option list is the account's truth: a model the picker offered
-        // but the slot doesn't have (swe-2-medium/max on slot 2) would fail
-        // with Invalid params on every turn and silently run the old model —
-        // so it's skipped and named honestly, once per run.
+        // The option list is the channel's truth: a model the picker offered
+        // but the channel doesn't have would fail with Invalid params on
+        // every turn and silently run the old model — so it's skipped and
+        // named honestly, once per run.
         const knownUnavailable = run.modelOptions instanceof Set && !run.modelOptions.has(resolvedModel);
         const notifyDowngrade = () => {
           if (run.modelDowngradeNotified) return;
           run.modelDowngradeNotified = true;
           const effective = run.modelCurrent || DEVIN_DEFAULT_MODEL;
-          console.warn(`[Devin] model "${resolvedModel}" is not in this account's options — running ${effective}`);
+          console.warn(`[Devin] model "${resolvedModel}" is not in this channel's options — running ${effective}`);
           sendMessage(ws, createNormalizedMessage({
             provider: 'devin',
             sessionId: sessionId || run.devinSessionId || null,
             kind: 'error',
-            content: `Модель «${resolvedModel}» недоступна на активном аккаунте Devin — ход идёт на ${effective}.`,
+            content: `Модель «${resolvedModel}» недоступна на активном канале Devin — ход идёт на ${effective}.`,
           }));
         };
         if (knownUnavailable || run.modelSetFailed.has(resolvedModel)) {
@@ -1056,7 +1184,7 @@ async function queryDevin(command, options = {}, ws, context) {
             }, HANDSHAKE_TIMEOUT_MS);
           } catch (error) {
             // «Слепой» путь (configOptions не пришли): отказ — та же тихая
-            // подмена, что чинит вся эта правка; говорим честно один раз.
+            // подмена; говорим честно один раз.
             run.modelSetFailed.add(resolvedModel);
             console.warn('[Devin] session/set_config_option model failed:', error.message);
             notifyDowngrade();
@@ -1067,44 +1195,112 @@ async function queryDevin(command, options = {}, ws, context) {
       // Attachments ride along as path references (the same <images_input> /
       // <files_input> contract Cursor and OpenCode use): the Devin agent reads
       // them with its own filesystem tools.
-      const promptText = appendFilesInputTag(appendImagesInputTag(command, images), files);
+      let promptText = appendFilesInputTag(appendImagesInputTag(command, images), files);
 
       // Пока ход идёт, счётчик читается из sessions.db — Devin пишет туда
       // metrics каждого ответа по ходу работы (см. devin-usage.ts).
       run.usageTimer = setInterval(() => emitDevinTokenBudget(ws, run, sessionId), DEVIN_USAGE_POLL_MS);
       run.usageTimer.unref?.();
 
-      const result = await connection.call('session/prompt', {
-        sessionId: run.devinSessionId,
-        prompt: [{ type: 'text', text: promptText }],
-      });
+      // Запрос у модели — подпись плашки меняется с «Запускаю чат» на
+      // «Думает» сразу, а не когда придёт первый токен (у Claude провайдера
+      // тот же кадр 'requesting' шлётся при отправке).
+      sendMessage(ws, createNormalizedMessage({
+        provider: 'devin',
+        sessionId: sessionId || run.devinSessionId || null,
+        kind: 'run_phase',
+        text: 'thinking',
+      }));
+
+      // Ход может понадобиться продолжить: ACP v1 умеет это только новым
+      // session/prompt, и протокол записывает его репликой пользователя.
+      // Чтобы она не выглядела сообщением человека, текст начинается с метки
+      // DEVIN_AUTO_CONTINUE_TAG — её отфильтровывают все места, где история
+      // Devin превращается в нашу ленту (см. utils.ts). Человек видит лишь
+      // короткий статус «продолжаю автоматически».
+      let result = null;
+      let stopReason = null;
+      for (let attempt = 0; ; attempt += 1) {
+        const isContinuation = attempt > 0;
+        run.promptResponseReceived = false;
+        const promptResult = connection.call('session/prompt', {
+          sessionId: run.devinSessionId,
+          prompt: [{ type: 'text', text: isContinuation ? DEVIN_AUTO_CONTINUE_PROMPT : promptText }],
+        });
+        // Кадр prompt уже записан в сокет супервизора: с этого момента ход
+        // переживает перезапуск сайта (promptInFlight не даёт супервизору
+        // убрать агента, новый сервер переподключится и дочитает ответ).
+        if (!isContinuation) {
+          options.onPromptAnchored?.();
+        }
+        result = await promptResult;
+        run.promptResponseReceived = true;
+        await waitForAcpEventDrain(run);
+
+        if (run.aborted) {
+          if (run.usageTimer) {
+            clearInterval(run.usageTimer);
+            run.usageTimer = null;
+          }
+          finish(0, true);
+          resolve();
+          return;
+        }
+
+        stopReason = result?.stopReason;
+        const incomplete = stopReason === 'end_turn' && isIncompleteDevinResponse(
+          run.turnAssistantText,
+          run.turnHasToolCalls,
+          run.turnTextAfterLastTool,
+        );
+        // Восстановимые обрывы: статусный финал и усечение по лимиту. Отказ,
+        // отмену и неизвестные причины продолжать нельзя — сразу видимый сбой.
+        const recoverable = incomplete || stopReason === 'max_tokens';
+        if (!recoverable || attempt >= MAX_AUTO_CONTINUES) {
+          if (incomplete) {
+            hardFail('Devin завершил ход без итогового ответа. Запрос сохранён, но этот ход отмечен ошибкой — система не считает промежуточный текст результатом.');
+            return;
+          }
+          if (stopReason === 'max_tokens') {
+            hardFail('Devin достиг лимита ответа до подтверждённого завершения задачи. Частичный текст сохранён, ход отмечен ошибкой.');
+            return;
+          }
+          if (stopReason !== 'end_turn') {
+            hardFail(`Devin остановил ход без подтверждённого результата (причина: ${stopReason || 'не указана'}). Запрос и частичный текст сохранены.`);
+            return;
+          }
+          break;
+        }
+
+        sendMessage(ws, createNormalizedMessage({
+          provider: 'devin',
+          sessionId: sessionId || run.devinSessionId || null,
+          kind: 'status',
+          text: 'Ответ оборвался на промежуточном шаге — продолжаю автоматически.',
+        }));
+        // Следующую попытку судим по её собственному тексту.
+        run.turnAssistantText = '';
+        run.turnTextAfterLastTool = '';
+        run.turnHasToolCalls = false;
+      }
 
       if (run.usageTimer) {
         clearInterval(run.usageTimer);
         run.usageTimer = null;
       }
 
-      if (run.aborted) {
-        finish(0, true);
-        resolve();
-        return;
-      }
-
-      const stopReason = result?.stopReason;
       // Финальный замер — последний ответ мог дописаться в базу только что.
       emitDevinTokenBudget(ws, run, sessionId, { force: true });
       const usage = result?.usage;
-      if (usage && run.lastEmittedUsage === null) {
-        // Запасной путь на случай пустого чтения базы: окно берём из
-        // каталога модели, а не равным расходу — иначе «150K/150K».
+      if (usage) {
         sendMessage(ws, createNormalizedMessage({
           provider: 'devin',
-          sessionId: sessionId || run.devinSessionId || null,
+          sessionId: run.devinSessionId || sessionId || null,
           kind: 'status',
           text: 'token_budget',
           tokenBudget: {
             used: usage.totalTokens ?? 0,
-            total: resolveDevinContextWindow(resolvedModel),
+            total: usage.totalTokens ?? 0,
             inputTokens: usage.inputTokens ?? 0,
             outputTokens: usage.outputTokens ?? 0,
             breakdown: {
@@ -1121,7 +1317,7 @@ async function queryDevin(command, options = {}, ws, context) {
         kind: 'stream_end',
       }));
 
-      if (stopReason === 'end_turn' || stopReason === 'max_tokens') {
+      if (stopReason === 'end_turn') {
         notifyRunStopped({
           userId: ws?.userId || null,
           provider: 'devin',
@@ -1131,7 +1327,7 @@ async function queryDevin(command, options = {}, ws, context) {
         });
       }
 
-      finish(stopReason === 'end_turn' || stopReason === 'max_tokens' ? 0 : 1, stopReason === 'cancelled');
+      finish(stopReason === 'end_turn' ? 0 : 1, stopReason === 'cancelled');
       resolve();
     })().catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
@@ -1146,18 +1342,35 @@ async function queryDevin(command, options = {}, ws, context) {
         resolve();
         return;
       }
-      if (run.slotRetryPending) {
-        // Повтор на другом слоте уже запущен из onClose (процесс умер с
-        // лимитом в stderr) — отклонённый вызов здесь не должен добивать ход
-        // красной ошибкой; промис отпустит resume() из failoverToOtherSlot.
-        return;
-      }
       const tail = connection.getStderrTail();
       const detail = tail && !message.includes(tail.trim().split('\n').pop() || '')
         ? `${message} — ${tail.trim().split('\n').pop()}`
         : message;
-      if (failoverToOtherSlot(error, `${detail} ${tail || ''}`)) {
-        return; // лимит аккаунта — ход повторяется на другом слоте
+      const failureClass = classifyDevinFailure(detail);
+      if (failureClass === 'model' && !run.failoverRequested && canFailoverNow() && resolvedModel !== DEVIN_DEFAULT_MODEL) {
+        requestFailover(detail, MODEL_FALLBACK_TAG);
+        return;
+      }
+      if (!run.failoverRequested && canFailoverNow() && isFailoverableFailure(failureClass)) {
+        requestFailover(detail);
+        return;
+      }
+      if (failureClass === 'session_locked') {
+        // Сессию держит живой процесс прошлого хода этого чата — подписки ни при чём.
+        const holderPid = /\(PID (\d+)\)/.exec(detail)?.[1];
+        console.warn(`[Devin] чат ${sessionId || '-'}: сессия ${run.devinSessionId || providerSessionId} занята процессом ${holderPid || '?'}`);
+        // Исходный текст — в учёт исхода (recordOutcome узнаёт session_locked и
+        // подписку не штрафует); человеку — что делать.
+        run.lastErrorDetail = detail;
+        sendMessage(ws, createNormalizedMessage({
+          provider: 'devin',
+          sessionId: run.devinSessionId || sessionId || null,
+          kind: 'error',
+          content: 'Этот чат ещё занят: предыдущий ход Devin не завершился. Подождите, пока он закончит, и отправьте сообщение снова.',
+        }));
+        finish(1, false);
+        reject(new Error(detail));
+        return;
       }
       notifyRunFailed({
         userId: ws?.userId || null,
@@ -1166,7 +1379,8 @@ async function queryDevin(command, options = {}, ws, context) {
         error: detail,
         sessionName: sessionSummary,
       });
-      hardFail(`Devin run failed: ${detail}`);
+      const brief = detail.replace(/\s+/g, ' ').split(/(?<=\.)\s/)[0].slice(0, 160);
+      hardFail(`Devin run failed: ${brief}`);
     });
   });
 }

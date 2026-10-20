@@ -3,10 +3,11 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { useAuth } from '../components/auth/context/AuthContext';
 import { IS_PLATFORM } from '../shared/utils';
 import { expireAuthSession, isAuthTokenExpired } from '../utils/api';
+import { reportConnectionProbe } from '../utils/connectionProbe';
 import { flipDoor, getDoorHost, markDoorWorked } from '../utils/doors';
 
 import { ChatOutbox, isChatSend, SLOT_RETRY_MS, SLOT_WAIT_CODE, type OutboxEntry } from './chatOutbox';
-import { decideConnectionAction } from './connectionWatchdog';
+import { decideConnectionAction, isConnectionStableFrame } from './connectionWatchdog';
 
 /**
  * One frame received from the chat websocket. The server guarantees every
@@ -60,17 +61,12 @@ const WebSocketContext = createContext<WebSocketContextType | null>(null);
 const ACK_TIMEOUT_MS = 10_000;
 /** Как часто проверять очередь, пока в ней что-то есть. */
 const OUTBOX_CHECK_MS = 3_000;
-<<<<<<< ours
 /**
  * Соединение, не открывшееся за это время, пересоздаётся — уже через другой
  * вход (utils/doors.js). Было 15 с; 8 с хватает и для плохой мобильной связи,
  * а смена входа безвредна: оба ведут на один сервер.
  */
 const CONNECT_STALL_MS = 8_000;
-=======
-/** Соединение, не открывшееся за это время, пересоздаётся. */
-const CONNECT_STALL_MS = 15_000;
->>>>>>> theirs
 /**
  * Как часто сторож связи проверяет, что соединение на месте. Работает всегда,
  * а не только когда есть что отправлять: связь нужна и молчащей странице —
@@ -79,8 +75,20 @@ const CONNECT_STALL_MS = 15_000;
 const CONNECTION_CHECK_MS = 5_000;
 /** Сколько ждать от сервера сообщения о возможностях, прежде чем счесть его старым. */
 const HELLO_GRACE_MS = 2_000;
+/** Сколько ждать ответ на пробу `ping` молчащего сокета. */
+const PROBE_TIMEOUT_MS = 4_000;
+/** Предел паузы между попытками подключения (экспонента с джиттером). */
+const RECONNECT_CAP_MS = 8_000;
 /** Что умеет страница; сервер отвечает `server_capabilities` только знающим. */
-const SOCKET_CAPS = 'send-ack-1';
+const SOCKET_CAPS = 'send-ack-1,server-ping-1';
+
+/**
+ * Пауза перед повторным подключением: 1 → 2 → 4 → 8 с с разбросом ±30%.
+ * Раньше было ровно 3 с: при перезапуске службы все вкладки всех
+ * пользователей стучались в мёртвый порт одновременно и в одном темпе.
+ */
+const reconnectDelayMs = (drops: number) =>
+  Math.round(Math.min(RECONNECT_CAP_MS, 1_000 * 2 ** Math.min(drops - 1, 3)) * (0.7 + Math.random() * 0.6));
 
 export const useWebSocket = () => {
   const context = useContext(WebSocketContext);
@@ -116,7 +124,7 @@ const createOutbox = (): ChatOutbox => {
 const useWebSocketProviderState = (): WebSocketContextType => {
   const wsRef = useRef<WebSocket | null>(null);
   const unmountedRef = useRef(false); // Track if component is unmounted
-  const failedAttemptsRef = useRef(0); // подряд не открывшихся соединений (для смены входа)
+  const failedAttemptsRef = useRef(0); // подряд не подтвердивших устойчивость соединений (для смены входа)
   const hasConnectedRef = useRef(false); // Track if we've ever connected (to detect reconnects)
   /**
    * Listener registry for the subscribe API. A ref (not state) because the
@@ -148,6 +156,20 @@ const useWebSocketProviderState = (): WebSocketContextType => {
   const ackModeRef = useRef<'unknown' | 'ack' | 'legacy'>('unknown');
   const helloTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const flushRef = useRef<(socket: WebSocket) => void>(() => {});
+  /**
+   * Когда последний раз приходил ЛЮБОЙ кадр от сервера. Сервер присылает
+   * прикладной `server_ping` раз в `serverPingMs` — молчание дольше трёх
+   * интервалов при открытом сокете значит, что путь мёртв, а `onclose` при
+   * обрыве посередине не приходит (сеть сменилась или «заморожена»).
+   */
+  const lastInboundAtRef = useRef(0);
+  /** Интервал прикладного пинга, объявленный сервером; `null` — сервер старый. */
+  const serverPingMsRef = useRef<number | null>(null);
+  /** Когда ушла проба `ping` молчащему сокету; `null` — пробы нет. */
+  const probeSentAtRef = useRef<number | null>(null);
+  /** Подряд закрывшихся соединений — задаёт паузу перед следующим заходом. */
+  const dropCountRef = useRef(0);
+  const disconnectedAtRef = useRef<number | null>(null);
 
   const dispatch = useCallback((event: ServerEvent) => {
     for (const listener of listenersRef.current) {
@@ -199,6 +221,7 @@ const useWebSocketProviderState = (): WebSocketContextType => {
   const forceReconnect = useCallback((reason: string) => {
     if (unmountedRef.current) return;
     console.warn(`[outbox] пересоздаю соединение: ${reason}`);
+    reportConnectionProbe({ event: 'reconnect', reason });
     const stale = wsRef.current;
     if (stale) {
       stale.onopen = null;
@@ -212,6 +235,8 @@ const useWebSocketProviderState = (): WebSocketContextType => {
       }
     }
     wsRef.current = null;
+    disconnectedAtRef.current ??= Date.now();
+    probeSentAtRef.current = null;
     setIsConnected(false);
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
@@ -238,11 +263,17 @@ const useWebSocketProviderState = (): WebSocketContextType => {
   const ensureConnection = useCallback((): boolean => {
     if (unmountedRef.current) return false;
     const socket = wsRef.current;
+    const pingMs = serverPingMsRef.current;
     const action = decideConnectionAction({
       readyState: socket ? socket.readyState : null,
       reconnectScheduled: reconnectTimeoutRef.current !== null,
       connectingForMs: Date.now() - connectStartedAtRef.current,
       stallMs: CONNECT_STALL_MS,
+      // Молчание считаем только у сервера, который сам пообещал пинги.
+      silentForMs: pingMs ? Date.now() - lastInboundAtRef.current : null,
+      silenceLimitMs: pingMs ? Math.max(pingMs * 3, 60_000) : Infinity,
+      probeAgeMs: probeSentAtRef.current ? Date.now() - probeSentAtRef.current : null,
+      probeTimeoutMs: PROBE_TIMEOUT_MS,
     });
     switch (action) {
       case 'ok':
@@ -250,18 +281,33 @@ const useWebSocketProviderState = (): WebSocketContextType => {
       case 'connect':
         connectRef.current();
         return false;
+      case 'probe':
+        // Сокет открыт, но сервер давно молчит: лёгкая проба. Ответит — кадр
+        // обновит lastInboundAt и путь признают живым; нет — пересоздание.
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          try {
+            socket.send(JSON.stringify({ type: 'ping' }));
+            probeSentAtRef.current = Date.now();
+          } catch {
+            forceReconnect('сокет не принял пробу связи');
+          }
+        }
+        return false;
       case 'recreate':
-<<<<<<< ours
         if (socket && socket.readyState === WebSocket.CONNECTING) {
           flipDoor('рукопожатие чата зависло');
           failedAttemptsRef.current = 0; // на новом входе счёт неудач начинается заново
+        } else if (socket && socket.readyState === WebSocket.OPEN) {
+          // Открыт, но проба осталась без ответа: путь замёрз в середине —
+          // новый сокет идём через другой вход.
+          flipDoor('сокет открыт, а сервер молчит');
         }
-=======
->>>>>>> theirs
         forceReconnect(
           socket && socket.readyState === WebSocket.CONNECTING
             ? 'соединение не устанавливается'
-            : 'соединение закрыто без уведомления',
+            : socket && socket.readyState === WebSocket.OPEN
+              ? 'сервер молчит и не ответил на пробу'
+              : 'соединение закрыто без уведомления',
         );
         return false;
       default:
@@ -377,16 +423,31 @@ const useWebSocketProviderState = (): WebSocketContextType => {
 
       if (!wsUrl) return console.warn('No authentication token found for WebSocket connection');
 
+      reportConnectionProbe({ event: 'attempt', door: getDoorHost(), drops: dropCountRef.current });
       const websocket = new WebSocket(wsUrl);
       // Store connecting sockets too, so a token refresh can close them before
       // their handshake completes with stale credentials.
       wsRef.current = websocket;
       connectStartedAtRef.current = Date.now();
 
-      let openedThisAttempt = false;
-      websocket.onopen = () => {
-        openedThisAttempt = true;
+      let stableThisAttempt = false;
+      const markConnectionStable = () => {
+        if (stableThisAttempt) return;
+        stableThisAttempt = true;
+        const now = Date.now();
+        reportConnectionProbe({
+          event: 'stable',
+          connectMs: now - connectStartedAtRef.current,
+          recoveryMs: disconnectedAtRef.current === null ? 0 : now - disconnectedAtRef.current,
+        });
+        disconnectedAtRef.current = null;
         failedAttemptsRef.current = 0;
+        dropCountRef.current = 0;
+      };
+      websocket.onopen = () => {
+        lastInboundAtRef.current = Date.now();
+        reportConnectionProbe({ event: 'open', connectMs: Date.now() - connectStartedAtRef.current });
+        probeSentAtRef.current = null;
         markDoorWorked();
         setIsConnected(true);
         if (hasConnectedRef.current) {
@@ -399,21 +460,41 @@ const useWebSocketProviderState = (): WebSocketContextType => {
         // (`server_capabilities` — первое, что он шлёт). Промолчал — это
         // старый сервер: отправляем один раз, без повторов.
         ackModeRef.current = 'unknown';
+        // Возможности — свойство ЭТОГО соединения: после обрыва мог ответить
+        // старый сервер (соседняя выкатка), пинги считаем только по свежему
+        // объявлению.
+        serverPingMsRef.current = null;
         if (helloTimerRef.current) clearTimeout(helloTimerRef.current);
         helloTimerRef.current = setTimeout(() => {
           helloTimerRef.current = null;
           if (wsRef.current !== websocket || ackModeRef.current !== 'unknown') return;
           console.warn('[outbox] сервер не сообщил о расписках — старая версия, отправляю без повторов');
           ackModeRef.current = 'legacy';
+          markConnectionStable();
           flushRef.current(websocket);
         }, HELLO_GRACE_MS);
       };
 
       websocket.onmessage = (event) => {
+        // Любой кадр — доказательство живого пути: обновляет молчание и
+        // гасит летящую пробу связи.
+        const probeWasInFlight =
+          probeSentAtRef.current !== null && Date.now() - probeSentAtRef.current < PROBE_TIMEOUT_MS;
+        lastInboundAtRef.current = Date.now();
+        probeSentAtRef.current = null;
         try {
           const data = JSON.parse(event.data) as ServerEvent;
+          if (data.kind === 'server_ping') {
+            if (isConnectionStableFrame(data.kind, serverPingMsRef.current)) markConnectionStable();
+            return;
+          }
+          if (data.kind === 'server_pong') {
+            return;
+          }
           if (data.kind === 'server_capabilities') {
             ackModeRef.current = data.chatSendAck === true ? 'ack' : 'legacy';
+            serverPingMsRef.current =
+              typeof data.serverPingMs === 'number' && data.serverPingMs > 0 ? data.serverPingMs : null;
             if (helloTimerRef.current) {
               clearTimeout(helloTimerRef.current);
               helloTimerRef.current = null;
@@ -431,6 +512,11 @@ const useWebSocketProviderState = (): WebSocketContextType => {
             return;
           }
           if (data.kind === 'protocol_error') {
+            // Ответ на нашу пробу связи от сервера без её поддержки — живость
+            // уже доказана фактом кадра, а в ленте это была бы лишняя ошибка.
+            if (data.code === 'UNKNOWN_MESSAGE_TYPE' && probeWasInFlight) {
+              return;
+            }
             const outbox = outboxRef.current;
             const waitsForSlot = data.code === SLOT_WAIT_CODE
               || (data.code === 'RUN_IN_PROGRESS' && Boolean(outbox?.isWaitingForSlot(data.clientMessageId)));
@@ -470,28 +556,39 @@ const useWebSocketProviderState = (): WebSocketContextType => {
         }
       };
 
-      websocket.onclose = () => {
+      websocket.onclose = (event) => {
         if (wsRef.current !== websocket) {
           return;
         }
+        const now = Date.now();
+        disconnectedAtRef.current ??= now;
+        reportConnectionProbe({
+          event: 'close',
+          code: event.code,
+          reason: event.reason || 'none',
+          livedMs: now - connectStartedAtRef.current,
+          stable: stableThisAttempt,
+        });
         setIsConnected(false);
         wsRef.current = null;
 
-        // Не открылось два раза подряд — пробуем другой вход.
-        if (!openedThisAttempt) {
+        // Дважды подряд не дожило до подтверждения устойчивости — пробуем другой вход.
+        if (!stableThisAttempt) {
           failedAttemptsRef.current += 1;
           if (failedAttemptsRef.current >= 2) {
             failedAttemptsRef.current = 0;
-            flipDoor('чат дважды не открылся');
+            flipDoor('чат дважды не удержал соединение');
           }
         }
 
-        // Attempt to reconnect after 3 seconds
+        // Повтор с нарастающей паузой и разбросом: быстро после обрыва,
+        // спокойно при лежачем сервере — и без единого темпа у всех вкладок.
+        dropCountRef.current += 1;
         reconnectTimeoutRef.current = setTimeout(() => {
           reconnectTimeoutRef.current = null;
           if (unmountedRef.current) return; // Prevent reconnection if unmounted
           connect();
-        }, 3000);
+        }, reconnectDelayMs(dropCountRef.current));
       };
 
       websocket.onerror = (error) => {
@@ -511,11 +608,24 @@ const useWebSocketProviderState = (): WebSocketContextType => {
   // на iPhone сокет после сна часто числится открытым, но мёртв, — открываем
   // новый и досылаем.
   useEffect(() => {
-    const onResume = () => {
+    const onResume = (event: Event) => {
       if (document.visibilityState === 'hidden') return;
-      if (!ensureConnectionRef.current()) return;
+      // Повтор, назначенный до сна вкладки, мог отложиться на секунды —
+      // страница видна и сеть есть: подключаемся сейчас, а не по таймеру.
+      if (reconnectTimeoutRef.current) {
+        reportConnectionProbe({ event: 'resume', reason: event.type });
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+        connectRef.current();
+        return;
+      }
+      if (!ensureConnectionRef.current()) {
+        reportConnectionProbe({ event: 'resume', reason: event.type });
+        return;
+      }
       const outbox = outboxRef.current;
       if (!outbox || outbox.size === 0) return;
+      reportConnectionProbe({ event: 'resume', reason: event.type });
       const socket = wsRef.current;
       if (socket && socket.readyState === WebSocket.OPEN && ackModeRef.current === 'ack' && outbox.overdue(0).length > 0) {
         forceReconnect('приложение вернулось из фона, сообщение ждёт расписки');

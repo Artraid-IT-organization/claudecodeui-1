@@ -167,6 +167,9 @@ export function useSidebarController({
   const [isRecentConversationsLoading, setIsRecentConversationsLoading] = useState(false);
   const [isLoadingMoreRecentConversations, setIsLoadingMoreRecentConversations] = useState(false);
   const [recentConversationsError, setRecentConversationsError] = useState(false);
+  // Лента по умолчанию прячет служебные чаты (auto-запуски, /tmp, «Промпты»);
+  // кнопка внизу списка показывает их обратно (Егор 15.10.26).
+  const [showInternalChats, setShowInternalChats] = useState(false);
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
   const [optimisticStarByProjectId, setOptimisticStarByProjectId] = useState<Map<string, boolean>>(new Map());
   const [loadingMoreProjects, setLoadingMoreProjects] = useState<Set<string>>(new Set());
@@ -319,7 +322,7 @@ export function useSidebarController({
     }
   }, []);
 
-  const fetchRecentConversationsPage = useCallback(async (offset: number, append: boolean) => {
+  const fetchRecentConversationsPage = useCallback(async (offset: number, append: boolean, limit = 40) => {
     const requestSequence = ++recentConversationsSeqRef.current;
     if (append) {
       setIsLoadingMoreRecentConversations(true);
@@ -330,7 +333,7 @@ export function useSidebarController({
 
     try {
       // Лента отбирается сервером по открытому блоку верхней панели.
-      const response = await api.recentConversations({ limit: 40, offset, serverScope, providerSpace });
+      const response = await api.recentConversations({ limit, offset, serverScope, providerSpace, includeInternal: showInternalChats });
       if (!response.ok) {
         throw new Error(`Failed to load recent conversations: ${response.status}`);
       }
@@ -369,7 +372,7 @@ export function useSidebarController({
         setIsLoadingMoreRecentConversations(false);
       }
     }
-  }, [serverScope, providerSpace]);
+  }, [serverScope, providerSpace, showInternalChats]);
 
   const reloadRecentConversations = useCallback(() => {
     void fetchRecentConversationsPage(0, false);
@@ -386,6 +389,48 @@ export function useSidebarController({
     recentConversations.length,
     recentConversationsHasMore,
   ]);
+
+  /*
+   * Плоская лента чатов — основной вид панели (Егор 14.10.26). Грузится
+   * сразу при входе, переспросить при смене блока/помощника (срез в запросе
+   * меняет сам fetchRecentConversationsPage) и тихо освежается, когда
+   * projects меняются от session_upserted: во время ответа агента события
+   * идут пачками, поэтому переспрос с отсрочкой и одной страницей на весь
+   * уже показанный хвост — «Показать более ранние» не сбрасывается.
+   * Мёртвая ветка старого режима «conversations» ждала нажатия вкладки,
+   * теперь вкладки нет — тянем сами.
+   */
+  const recentCountRef = useRef(0);
+  useEffect(() => {
+    recentCountRef.current = recentConversations.length;
+  }, [recentConversations.length]);
+
+  const recentBootstrappedRef = useRef(false);
+  useEffect(() => {
+    if (searchMode !== 'projects') {
+      return;
+    }
+    if (!recentBootstrappedRef.current) {
+      recentBootstrappedRef.current = true;
+      void fetchRecentConversationsPage(0, false);
+      return;
+    }
+    const timer = setTimeout(() => {
+      void fetchRecentConversationsPage(
+        0,
+        false,
+        Math.min(100, Math.max(40, recentCountRef.current)),
+      );
+    }, 1200);
+    return () => clearTimeout(timer);
+  }, [projects, searchMode, fetchRecentConversationsPage]);
+
+  // При переключении блока или помощника старый срез стираем сразу, чтобы
+  // чужие чаты не висели в ленте, пока идёт новый запрос.
+  useEffect(() => {
+    setRecentConversations([]);
+    setRecentConversationsHasMore(false);
+  }, [serverScope, providerSpace, showInternalChats]);
 
   useEffect(() => {
     if (migrationStartedRef.current) {
@@ -468,22 +513,81 @@ export function useSidebarController({
     };
   }, [searchFilter]);
 
-  // Debounced conversation search with SSE streaming
+  // Строка в плоской панели ищет на сервере по всем чатам текущего блока и
+  // помощника, а не только по уже загруженной странице последних чатов.
   useEffect(() => {
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-      eventSourceRef.current = null;
+    eventSourceRef.current?.close();
+    eventSourceRef.current = null;
+
+    const query = debouncedSearchQuery;
+    if (searchMode !== 'projects' || query.length < 2) {
+      searchSeqRef.current += 1;
+      setConversationResults(null);
+      setSearchProgress(null);
+      setIsSearching(false);
+      return;
     }
 
-    // Поиск по чатам жил только в режиме «conversations», а его убрали вместе
-    // с вкладкой. Осталась чистка состояния, чтобы после переключения режима
-    // на экране не висели результаты прошлого запроса.
-    searchSeqRef.current += 1;
+    setIsSearching(true);
     setConversationResults(null);
     setSearchProgress(null);
-    setIsSearching(false);
-    return;
-  }, [debouncedSearchQuery, searchMode]);
+    const seq = ++searchSeqRef.current;
+    const es = new EventSource(api.searchConversationsUrl(query, 100, { serverScope, providerSpace }));
+    eventSourceRef.current = es;
+    const accumulated: ConversationProjectResult[] = [];
+    let titleResults: SessionTitleSearchResult[] = [];
+    let totalMatches = 0;
+
+    const publish = () => setConversationResults({
+      results: [...accumulated],
+      titleResults: [...titleResults],
+      totalMatches,
+      query,
+    });
+    es.addEventListener('title-results', (event) => {
+      if (seq !== searchSeqRef.current) return es.close();
+      try {
+        const data = JSON.parse((event as MessageEvent).data) as { titleResults: SessionTitleSearchResult[] };
+        titleResults = Array.isArray(data.titleResults) ? data.titleResults : [];
+        publish();
+      } catch { /* Ignore malformed SSE data. */ }
+    });
+    es.addEventListener('result', (event) => {
+      if (seq !== searchSeqRef.current) return es.close();
+      try {
+        const data = JSON.parse((event as MessageEvent).data) as {
+          projectResult: ConversationProjectResult;
+          totalMatches: number;
+          scannedProjects: number;
+          totalProjects: number;
+        };
+        accumulated.push(data.projectResult);
+        totalMatches = data.totalMatches;
+        setSearchProgress({ scannedProjects: data.scannedProjects, totalProjects: data.totalProjects });
+        publish();
+      } catch { /* Ignore malformed SSE data. */ }
+    });
+    es.addEventListener('progress', (event) => {
+      if (seq !== searchSeqRef.current) return es.close();
+      try {
+        const data = JSON.parse((event as MessageEvent).data) as SearchProgress & { totalMatches: number };
+        totalMatches = data.totalMatches;
+        setSearchProgress({ scannedProjects: data.scannedProjects, totalProjects: data.totalProjects });
+      } catch { /* Ignore malformed SSE data. */ }
+    });
+    const finish = () => {
+      if (seq !== searchSeqRef.current) return;
+      es.close();
+      eventSourceRef.current = null;
+      setIsSearching(false);
+      setSearchProgress(null);
+      publish();
+    };
+    es.addEventListener('done', finish);
+    es.addEventListener('error', finish);
+
+    return () => es.close();
+  }, [debouncedSearchQuery, searchMode, serverScope, providerSpace]);
 
   // All sidebar state keys (expanded, starred, loading, etc.) use the DB
   // `projectId` as their identifier after the migration.
@@ -931,12 +1035,12 @@ export function useSidebarController({
       await Promise.all([
         Promise.resolve(onRefresh()),
         fetchArchivedSessions(),
-
+        fetchRecentConversationsPage(0, false),
       ]);
     } finally {
       setIsRefreshing(false);
     }
-  }, [fetchArchivedSessions, fetchRecentConversationsPage, onRefresh, searchMode]);
+  }, [fetchArchivedSessions, fetchRecentConversationsPage, onRefresh]);
 
   const updateSessionSummary = useCallback(
     // `_projectId` and `_provider` are preserved for compatibility with
@@ -1004,6 +1108,8 @@ export function useSidebarController({
     isRecentConversationsLoading,
     isLoadingMoreRecentConversations,
     recentConversationsError,
+    showInternalChats,
+    toggleInternalChats: useCallback(() => setShowInternalChats((v) => !v), []),
     reloadRecentConversations,
     loadMoreRecentConversations,
     toggleProject,

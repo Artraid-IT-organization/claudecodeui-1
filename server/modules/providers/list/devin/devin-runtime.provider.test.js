@@ -1,21 +1,18 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import { closeConnection, devinConnectionsDb, initializeDatabase } from '@/modules/database/index.js';
+
 import { devinRuntime } from './devin-runtime.provider.js';
 import { DevinSessionsProvider, mapPermissionModeToDevinMode } from './devin-sessions.provider.js';
 
 const sessionsProvider = new DevinSessionsProvider();
 const runtimeContext = {
-  resolveProviderSessionId: (sessionId) => {
-    if (sessionId === 'app-resume') return 'devin-sess-1';
-    if (sessionId === 'app-missing') return 'app-missing'; // ложный номер, как после запуска сайта 04.10.26
-    return null;
-  },
+  resolveProviderSessionId: (sessionId) => sessionId === 'app-resume' ? 'devin-sess-1' : null,
   resolveResumeModel: async (_sessionId, requestedModel) => requestedModel || undefined,
   getProviderModels: async () => ({ OPTIONS: [], DEFAULT: '' }),
   normalizeMessage: (raw, sessionId) => sessionsProvider.normalizeMessage(raw, sessionId),
@@ -42,13 +39,14 @@ const notify = (method, params) => process.stdout.write(JSON.stringify({ jsonrpc
 const request = (id, method, params) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\\n');
 
 let pendingPrompt = null; // msg.id of session/prompt waiting on permission
+let promptCount = 0; // сколько session/prompt получил этот процесс (для сценариев продолжения)
 const finishPrompt = () => {
   if (!pendingPrompt) return;
   const { id, sid } = pendingPrompt;
   pendingPrompt = null;
   notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'AFTER-PERMISSION' } } });
   respond(id, { stopReason: 'end_turn' });
-  setTimeout(() => process.exit(0), 50);
+  setTimeout(() => process.exit(0), 1000);
 };
 
 rl.on('line', (line) => {
@@ -67,52 +65,20 @@ rl.on('line', (line) => {
     case 'initialize':
       respond(msg.id, { protocolVersion: 1, agentCapabilities: { loadSession: true } });
       break;
-    case 'session/new': {
-      const result = { sessionId: 'devin-sess-1' };
-      // DEVIN_FAKE_MODEL_OPTIONS='a,b' → сессия отвечает живым списком моделей аккаунта.
-      const fakeOpts = process.env.DEVIN_FAKE_MODEL_OPTIONS;
-      if (fakeOpts) {
-        result.configOptions = [{
-          id: 'model',
-          currentValue: fakeOpts.split(',')[0],
-          options: fakeOpts.split(',').map((v) => ({ value: v })),
-        }];
-      }
-      respond(msg.id, result);
+    case 'session/new':
+      respond(msg.id, { sessionId: 'devin-sess-1' });
       break;
-    }
     case 'session/load':
-      if (process.env.DEVIN_LOAD_LOCK_FILE && fs.existsSync(process.env.DEVIN_LOAD_LOCK_FILE)) {
-        // Замок ЖИВОГО процесса: пока файл-маркер стоит, load отбивается
-        // session_locked с реальным pid держателя (11.10.26).
-        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code: -32015, message: "Session 'x' is already open in another process", data: { 'cognition.ai/errorKind': 'session_locked', 'cognition.ai/retryable': true, 'cognition.ai/lockHolderPid': Number(process.env.DEVIN_LOCK_PID) } } }) + '\\n');
-        break;
-      }
-      if (process.env.DEVIN_LOAD_LOCKED_ONCE === '1') {
-        // Замок умершего ACP-процесса: retryable — Devin сам разрешает повтор.
-        delete process.env.DEVIN_LOAD_LOCKED_ONCE;
-        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code: -32015, message: "Session 'x' is already open in another process", data: { 'cognition.ai/errorKind': 'session_locked', 'cognition.ai/retryable': true, 'cognition.ai/lockHolderPid': 999999 } } }) + '\\n');
-        break;
-      }
-      if (process.env.DEVIN_LOAD_MISSING === '1') {
-        // Живой ответ Devin 04.10.26 на чужой номер беседы.
-        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code: -32016, message: 'Session not found', data: { 'cognition.ai/errorKind': 'session_not_found', 'cognition.ai/retryable': false } } }) + '\\n');
+      if (process.env.DEVIN_SESSION_LOCKED === '1') {
+        // Живой ответ Devin 10.10.26: сессию держит процесс прошлого хода.
+        if (process.env.DEVIN_TURN_LOG) fs.appendFileSync(process.env.DEVIN_TURN_LOG, JSON.stringify({ locked: true, xdg: process.env.XDG_DATA_HOME }) + '\\n');
+        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code: -32015, message: "Session '" + msg.params.sessionId + "' is already open in another process (PID 291819). Close the other instance before opening it here.", data: { 'cognition.ai/errorKind': 'session_locked' } } }) + '\\n');
         break;
       }
       // Replayed history MUST be muted by the runtime.
       notify('session/update', { sessionId: msg.params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'REPLAYED-OLD-TEXT' } } });
-      {
-        const result = { sessionId: msg.params.sessionId };
-        const fakeOpts = process.env.DEVIN_FAKE_MODEL_OPTIONS;
-        if (fakeOpts) {
-          result.configOptions = [{
-            id: 'model',
-            currentValue: fakeOpts.split(',')[0],
-            options: fakeOpts.split(',').map((v) => ({ value: v })),
-          }];
-        }
-        respond(msg.id, result);
-      }
+      notify('session/update', { sessionId: msg.params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '## Как я понял задачу\\n\\nСейчас проверю данные.' } } });
+      respond(msg.id, { sessionId: msg.params.sessionId });
       break;
     case 'session/set_mode':
     case 'session/set_config_option':
@@ -121,6 +87,23 @@ rl.on('line', (line) => {
     case 'session/prompt': {
       if (process.env.DEVIN_HANG === '1') return; // never answer → abort test
       const sid = msg.params.sessionId;
+      promptCount += 1;
+      // Подписка = credentials.toml под XDG_DATA_HOME процесса; «limited» — исчерпана.
+      const credPath = require('node:path').join(process.env.XDG_DATA_HOME || '', 'devin', 'credentials.toml');
+      const cred = fs.existsSync(credPath) ? fs.readFileSync(credPath, 'utf8') : '';
+      if (process.env.DEVIN_TURN_LOG) {
+        fs.appendFileSync(process.env.DEVIN_TURN_LOG, JSON.stringify({ xdg: process.env.XDG_DATA_HOME, cred: cred.trim(), methods: seen.map((m) => m.method) }) + '\\n');
+      }
+      if (process.env.DEVIN_REJECT_MODEL && process.argv.includes(process.env.DEVIN_REJECT_MODEL)) {
+        // Живой формат отказа модели (журнал 13.10.26, adaptive в чате с историей SWE-2): ошибка на prompt, до вывода.
+        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code: -32013, message: 'Client error: Protocol error (invalid_argument): There is an issue with this request, please try a different model. (trace ID: 9074a8d8c7a08d1b)', data: { 'cognition.ai/retryable': true } } }) + '\\n');
+        return;
+      }
+      if (cred.includes('limited')) {
+        // Живой формат лимита Devin (журнал cc2 09.10.26): ошибка на prompt, до вывода.
+        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code: -32010, message: 'Reached free model rate limit. Your limit will reset in 34 minutes (at 21:01 UTC). (trace ID: afd89c403f6c)' } }) + '\\n');
+        return;
+      }
       if (process.env.DEVIN_PERMISSION_TEST === '1') {
         // Ask permission and hold the prompt until the client answers.
         pendingPrompt = { id: msg.id, sid };
@@ -136,11 +119,60 @@ rl.on('line', (line) => {
         });
         return;
       }
+      if (process.env.DEVIN_INCOMPLETE === 'understanding') {
+        notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '## Как я понял задачу\\n\\nСейчас проверю данные.' } } });
+        respond(msg.id, { stopReason: 'end_turn' });
+        setTimeout(() => process.exit(0), 1000);
+        return;
+      }
+      if (process.env.DEVIN_INCOMPLETE === 'recover') {
+        // Первый prompt обрывается статусом; каждое служебное продолжение
+        // доводит ход до результата.
+        if (promptCount === 1) {
+          notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '## Как я понял задачу\\n\\nСейчас проверю данные.' } } });
+        } else {
+          notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '## Ответ\\n\\nПроверка завершена, результат готов.' } } });
+        }
+        respond(msg.id, { stopReason: 'end_turn' });
+        setTimeout(() => process.exit(0), 1000);
+        return;
+      }
+      if (process.env.DEVIN_INCOMPLETE === 'tool_only') {
+        notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Проверяю данные.' } } });
+        notify('session/update', { sessionId: sid, update: { sessionUpdate: 'tool_call', toolCallId: 'tc-incomplete', title: 'Read', kind: 'read' } });
+        respond(msg.id, { stopReason: 'end_turn' });
+        setTimeout(() => process.exit(0), 1000);
+        return;
+      }
+      if (process.env.DEVIN_INCOMPLETE === 'complete_after_status') {
+        notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Сейчас проверю данные.\\n\\n## Ответ\\n\\nПроверка завершена, результат готов.' } } });
+        respond(msg.id, { stopReason: 'end_turn' });
+        setTimeout(() => process.exit(0), 1000);
+        return;
+      }
+      if (process.env.DEVIN_INCOMPLETE === 'late_final_chunk') {
+        notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '## Как я понял задачу\\n\\nСейчас проверю данные.' } } });
+        respond(msg.id, { stopReason: 'end_turn' });
+        setTimeout(() => notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '\\n\\n## Ответ\\n\\nПроверка завершена, результат готов.' } } }), 25);
+        setTimeout(() => process.exit(0), 150);
+        return;
+      }
+      if (process.env.DEVIN_INCOMPLETE === 'structured_answer') {
+        // Реалистичный ответ из проекта «Промпты»: разделы Логика, Готовый промпт,
+        // Возможные улучшения, Версия «Максимум» — без заголовков из старого whitelist.
+        notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '## Логика\\n\\n- Прежний поиск был слишком узким.\\n- Новый поиск строится в два этапа.\\n\\n## Готовый промпт\\n\\nТы — исследователь рынка. Проведи глубокий поиск.\\n\\n## Возможные улучшения\\n\\n- Добавить фото волос.\\n- Указать бюджет.\\n\\n## Версия «Максимум»\\n\\nОсновной вариант уже максимальный для задачи.' } } });
+        respond(msg.id, { stopReason: 'end_turn' });
+        setTimeout(() => process.exit(0), 1000);
+        return;
+      }
       notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'thinking hard' } } });
       notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'LIVE-REPLY' } } });
       notify('session/update', { sessionId: sid, update: { sessionUpdate: 'usage_update', used: 100, size: 200000 } });
-      respond(msg.id, { stopReason: 'end_turn', usage: { totalTokens: 42, inputTokens: 30, outputTokens: 12 } });
-      setTimeout(() => process.exit(0), 50);
+      const stopReason = process.env.DEVIN_INCOMPLETE === 'max_tokens'
+        ? 'max_tokens'
+        : process.env.DEVIN_INCOMPLETE === 'refusal' ? 'refusal' : 'end_turn';
+      respond(msg.id, { stopReason, usage: { totalTokens: 42, inputTokens: 30, outputTokens: 12 } });
+      setTimeout(() => process.exit(0), 1000);
       break;
     }
     default:
@@ -172,33 +204,45 @@ async function withFakeDevin(fn) {
   const previousCapture = process.env.DEVIN_RPC_CAPTURE;
   const previousHang = process.env.DEVIN_HANG;
   const previousPermTest = process.env.DEVIN_PERMISSION_TEST;
+  const previousIncomplete = process.env.DEVIN_INCOMPLETE;
   const previousRunsDir = process.env.CLOUDCLI_DEVIN_RUNS_DIR;
   const previousLiveRuns = process.env.CLOUDCLI_LIVE_RUNS_DIR;
-  const previousFakeOpts = process.env.DEVIN_FAKE_MODEL_OPTIONS;
-  const previousHome = process.env.HOME;
+  const previousDbPath = process.env.DATABASE_PATH;
   const shim = await createFakeDevinExecutable(tempRoot);
   process.env.DEVIN_CLI_PATH = shim;
   process.env.DEVIN_RPC_CAPTURE = path.join(tempRoot, 'rpc.json');
   // Супервизор и live-runs пишут в свои каталоги — в тестах они во временных.
   process.env.CLOUDCLI_DEVIN_RUNS_DIR = path.join(tempRoot, 'devin-runs');
   process.env.CLOUDCLI_LIVE_RUNS_DIR = path.join(tempRoot, 'live-runs');
-  // Кэш опций слота живёт в ~/.cloudcli-shared — не дать фейковой сессии
-  // перезаписать файл живого слота.
-  process.env.HOME = tempRoot;
+
+  // Connection Layer читает sessions/devin_connections — изолированная база.
+  closeConnection();
+  process.env.DATABASE_PATH = path.join(tempRoot, 'auth.db');
+  await initializeDatabase();
+  // Тестовый канал с собственным XDG_DATA_HOME: креда там есть (содержимое
+  // неважно — CLI подменён), рантайм выберет его первым годным.
+  const connXdg = path.join(tempRoot, 'conn-xdg');
+  await writeFile(path.join(tempRoot, 'creds.toml'), 'windsurf_api_key = "test"\n', 'utf8');
+  const fsSync = await import('node:fs');
+  fsSync.mkdirSync(path.join(connXdg, 'devin'), { recursive: true });
+  fsSync.writeFileSync(path.join(connXdg, 'devin', 'credentials.toml'), 'windsurf_api_key = "test"\n');
+  devinConnectionsDb.create({ name: 'test-conn', xdgDataHome: connXdg });
+
   try {
     await fn(tempRoot);
   } finally {
+    closeConnection();
     if (previousCliPath === undefined) delete process.env.DEVIN_CLI_PATH; else process.env.DEVIN_CLI_PATH = previousCliPath;
     if (previousCapture === undefined) delete process.env.DEVIN_RPC_CAPTURE; else process.env.DEVIN_RPC_CAPTURE = previousCapture;
     if (previousHang === undefined) delete process.env.DEVIN_HANG; else process.env.DEVIN_HANG = previousHang;
     if (previousPermTest === undefined) delete process.env.DEVIN_PERMISSION_TEST; else process.env.DEVIN_PERMISSION_TEST = previousPermTest;
+    if (previousIncomplete === undefined) delete process.env.DEVIN_INCOMPLETE; else process.env.DEVIN_INCOMPLETE = previousIncomplete;
     if (previousRunsDir === undefined) delete process.env.CLOUDCLI_DEVIN_RUNS_DIR; else process.env.CLOUDCLI_DEVIN_RUNS_DIR = previousRunsDir;
     if (previousLiveRuns === undefined) delete process.env.CLOUDCLI_LIVE_RUNS_DIR; else process.env.CLOUDCLI_LIVE_RUNS_DIR = previousLiveRuns;
-    if (previousFakeOpts === undefined) delete process.env.DEVIN_FAKE_MODEL_OPTIONS; else process.env.DEVIN_FAKE_MODEL_OPTIONS = previousFakeOpts;
-    if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
-    // Супервизор дописывает sock-файлы devin-runs чуть позже завершения хода —
-    // без ретраев уборка падает ENOTEMPTY по гонке (флаки 10.10.26).
-    await rm(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    if (previousDbPath === undefined) delete process.env.DATABASE_PATH; else process.env.DATABASE_PATH = previousDbPath;
+    // Супервизор может дописывать свои файлы в devin-runs чуть позже нас —
+    // rm без ретраев падает с ENOTEMPTY.
+    await rm(tempRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -234,8 +278,130 @@ test('devin runtime: new session — handshake, session_created, streamed deltas
     const capture = JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8'));
     const methods = capture.calls.map((c) => c.method);
     assert.deepEqual(methods.slice(0, 2), ['initialize', 'session/new']);
-    // The model is always named (SWE-2 only): an empty one is replaced, never left to the agent's own config.
+    // Пустая модель клампится в swe-2-high ещё до спауна — иначе Devin взял бы свой конфиг.
     assert.deepEqual(capture.args, ['acp', '--model', 'swe-2-high']);
+  });
+});
+
+test('devin runtime: recoverable stalls auto-continue via a marked service prompt, then fail visibly', async () => {
+  for (const scenario of ['understanding', 'tool_only', 'max_tokens']) {
+    await withFakeDevin(async (tempRoot) => {
+      process.env.DEVIN_INCOMPLETE = scenario;
+      const writer = makeWriter();
+
+      await assert.rejects(() => devinRuntime.run(
+        'Original user request',
+        { cwd: tempRoot, sessionId: `app-incomplete-${scenario}` },
+        writer,
+        runtimeContext,
+      ));
+
+      const capture = JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8'));
+      const prompts = capture.calls.filter((call) => call.method === 'session/prompt');
+      // Исходный запрос + не более двух служебных продолжений с меткой.
+      assert.equal(prompts.length, 3, `${scenario}: original prompt plus capped auto-continues`);
+      assert.equal(prompts[0].params.prompt[0].text, 'Original user request');
+      for (const continuation of prompts.slice(1)) {
+        assert.ok(
+          continuation.params.prompt[0].text.includes('cc2-auto-continue'),
+          `${scenario}: continuation prompt carries the service marker`,
+        );
+      }
+      assert.ok(
+        writer.messages.some((message) => message.kind === 'status' && /продолжаю автоматически/i.test(message.text || '')),
+        `${scenario}: a subtle auto-continue status is shown`,
+      );
+      assert.ok(writer.messages.some((message) => message.kind === 'error'), `${scenario}: error is visible`);
+      const completes = writer.messages.filter((message) => message.kind === 'complete');
+      assert.equal(completes.length, 1, `${scenario}: exactly one terminal complete`);
+      assert.equal(completes[0].exitCode, 1, `${scenario}: still-incomplete output is not success`);
+    });
+  }
+});
+
+test('devin runtime: waits for a final chunk delivered just after session/prompt resolves', async () => {
+  await withFakeDevin(async (tempRoot) => {
+    process.env.DEVIN_INCOMPLETE = 'late_final_chunk';
+    const writer = makeWriter();
+
+    await devinRuntime.run(
+      'Original user request',
+      { cwd: tempRoot, sessionId: 'app-late-final' },
+      writer,
+      runtimeContext,
+    );
+
+    const capture = JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8'));
+    const prompts = capture.calls.filter((call) => call.method === 'session/prompt');
+    assert.equal(prompts.length, 1, 'late final output must not trigger a synthetic continuation');
+    assert.ok(writer.messages.some((message) => message.kind === 'stream_delta' && /Проверка завершена/.test(message.content || '')));
+    assert.ok(!writer.messages.some((message) => message.kind === 'error'));
+    const completes = writer.messages.filter((message) => message.kind === 'complete');
+    assert.equal(completes.length, 1);
+    assert.equal(completes[0].exitCode, 0);
+  });
+});
+
+test('devin runtime: refusal fails without any continuation prompt', async () => {
+  await withFakeDevin(async (tempRoot) => {
+    process.env.DEVIN_INCOMPLETE = 'refusal';
+    const writer = makeWriter();
+
+    await assert.rejects(() => devinRuntime.run(
+      'Original user request',
+      { cwd: tempRoot, sessionId: 'app-incomplete-refusal' },
+      writer,
+      runtimeContext,
+    ));
+
+    const capture = JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8'));
+    const prompts = capture.calls.filter((call) => call.method === 'session/prompt');
+    assert.equal(prompts.length, 1, 'refusal: only the original prompt is sent');
+    assert.ok(writer.messages.some((message) => message.kind === 'error'));
+    const completes = writer.messages.filter((message) => message.kind === 'complete');
+    assert.equal(completes.length, 1);
+    assert.equal(completes[0].exitCode, 1);
+  });
+});
+
+test('devin runtime: a stalled first answer recovers via auto-continue without a visible user message', async () => {
+  await withFakeDevin(async (tempRoot) => {
+    process.env.DEVIN_INCOMPLETE = 'recover';
+    const writer = makeWriter();
+
+    await devinRuntime.run(
+      'Original user request',
+      { cwd: tempRoot, sessionId: 'app-recover' },
+      writer,
+      runtimeContext,
+    );
+
+    const capture = JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8'));
+    const prompts = capture.calls.filter((call) => call.method === 'session/prompt');
+    assert.equal(prompts.length, 2, 'one continuation was needed');
+    assert.equal(prompts[0].params.prompt[0].text, 'Original user request');
+    assert.ok(prompts[1].params.prompt[0].text.includes('cc2-auto-continue'));
+    // В ленте нет реплики от имени человека — только статус и финальный текст.
+    assert.ok(!writer.messages.some((message) => message.role === 'user' && /продолж/i.test(message.content || '')));
+    assert.ok(writer.messages.some((message) => message.kind === 'status' && /продолжаю автоматически/i.test(message.text || '')));
+    assert.ok(!writer.messages.some((message) => message.kind === 'error'));
+    const completes = writer.messages.filter((message) => message.kind === 'complete');
+    assert.equal(completes.length, 1);
+    assert.equal(completes[0].exitCode, 0);
+  });
+});
+
+test('devin runtime: a status followed by a result remains successful', async () => {
+  await withFakeDevin(async (tempRoot) => {
+    process.env.DEVIN_INCOMPLETE = 'complete_after_status';
+    const writer = makeWriter();
+
+    await devinRuntime.run('Original user request', { cwd: tempRoot, sessionId: 'app-complete-after-status' }, writer, runtimeContext);
+
+    assert.ok(!writer.messages.some((message) => message.kind === 'error'));
+    const completes = writer.messages.filter((message) => message.kind === 'complete');
+    assert.equal(completes.length, 1);
+    assert.equal(completes[0].exitCode, 0);
   });
 });
 
@@ -255,23 +421,112 @@ test('devin runtime: resume — session/load replays are muted, no session_creat
   });
 });
 
-test('devin runtime: беседы нет у Devin — начинается новая, а не ошибка', async () => {
-  await withFakeDevin(async (tempRoot) => {
-    process.env.DEVIN_LOAD_MISSING = '1';
-    try {
-      const writer = makeWriter();
-      await devinRuntime.run('Hi', { cwd: tempRoot, sessionId: 'app-missing' }, writer, runtimeContext);
+/**
+ * Две подписки: канал test-conn (линия, его креда «исчерпана») и spare.
+ * Возвращает id каналов и путь журнала ходов фейкового CLI.
+ */
+async function setupExhaustedLane(tempRoot, { hostSession }) {
+  const fsSync = await import('node:fs');
+  process.env.DEVIN_CONNECTIONS_ROOT = path.join(tempRoot, 'connections');
+  process.env.DEVIN_TURN_LOG = path.join(tempRoot, 'turns.jsonl');
+  const laneXdg = path.join(tempRoot, 'conn-xdg');
+  fsSync.writeFileSync(path.join(laneXdg, 'devin', 'credentials.toml'), 'windsurf_api_key = "limited"\n');
+  if (hostSession) {
+    // sessions.db линии знает devin-sess-1 — по ней рантайм находит линию чата.
+    fsSync.mkdirSync(path.join(laneXdg, 'devin', 'cli'), { recursive: true });
+    const { default: Database } = await import('better-sqlite3');
+    const db = new Database(path.join(laneXdg, 'devin', 'cli', 'sessions.db'));
+    db.exec("CREATE TABLE sessions (id TEXT PRIMARY KEY); INSERT INTO sessions VALUES ('devin-sess-1');");
+    db.close();
+  }
+  const spareXdg = path.join(tempRoot, 'spare-xdg');
+  fsSync.mkdirSync(path.join(spareXdg, 'devin'), { recursive: true });
+  fsSync.writeFileSync(path.join(spareXdg, 'devin', 'credentials.toml'), 'windsurf_api_key = "fresh"\n');
+  const lane = devinConnectionsDb.getByName('test-conn');
+  const spare = devinConnectionsDb.create({ name: 'spare', priority: 1, xdgDataHome: spareXdg });
+  const readTurns = async () => (await readFile(process.env.DEVIN_TURN_LOG, 'utf8'))
+    .trim().split('\n').map((line) => JSON.parse(line));
+  return { lane, spare, laneXdg, readTurns };
+}
 
-      const methods = JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8'))
-        .calls.map((c) => c.method);
-      assert.ok(methods.includes('session/load'));
-      assert.ok(methods.includes('session/new'), 'после «Session not found» — новая беседа');
-      const created = writer.messages.find((m) => m.kind === 'session_created');
-      assert.equal(created?.newSessionId, 'devin-sess-1', 'сайт узнаёт настоящий номер беседы');
+function restoreLaneEnv() {
+  delete process.env.DEVIN_CONNECTIONS_ROOT;
+  delete process.env.DEVIN_TURN_LOG;
+}
+
+test('devin runtime: лимит подписки — существующий чат продолжается на другой подписке в той же линии', async () => {
+  await withFakeDevin(async (tempRoot) => {
+    try {
+      const { lane, spare, laneXdg, readTurns } = await setupExhaustedLane(tempRoot, { hostSession: true });
+      const writer = makeWriter();
+      await devinRuntime.run('Hi', { cwd: tempRoot, sessionId: 'app-resume' }, writer, runtimeContext);
+
+      const turns = await readTurns();
+      assert.equal(turns.length, 2, 'одна попытка на исчерпанной, одна на запасной');
+      assert.equal(turns[0].xdg, laneXdg);
+      assert.match(turns[0].cred, /limited/);
+      assert.notEqual(turns[1].xdg, laneXdg, 'вторая попытка — через тень линии');
+      assert.match(turns[1].cred, /fresh/, 'платит запасная подписка');
+      assert.ok(turns[1].methods.includes('session/load'), 'та же сессия грузится из линии');
+      const fsSync = await import('node:fs');
+      assert.equal(fsSync.realpathSync(path.join(turns[1].xdg, 'devin', 'cli')), fsSync.realpathSync(path.join(laneXdg, 'devin', 'cli')));
+
+      assert.ok(writer.messages.some((m) => m.kind === 'status' && /исчерпан лимит/.test(m.text || '')), 'человек видит переход');
+      assert.ok(writer.messages.some((m) => m.content === 'LIVE-REPLY'), 'ответ дошёл');
       assert.ok(!writer.messages.some((m) => m.kind === 'error'), 'без ошибки');
-      assert.ok(writer.messages.some((m) => m.content === 'LIVE-REPLY'));
+      const completes = writer.messages.filter((m) => m.kind === 'complete');
+      assert.equal(completes.length, 1);
+      assert.equal(completes[0].exitCode, 0);
+      assert.equal(devinConnectionsDb.getById(lane.id).health_status, 'rate_limited', 'исчерпанная подписка ушла в cooldown');
+      assert.equal(devinConnectionsDb.getById(spare.id).health_status, 'ok');
     } finally {
-      delete process.env.DEVIN_LOAD_MISSING;
+      restoreLaneEnv();
+    }
+  });
+});
+
+test('devin runtime: новый чат упёрся в лимит после session/new — повтор грузит ту же сессию, без второго session_created', async () => {
+  await withFakeDevin(async (tempRoot) => {
+    try {
+      const { readTurns } = await setupExhaustedLane(tempRoot, { hostSession: false });
+      const writer = makeWriter();
+      await devinRuntime.run('Hi', { cwd: tempRoot, sessionId: 'app-new-1' }, writer, runtimeContext);
+
+      const turns = await readTurns();
+      assert.equal(turns.length, 2);
+      assert.ok(turns[0].methods.includes('session/new'));
+      assert.ok(turns[1].methods.includes('session/load'), 'повтор продолжает выделенную сессию');
+      assert.ok(!turns[1].methods.includes('session/new'), 'вторую сессию не заводит');
+      assert.equal(writer.messages.filter((m) => m.kind === 'session_created').length, 1);
+      assert.ok(writer.messages.some((m) => m.content === 'LIVE-REPLY'));
+      assert.equal(writer.messages.filter((m) => m.kind === 'complete').length, 1);
+    } finally {
+      restoreLaneEnv();
+    }
+  });
+});
+
+test('devin runtime: сессию держит прошлый ход — без перебора подписок и без штрафа им, человеку понятная ошибка', async () => {
+  await withFakeDevin(async (tempRoot) => {
+    process.env.DEVIN_SESSION_LOCKED = '1';
+    try {
+      const { lane, spare, readTurns } = await setupExhaustedLane(tempRoot, { hostSession: true });
+      devinConnectionsDb.markHealth(lane.id, 'ok', { lastError: null });
+      const fsSync = await import('node:fs');
+      fsSync.writeFileSync(path.join(tempRoot, 'conn-xdg', 'devin', 'credentials.toml'), 'windsurf_api_key = "ok"\n');
+      const writer = makeWriter();
+      await devinRuntime.run('Hi', { cwd: tempRoot, sessionId: 'app-resume' }, writer, runtimeContext).catch(() => {});
+
+      assert.equal((await readTurns()).length, 1, 'одна попытка — другие подписки замок не снимут');
+      const errors = writer.messages.filter((m) => m.kind === 'error');
+      assert.equal(errors.length, 1);
+      assert.match(errors[0].content, /чат ещё занят/);
+      assert.equal(writer.messages.filter((m) => m.kind === 'complete').length, 1);
+      assert.equal(devinConnectionsDb.getById(lane.id).health_status, 'ok', 'подписка линии не штрафуется');
+      assert.equal(devinConnectionsDb.getById(spare.id).health_status, 'unknown');
+    } finally {
+      delete process.env.DEVIN_SESSION_LOCKED;
+      restoreLaneEnv();
     }
   });
 });
@@ -297,8 +552,8 @@ test('devin runtime: model + permission mode are passed to the agent', async () 
   });
 });
 
-test('devin runtime: a model other than SWE-2 is replaced by swe-2-high', async () => {
-  for (const forbidden of ['claude-opus-5-5-medium', 'adaptive', 'fusion-claude-opus-5-5-medium-sidekick-swe-2-medium', 'gpt-6-sol-high']) {
+test('devin runtime: fusion-* and legacy MODEL_* ids are replaced by swe-2-high', async () => {
+  for (const forbidden of ['fusion-claude-opus-5-5-medium-sidekick-swe-2-medium', 'MODEL_GPT_5_2_LOW']) {
     await withFakeDevin(async (tempRoot) => {
       const writer = makeWriter();
       await devinRuntime.run('Hi', {
@@ -316,6 +571,69 @@ test('devin runtime: a model other than SWE-2 is replaced by swe-2-high', async 
   }
 });
 
+test('devin runtime: adaptive and ordinary catalog models are allowed and reach the agent as picked', async () => {
+  for (const picked of ['adaptive', 'claude-haiku-5-5-medium']) {
+    await withFakeDevin(async (tempRoot) => {
+      const writer = makeWriter();
+      await devinRuntime.run('Hi', {
+        cwd: tempRoot,
+        sessionId: `app-allowed-${picked}`,
+        model: picked,
+        permissionMode: 'default',
+      }, writer, runtimeContext);
+
+      const capture = JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8'));
+      assert.deepEqual(capture.args, ['acp', '--model', picked]);
+      const setModel = capture.calls.find((c) => c.method === 'session/set_config_option');
+      assert.equal(setModel?.params?.value, picked);
+    });
+  }
+});
+
+test('devin runtime: model rejected with invalid_argument is retried once on swe-2-high, same subscription', async () => {
+  await withFakeDevin(async (tempRoot) => {
+    process.env.DEVIN_REJECT_MODEL = 'adaptive';
+    try {
+      const writer = makeWriter();
+      await devinRuntime.run('Hi', {
+        cwd: tempRoot,
+        sessionId: 'app-model-reject',
+        model: 'adaptive',
+        permissionMode: 'default',
+      }, writer, runtimeContext);
+
+      const capture = JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8'));
+      assert.deepEqual(capture.args, ['acp', '--model', 'swe-2-high'], 'повтор идёт на swe-2-high');
+      const errors = writer.messages.filter((m) => m.kind === 'error');
+      assert.equal(errors.length, 0, 'человек не видит красной ошибки');
+      const notice = writer.messages.find((m) => m.kind === 'status' && String(m.text).includes('не приняла запрос'));
+      assert.ok(notice, 'в чате строка о повторе на другой модели');
+      assert.match(String(notice.text), /adaptive/);
+      assert.ok(writer.messages.some((m) => JSON.stringify(m).includes('LIVE-REPLY')), 'ответ пришёл');
+    } finally {
+      delete process.env.DEVIN_REJECT_MODEL;
+    }
+  });
+});
+
+test('devin runtime: swe-2-high rejected with invalid_argument is not retried — the error is shown', async () => {
+  await withFakeDevin(async (tempRoot) => {
+    process.env.DEVIN_REJECT_MODEL = 'swe-2-high';
+    try {
+      const writer = makeWriter();
+      await assert.rejects(() => devinRuntime.run('Hi', {
+        cwd: tempRoot,
+        sessionId: 'app-model-reject-default',
+        model: 'swe-2-high',
+        permissionMode: 'default',
+      }, writer, runtimeContext));
+      assert.ok(writer.messages.some((m) => m.kind === 'error'), 'ошибка показана');
+    } finally {
+      delete process.env.DEVIN_REJECT_MODEL;
+    }
+  });
+});
+
 test('devin runtime: /model, /fusion and /adaptive inside the chat are refused without starting the agent', async () => {
   for (const forbidden of ['/model opus', '  /fusion', '/Adaptive']) {
     await withFakeDevin(async (tempRoot) => {
@@ -324,7 +642,7 @@ test('devin runtime: /model, /fusion and /adaptive inside the chat are refused w
       const errors = writer.messages.filter((m) => m.kind === 'error');
       const completes = writer.messages.filter((m) => m.kind === 'complete');
       assert.equal(errors.length, 1, `${forbidden}: one error`);
-      assert.match(String(errors[0].content), /только SWE-2/);
+      assert.match(String(errors[0].content), /Смена модели Devin командой запрещена/);
       assert.equal(completes.length, 1, `${forbidden}: exactly one complete`);
       assert.equal(existsSync(process.env.DEVIN_RPC_CAPTURE), false, `${forbidden}: the agent must not have been started`);
     });
@@ -514,6 +832,54 @@ test('devin runtime: bypass auto-allows without touching the gateway', async () 
   });
 });
 
+test('devin runtime: structured prompt answer is not marked incomplete', async () => {
+  await withFakeDevin(async () => {
+    process.env.DEVIN_INCOMPLETE = 'structured_answer';
+    const writer = makeWriter();
+    await devinRuntime.run('Сделай промпт для поиска паст', { cwd: '/tmp', sessionId: 'app-struct-1' }, writer, runtimeContext);
+
+    const completes = writer.messages.filter((m) => m.kind === 'complete');
+    assert.equal(completes.length, 1, 'exactly one complete');
+    assert.equal(completes[0].exitCode, 0, 'structured answer completes successfully');
+    assert.ok(!writer.messages.some((m) => m.kind === 'error'), 'no error for structured answer');
+  });
+});
+
+test('devin runtime: completeness classifier regression', async () => {
+  const { isIncompleteDevinResponse } = await import('@/shared/utils.js');
+
+  // Оригинальный случай: только «Как я понял задачу» + обещание.
+  assert.equal(isIncompleteDevinResponse('## Как я понял задачу\n\nСейчас проверю данные.', false), true);
+  assert.equal(isIncompleteDevinResponse('Сейчас поищу информацию и вернусь.', false), true);
+  assert.equal(isIncompleteDevinResponse('Сейчас поищу информацию и вернусь с результатами.', false), true);
+  assert.equal(isIncompleteDevinResponse('Сейчас проверю данные.', false), true);
+  assert.equal(isIncompleteDevinResponse('Ещё не готово, продолжаю работу.', false), true);
+
+  // Статус в начале, но результат ниже.
+  assert.equal(isIncompleteDevinResponse('Сейчас проверю данные.\n\n## Ответ\n\nПроверка завершена.', false), false);
+  assert.equal(isIncompleteDevinResponse('Сейчас проверю данные\n\n## Ответ\n\nГотово', false), false);
+
+  // Результирующие заголовки и структура должны считаться успехом.
+  assert.equal(isIncompleteDevinResponse('## Возможные улучшения\n- пункт 1\n- пункт 2', false), false);
+  assert.equal(isIncompleteDevinResponse('## Версия «Максимум»\nТекст.', false), false);
+  assert.equal(isIncompleteDevinResponse('## Готовый промпт\n```text\nпромпт\n```', false), false);
+  assert.equal(isIncompleteDevinResponse('## Сравнение\n| a | b |\n|---|---|', false), false);
+  assert.equal(isIncompleteDevinResponse('1. один\n2. два\n3. три', false), false);
+
+  // Инструмент без последующего текста — не завершение.
+  assert.equal(isIncompleteDevinResponse('Проверяю данные.', true, ''), true);
+  assert.equal(isIncompleteDevinResponse('Проверяю данные.', true, 'Вот ответ.'), false);
+
+  // Реальный обрывный ответ из сессии sable-fragment (17.10.26) должен был
+  // считаться полноценным, а не ошибкой.
+  try {
+    const realText = await readFile('/tmp/sable-fragment-node41.txt', 'utf8');
+    assert.equal(isIncompleteDevinResponse(realText, false), false, 'real prompt answer should be complete');
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+  }
+});
+
 test('devin supervisor: ход переживает разрыв клиента, запрос разрешения доезжает до нового', async () => {
   await withFakeDevin(async () => {
     // session/prompt висит, пока не ответят на session/request_permission.
@@ -581,110 +947,5 @@ test('devin supervisor: ход переживает разрыв клиента,
     await waitFor(() => {
       try { process.kill(child.pid, 0); return false; } catch { return true; }
     }, 5000, 'agent reaped after disconnect without prompt');
-  });
-});
-
-test('devin runtime: model absent from session configOptions is not sent — fallback named once', async () => {
-  await withFakeDevin(async (tempRoot) => {
-    // Живой расклад слота 2 (10.10.26): аккаунту доступны только эти модели.
-    process.env.DEVIN_FAKE_MODEL_OPTIONS = 'swe-2-high,swe-2-low';
-    const writer = makeWriter();
-    await devinRuntime.run('Hi', {
-      cwd: tempRoot,
-      sessionId: 'app-unavail-1',
-      model: 'swe-2-max',
-    }, writer, runtimeContext);
-
-    const capture = JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8'));
-    assert.ok(
-      !capture.calls.some((c) => c.method === 'session/set_config_option'),
-      'модель, которой нет в списке аккаунта, в set_config_option не уходит',
-    );
-    const notices = writer.messages.filter((m) => m.kind === 'error' && String(m.content).includes('swe-2-max'));
-    assert.equal(notices.length, 1, 'одно честное уведомление о замене модели');
-    assert.match(String(notices[0].content), /swe-2-high/, 'названа фактическая модель');
-    assert.equal(writer.messages.filter((m) => m.kind === 'complete').length, 1);
-    assert.ok(writer.messages.some((m) => m.content === 'LIVE-REPLY'), 'ход завершён нормально');
-  });
-});
-
-test('devin runtime: model from session configOptions is sent as before; list cached per slot', async () => {
-  await withFakeDevin(async (tempRoot) => {
-    process.env.DEVIN_FAKE_MODEL_OPTIONS = 'swe-2-high,swe-2-low';
-    const writer = makeWriter();
-    await devinRuntime.run('Hi', {
-      cwd: tempRoot,
-      sessionId: 'app-avail-1',
-      model: 'swe-2-low',
-    }, writer, runtimeContext);
-
-    const capture = JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8'));
-    const setModel = capture.calls.find((c) => c.method === 'session/set_config_option');
-    assert.equal(setModel?.params?.value, 'swe-2-low', 'доступная модель идёт агенту как раньше');
-    assert.ok(!writer.messages.some((m) => m.kind === 'error'), 'без уведомлений о замене');
-
-    // Список сессии сложился в кэш слота — пикер читает его из файла.
-    const { readSlotModelOptions } = await import('./devin-runtime.provider.js');
-    const { getActiveDevinSlot } = await import('@/shared/devin-slots.js');
-    const slot = getActiveDevinSlot();
-    const file = path.join(tempRoot, '.cloudcli-shared', `devin-model-options-${slot}.json`);
-    assert.ok(existsSync(file), 'список сохранён в файл слота');
-    const opts = readSlotModelOptions(slot);
-    assert.ok(opts instanceof Set);
-    assert.ok(opts.has('swe-2-low') && opts.has('swe-2-high'));
-    assert.ok(!opts.has('swe-2-max'));
-  });
-});
-
-test('devin runtime: session_locked retryable — повтор load, ход не падает', async () => {
-  await withFakeDevin(async (tempRoot) => {
-    process.env.DEVIN_LOAD_LOCKED_ONCE = '1';
-    const writer = makeWriter();
-    await devinRuntime.run('Hi', { cwd: tempRoot, sessionId: 'app-resume' }, writer, runtimeContext);
-
-    const capture = JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8'));
-    const loads = capture.calls.filter((c) => c.method === 'session/load');
-    assert.equal(loads.length, 2, 'замок retryable — один повтор session/load');
-    assert.ok(writer.messages.some((m) => m.content === 'LIVE-REPLY'), 'ход завершился, не упал на замке');
-    assert.equal(writer.messages.filter((m) => m.kind === 'complete').length, 1);
-  });
-});
-
-test('devin runtime: session_locked с живым держателем — ждёт его конца, не ошибка', async () => {
-  await withFakeDevin(async (tempRoot) => {
-    // «Чужой» живой держатель: имя файла несёт 'devin' и 'acp' — ту же
-    // сигнатуру проверяет isDevinPidAlive по /proc/<pid>/cmdline.
-    const holderScript = path.join(tempRoot, 'devin-acp-holder.js');
-    await writeFile(holderScript, 'setInterval(() => {}, 1000);\n', 'utf8');
-    const holder = spawn(process.execPath, [holderScript], { stdio: 'ignore' });
-    const lockFile = path.join(tempRoot, 'locked');
-    process.env.DEVIN_LOAD_LOCK_FILE = lockFile;
-    process.env.DEVIN_LOCK_PID = String(holder.pid);
-    await writeFile(lockFile, '1', 'utf8');
-    try {
-      const writer = makeWriter();
-      const turn = devinRuntime.run('Hi', { cwd: tempRoot, sessionId: 'app-resume' }, writer, runtimeContext);
-      // Держатель «доработал» свой ход и отпустил замок.
-      setTimeout(() => {
-        try { holder.kill('SIGKILL'); } catch { /* уже нет */ }
-        rm(lockFile, { force: true }).catch(() => {});
-      }, 2500).unref();
-      await turn;
-
-      const capture = JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8'));
-      const loads = capture.calls.filter((c) => c.method === 'session/load');
-      assert.ok(loads.length >= 2, 'load повторялся, пока держатель был жив');
-      assert.ok(
-        writer.messages.some((m) => m.kind === 'status' && /ещё дописывается/.test(String(m.text || ''))),
-        'человеку видно ожидание, а не красную ошибку',
-      );
-      assert.ok(writer.messages.some((m) => m.content === 'LIVE-REPLY'), 'сообщение дошло после освобождения');
-      assert.equal(writer.messages.filter((m) => m.kind === 'complete').length, 1);
-      assert.ok(!writer.messages.some((m) => m.kind === 'error'), 'ошибки session_locked в ленте нет');
-    } finally {
-      try { holder.kill('SIGKILL'); } catch { /* уже нет */ }
-      delete process.env.DEVIN_LOAD_LOCK_FILE;
-      delete process.env.DEVIN_LOCK_PID;
-    }
   });
 });

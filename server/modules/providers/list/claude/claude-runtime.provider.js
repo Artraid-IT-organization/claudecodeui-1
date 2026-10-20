@@ -1277,6 +1277,11 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
     for await (const message of queryInstance) {
       lastMessageAt = Date.now();
 
+      // Первое событие CLI = промпт уже принят выживающим процессом
+      // (survivor-runs): перезапуск сайта ход не оборвёт. До этого момента
+      // ход ещё незаякорен и держит перезапуск в дрейне.
+      options.onPromptAnchored?.();
+
       // Лимиты подписки приходят прямо в потоке — забираем их бесплатно,
       // вместо отдельного прогона, который тратил бы ту же квоту.
       if (message?.type === 'rate_limit_event' && message.rate_limit_info) {

@@ -2,6 +2,7 @@ import fsSync from 'node:fs';
 
 import Database from 'better-sqlite3';
 
+import { devinConnectionsDb, sessionsDb } from '@/modules/database/index.js';
 import { parseFilesInputTag, parseImagesInputTag } from '@/shared/image-attachments.js';
 import type { IProviderSessions } from '@/shared/interfaces.js';
 import type {
@@ -14,6 +15,7 @@ import {
   createNormalizedMessage,
   generateMessageId,
   getDevinDatabasePath,
+  isDevinAutoContinueText,
   normalizeProviderTimestamp,
   readJsonRecord,
   readObjectRecord,
@@ -306,10 +308,10 @@ export class DevinSessionsProvider implements IProviderSessions {
   /**
    * Loads Devin history from the shared SQLite `sessions.db`.
    *
-   * `main_chain_id` points at the current context window, not the whole
-   * conversation — turns that fell out of the window stay in the table as
-   * detached branches. `fullDevinConversation` rebuilds the complete accepted
-   * history across all context snapshots (see devin-chain.ts).
+   * Devin stores every turn as a node in a parent-linked tree (`main_chain_id`
+   * points at the current tip; abandoned branches stay in the table), so
+   * history is reconstructed by walking parent links from the tip rather than
+   * by ordering the whole table.
    */
   async fetchHistory(
     sessionId: string,
@@ -317,7 +319,13 @@ export class DevinSessionsProvider implements IProviderSessions {
   ): Promise<FetchHistoryResult> {
     const { limit = null, offset = 0 } = options;
     const providerSessionId = options.providerSessionId ?? sessionId;
-    const db = openDevinDatabase();
+    // История живёт в sessions.db канала чата (Connection Layer), наследие —
+    // в машинной базе по умолчанию.
+    const sessionRow = sessionsDb.getSessionById(sessionId)
+      ?? sessionsDb.getSessionByProviderSessionId(providerSessionId);
+    const bound = sessionRow?.devin_connection_id;
+    const connXdg = bound != null ? devinConnectionsDb.getById(bound)?.xdg_data_home : null;
+    const db = openDevinDatabase(getDevinDatabasePath(connXdg ?? null));
     if (!db) {
       return { messages: [], total: 0, hasMore: false, offset: 0, limit: null };
     }
@@ -380,6 +388,11 @@ export class DevinSessionsProvider implements IProviderSessions {
 
       if (role === 'user' && metadata?.is_user_input) {
         const { text, images, files } = readUserMessageContent(message.content);
+        // Служебное автопродолжение (см. DEVIN_AUTO_CONTINUE_TAG) — не реплика
+        // человека: в ленте истории её не показываем.
+        if (isDevinAutoContinueText(text)) {
+          continue;
+        }
         if (text || images.length > 0 || files.length > 0) {
           normalized.push(createNormalizedMessage({
             id: `devin_${row.node_id}`,

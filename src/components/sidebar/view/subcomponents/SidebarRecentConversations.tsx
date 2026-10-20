@@ -1,17 +1,19 @@
-import { ChevronRight, MessageSquare } from 'lucide-react';
-import type { MouseEvent } from 'react';
+import { MessageSquare } from 'lucide-react';
+import { useMemo } from 'react';
 import type { TFunction } from 'i18next';
 
 import { Button } from '../../../../shared/view/ui';
-import { cn } from '../../../../lib/utils';
 import type { SessionActivityMap } from '../../../../hooks/useSessionProtection';
-import type { ProjectSession } from '../../../../types/app';
-import type { RecentConversationListItem } from '../../types/types';
-import { formatCompactAge, groupByRecency } from '../../utils/utils';
-import LLMProviderLogo from '../../../llm-provider-logo/LLMProviderLogo';
+import type { LLMProvider, Project, ProjectSession } from '../../../../types/app';
+import type { RecentConversationListItem, SessionWithProvider } from '../../types/types';
+import { groupByRecency } from '../../utils/utils';
+
+import SidebarSessionItem from './SidebarSessionItem';
 
 type SidebarRecentConversationsProps = {
   conversations: RecentConversationListItem[];
+  /** Все папки выбранного блока — по projectId строки находится её проект. */
+  projects: Project[];
   total: number;
   hasMore: boolean;
   isLoading: boolean;
@@ -19,14 +21,29 @@ type SidebarRecentConversationsProps = {
   hasError: boolean;
   selectedSession: ProjectSession | null;
   activeSessions: SessionActivityMap;
+  attentionSessionIds: ReadonlySet<string>;
   currentTime: Date;
-  onConversationSelect: (
-    projectId: string | null,
+  editingSession: string | null;
+  editingSessionName: string;
+  onEditingSessionNameChange: (value: string) => void;
+  onStartEditingSession: (sessionId: string, initialName: string) => void;
+  onCancelEditingSession: () => void;
+  onSaveEditingSession: (projectName: string, sessionId: string, summary: string, provider: LLMProvider) => void;
+  onProjectSelect: (project: Project) => void;
+  onSessionSelect: (session: SessionWithProvider, projectName: string) => void;
+  onDeleteSession: (
+    projectName: string,
     sessionId: string,
-    provider: string,
+    sessionTitle: string,
+    provider: LLMProvider,
   ) => void;
   onLoadMore: () => void;
   onRetry: () => void;
+  /** Служебные чаты (auto-запуски, «Промпты») скрыты; кнопка их возвращает. */
+  internalShown?: boolean;
+  onToggleInternal?: () => void;
+  searchQuery?: string;
+  searching?: boolean;
   t: TFunction;
 };
 
@@ -48,6 +65,7 @@ function RecentConversationSkeleton() {
 
 export default function SidebarRecentConversations({
   conversations,
+  projects,
   total,
   hasMore,
   isLoading,
@@ -55,12 +73,56 @@ export default function SidebarRecentConversations({
   hasError,
   selectedSession,
   activeSessions,
+  attentionSessionIds,
   currentTime,
-  onConversationSelect,
+  editingSession,
+  editingSessionName,
+  onEditingSessionNameChange,
+  onStartEditingSession,
+  onCancelEditingSession,
+  onSaveEditingSession,
+  onProjectSelect,
+  onSessionSelect,
+  onDeleteSession,
   onLoadMore,
   onRetry,
+  internalShown = false,
+  onToggleInternal,
+  searchQuery = '',
+  searching = false,
   t,
 }: SidebarRecentConversationsProps) {
+  /*
+   * Строки — обычный элемент чата (SidebarSessionItem), как внутри папок и в
+   * закреплённых «Промптах»: Егор 14.10.26 попросил «старый формат внешне» —
+   * карточка с точкой статуса, названием, возрастом и меню «…», а не узкая
+   * строка со стрелкой. Лента отдаёт урезанные поля, поэтому элемент чата
+   * собирается здесь: open/rename/delete идут по sessionId+projectId, остальное
+   * на строку не влияет.
+   */
+  const projectById = useMemo(
+    () => new Map(projects.map((project) => [project.projectId, project])),
+    [projects],
+  );
+  const sessionOf = (conversation: RecentConversationListItem): SessionWithProvider => ({
+    id: conversation.sessionId,
+    summary: conversation.sessionTitle,
+    lastActivity: conversation.lastActivity ?? undefined,
+    serverScope: conversation.serverScope ?? null,
+    flagged: conversation.flagged,
+    done: conversation.done,
+    __provider: conversation.provider,
+    __projectId: conversation.projectId ?? undefined,
+  });
+  const projectOf = (conversation: RecentConversationListItem): Project => (
+    (conversation.projectId && projectById.get(conversation.projectId)) || {
+      projectId: conversation.projectId ?? '',
+      displayName: conversation.projectDisplayName,
+      fullPath: '',
+      serverScope: conversation.serverScope,
+    }
+  );
+
   if (isLoading && conversations.length === 0) {
     return <RecentConversationSkeleton />;
   }
@@ -80,14 +142,17 @@ export default function SidebarRecentConversations({
   }
 
   if (conversations.length === 0) {
+    const hasQuery = searchQuery.trim().length > 0;
     return (
       <div className="px-4 py-10 text-center">
         <MessageSquare className="mx-auto mb-3 h-6 w-6 text-muted-foreground" />
         <p className="text-sm font-medium text-foreground">
-          {t('recent.emptyTitle', 'No conversations yet')}
+          {hasQuery && searching ? 'Ищу во всех чатах…' : hasQuery ? 'Ничего не найдено' : t('recent.emptyTitle', 'No conversations yet')}
         </p>
         <p className="mt-1 text-xs text-muted-foreground">
-          {t('recent.emptyDescription', 'Your most recently updated conversations will appear here.')}
+          {hasQuery
+            ? searching ? 'Проверяю названия и переписки.' : 'Попробуйте другое слово.'
+            : t('recent.emptyDescription', 'Your most recently updated conversations will appear here.')}
         </p>
       </div>
     );
@@ -121,6 +186,32 @@ export default function SidebarRecentConversations({
     ...groupByRecency(idle, currentTime, (item) => item.lastActivity),
   ];
 
+  const renderConversation = (conversation: RecentConversationListItem) => {
+    const session = sessionOf(conversation);
+    const project = projectOf(conversation);
+    return (
+      <SidebarSessionItem
+        key={conversation.sessionId}
+        project={project}
+        session={session}
+        selectedSession={selectedSession}
+        isProcessing={activeSessions.has(conversation.sessionId)}
+        needsAttention={attentionSessionIds.has(conversation.sessionId)}
+        currentTime={currentTime}
+        editingSession={editingSession}
+        editingSessionName={editingSessionName}
+        onEditingSessionNameChange={onEditingSessionNameChange}
+        onStartEditingSession={onStartEditingSession}
+        onCancelEditingSession={onCancelEditingSession}
+        onSaveEditingSession={onSaveEditingSession}
+        onProjectSelect={onProjectSelect}
+        onSessionSelect={onSessionSelect}
+        onDeleteSession={onDeleteSession}
+        t={t}
+      />
+    );
+  };
+
   return (
     <div className="px-1" data-testid="recent-conversations-list">
       <div className="flex items-center justify-between px-2 pb-1.5 pt-0.5">
@@ -131,84 +222,22 @@ export default function SidebarRecentConversations({
       </div>
 
       {groups.map((group) => (
-      <div key={group.key} className="space-y-0.5">
-        <div className="sticky top-0 z-10 flex items-baseline gap-1.5 bg-background/95 px-2 pb-1 pt-2 backdrop-blur-sm">
-          <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-            {t(`recent.group.${group.key}`, { defaultValue: group.title })}
-          </span>
-          <span className="text-[10px] tabular-nums text-muted-foreground/50">
-            {group.items.length}
-          </span>
+        <div key={group.key} className="space-y-1 pb-1">
+          <div className="flex items-center gap-1.5 px-2 pt-1">
+            {group.key === 'running' ? (
+              <span className="h-1.5 w-1.5 flex-shrink-0 animate-pulse rounded-full bg-green-500" aria-hidden />
+            ) : (
+              <span className="h-1 w-1 flex-shrink-0 rounded-full bg-muted-foreground/40" aria-hidden />
+            )}
+            <p className="truncate text-[10px] font-medium uppercase tracking-wide text-muted-foreground/80">
+              {t(`recent.group.${group.key}`, { defaultValue: group.title })}
+            </p>
+            <span className="flex-shrink-0 text-[10px] tabular-nums text-muted-foreground/50">
+              {group.items.length}
+            </span>
+          </div>
+          {group.items.map(renderConversation)}
         </div>
-        {group.items.map((conversation) => {
-          const isSelected = String(selectedSession?.id ?? '') === conversation.sessionId;
-          const isRunning = activeSessions.has(conversation.sessionId);
-          const age = isRunning
-            ? formatCompactAge(activeSessions.get(conversation.sessionId)?.startedAt, currentTime)
-            : formatCompactAge(conversation.lastActivity, currentTime);
-
-          const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
-            if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
-              return;
-            }
-            event.preventDefault();
-            onConversationSelect(
-              conversation.projectId,
-              conversation.sessionId,
-              conversation.provider,
-            );
-          };
-
-          return (
-            <a
-              key={conversation.sessionId}
-              href={`/session/${conversation.sessionId}`}
-              onClick={handleClick}
-              data-testid="recent-conversation-row"
-              className={cn(
-                'group flex min-w-0 items-center gap-2 rounded-lg px-2 py-2 text-left transition-colors',
-                isSelected
-                  ? 'bg-primary/10 text-foreground'
-                  : 'text-foreground hover:bg-accent/60',
-              )}
-            >
-              <span className={cn(
-                'flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md',
-                isSelected ? 'bg-primary/10' : 'bg-muted/60',
-              )}>
-                <LLMProviderLogo provider={conversation.provider} className="h-3.5 w-3.5" />
-              </span>
-
-              {isRunning && (
-                <span
-                  role="status"
-                  aria-label={t('tooltips.runningNow', { defaultValue: 'Клод работает сейчас' })}
-                  className="h-2 w-2 flex-shrink-0 animate-pulse rounded-full bg-green-500"
-                />
-              )}
-
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-[13px] font-normal leading-4">
-                  {conversation.sessionTitle}
-                </span>
-                <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[10px] leading-3 text-muted-foreground">
-                  <span className="truncate">{conversation.projectDisplayName}</span>
-                  {age && (
-                    <>
-                      <span className="flex-shrink-0 text-muted-foreground/40">·</span>
-                      <time className="flex-shrink-0 tabular-nums" dateTime={conversation.lastActivity ?? undefined}>
-                        {age}
-                      </time>
-                    </>
-                  )}
-                </span>
-              </span>
-
-              <ChevronRight className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground/40 transition-transform group-hover:translate-x-0.5 group-hover:text-muted-foreground" />
-            </a>
-          );
-        })}
-      </div>
       ))}
 
       {hasMore && (
@@ -223,6 +252,16 @@ export default function SidebarRecentConversations({
             ? t('recent.loadingMore', 'Loading more...')
             : t('recent.loadMore', 'Load older conversations')}
         </Button>
+      )}
+
+      {onToggleInternal && (
+        <button
+          type="button"
+          onClick={onToggleInternal}
+          className="mt-1 w-full rounded-md px-2 py-1 text-center text-[10px] text-muted-foreground/50 transition-colors hover:bg-accent/40 hover:text-muted-foreground"
+        >
+          {internalShown ? 'Скрыть служебные чаты' : 'Показать служебные чаты'}
+        </button>
       )}
     </div>
   );

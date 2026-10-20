@@ -2,7 +2,8 @@ import { ChevronDown } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { useCodexAccount, useSelectedChatProvider } from '../../../../hooks/useCodexAccount';
+import { useCodexAccount } from '../../../../hooks/useCodexAccount';
+import { useDevinAccount } from '../../../../hooks/useDevinAccount';
 import { api } from '../../../../utils/api';
 import { cn } from '../../../../lib/utils';
 
@@ -76,12 +77,8 @@ export default function SidebarUsageLimits() {
   const [isOpen, setIsOpen] = useState(true);
   // Подписка Codex (третий аккаунт) — те же два окна, числа прямо от Codex.
   const codex = useCodexAccount();
-  // Показываем окна того аккаунта, с которым идёт работа, — не оба сразу.
-  const selectedProvider = useSelectedChatProvider();
-  const showCodex = selectedProvider === 'codex' && Boolean(codex?.available);
-  // У Devin окон лимитов нет (квота — на app.devin.ai); лимиты Claude в его
-  // режиме не показываем: они к этой работе не относятся.
-  const devinMode = selectedProvider === 'devin';
+  // Подписка Devin — дневное и недельное окна квоты (пятичасового нет).
+  const devin = useDevinAccount();
 
   const load = useCallback(async () => {
     try {
@@ -128,7 +125,7 @@ export default function SidebarUsageLimits() {
     return () => document.removeEventListener('visibilitychange', onVisible);
   }, [load]);
 
-  const codexRows: UsageLimit[] = showCodex && codex
+  const codexRows: UsageLimit[] = codex?.available
     ? codex.limits
       .filter((limit) => !limit.expired && VISIBLE_KINDS.includes(limit.kind))
       .map((limit) => ({
@@ -141,9 +138,32 @@ export default function SidebarUsageLimits() {
         expired: false,
       }))
     : [];
-  if (devinMode || (showCodex ? codexRows.length === 0 : !hasRows)) {
+  const devinRows: UsageLimit[] = devin?.available
+    ? devin.limits
+      .filter((limit) => !limit.expired && ['daily', 'weekly'].includes(limit.kind))
+      .map((limit) => ({
+        kind: limit.kind,
+        percent: limit.percent,
+        // Порогов предупреждения Devin не присылает — ставим свои.
+        severity: limit.percent >= 90 ? 'critical' : limit.percent >= 75 ? 'warning' : 'normal',
+        resetsAt: limit.resetsAt,
+        modelName: null,
+        expired: false,
+      }))
+    : [];
+
+  // Подпись группы обязательна у любого не-Claude источника: без неё чужие
+  // окна выглядят как «лимиты вообще» — так цифры Codex однажды приняли за
+  // лимиты Devin. Заголовок прячем только когда показан один Claude.
+  const groups = [
+    { key: 'claude', title: 'Claude', rows },
+    { key: 'codex', title: 'Codex', rows: codexRows },
+    { key: 'devin', title: 'Devin', rows: devinRows },
+  ].filter((group) => group.rows.length > 0);
+  if (groups.length === 0) {
     return null;
   }
+  const showGroupTitles = groups.length > 1 || groups[0].key !== 'claude';
 
   const isStale = payload?.fetchedAtMs
     ? Date.now() - payload.fetchedAtMs > STALE_AFTER_MS
@@ -153,7 +173,10 @@ export default function SidebarUsageLimits() {
     if (limit.kind === 'session') {
       return t('usage.session', { defaultValue: 'Сеанс (5 ч)' });
     }
-    if (limit.kind === 'weekly_all') {
+    if (limit.kind === 'daily') {
+      return t('usage.daily', { defaultValue: 'День (24 ч)' });
+    }
+    if (limit.kind === 'weekly' || limit.kind === 'weekly_all') {
       return t('usage.weekly', { defaultValue: 'Неделя (7 дней)' });
     }
     return t('usage.other', { defaultValue: 'Прочий лимит' });
@@ -215,7 +238,16 @@ export default function SidebarUsageLimits() {
 
       {isOpen && (
         <div className="mt-2 space-y-2">
-          {showCodex ? renderRows(codexRows, 'codex') : renderRows(rows, 'claude')}
+          {groups.map((group, index) => (
+            <div key={group.key}>
+              {showGroupTitles && (
+                <p className={cn('text-[10px] font-medium text-muted-foreground', index > 0 && 'pt-1')}>
+                  {group.title}
+                </p>
+              )}
+              {renderRows(group.rows, group.key)}
+            </div>
+          ))}
         </div>
       )}
     </div>

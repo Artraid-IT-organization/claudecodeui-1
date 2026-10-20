@@ -61,7 +61,7 @@ router.post(
   '/discuss',
   asyncHandler(async (_req: Request, res: Response) => {
     const userId = getRequestRuntimeContext()?.userId;
-    const result = openDiscussChat(userId !== null && userId !== undefined ? String(userId) : null);
+    const result = await openDiscussChat(userId !== null && userId !== undefined ? String(userId) : null);
     res.status(201).json(createApiSuccessResponse(result));
   }),
 );

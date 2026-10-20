@@ -85,6 +85,40 @@ test('при остановке сервера уборка SDK не убива�
   });
 });
 
+test('копия сайта со своей базой не усыновляет живые ходы боя (19.10.26: «чат ещё занят»)', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'runs-per-db-'));
+  const previousDir = process.env.CLOUDCLI_LIVE_RUNS_DIR;
+  const previousDb = process.env.DATABASE_PATH;
+  delete process.env.CLOUDCLI_LIVE_RUNS_DIR;
+  resetSurvivorsForTests();
+  try {
+    process.env.DATABASE_PATH = path.join(root, 'prod', 'auth.db');
+    const child = spawnSurvivableClaude(fakeAgent(60000), { appSessionId: 'prod-chat' });
+    assert.equal((await readdir(path.join(root, 'prod', 'live-runs'))).length, 1, 'запись — рядом с базой боя');
+    markShuttingDown();
+
+    // Пробная копия: та же домашняя папка, своя база.
+    resetSurvivorsForTests();
+    process.env.DATABASE_PATH = path.join(root, 'test-copy', 'auth.db');
+    assert.deepEqual(adoptSurvivors({ pollMs: 0 }), [], 'копия чужой ход не видит');
+    assert.equal(isSurvivorRunning('prod-chat'), false);
+
+    // Сам бой после перезапуска свой ход находит.
+    resetSurvivorsForTests();
+    process.env.DATABASE_PATH = path.join(root, 'prod', 'auth.db');
+    assert.deepEqual(adoptSurvivors({ pollMs: 0 }).map((run) => run.sessionId), ['prod-chat']);
+    assert.equal(stopSurvivor('prod-chat'), true);
+    await waitFor(() => !alive(child.pid as number));
+  } finally {
+    resetSurvivorsForTests();
+    if (previousDir === undefined) delete process.env.CLOUDCLI_LIVE_RUNS_DIR;
+    else process.env.CLOUDCLI_LIVE_RUNS_DIR = previousDir;
+    if (previousDb === undefined) delete process.env.DATABASE_PATH;
+    else process.env.DATABASE_PATH = previousDb;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('обычное завершение агента убирает запись, мёртвые записи не усыновляются', async () => {
   await withLiveDir(async (dir) => {
     const child = spawnSurvivableClaude(fakeAgent(200), { appSessionId: 'chat-2' });
@@ -288,7 +322,7 @@ test('переживший агент: этап известен сразу по
       await new Promise((resolve) => setTimeout(resolve, 20));
       await appendFile(transcript, toolResult('a1'));
       const phases: unknown[] = [];
-      pollSurvivors({ onPhase: (_id: string, phase: { phase: string; detail: string | null } | null) => { phases.push(phase); } });
+      pollSurvivors({ onPhase: (_id: string, phase: { phase: string; detail: string | null } | null, _provider: string) => { phases.push(phase); } });
       assert.deepEqual(phases, [{ phase: 'reading', detail: null }]);
 
       let repeats = 0;

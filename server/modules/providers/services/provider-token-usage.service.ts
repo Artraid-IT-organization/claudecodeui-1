@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import Database from 'better-sqlite3';
 
-import { sessionsDb } from '@/modules/database/index.js';
+import { devinConnectionsDb, sessionsDb } from '@/modules/database/index.js';
 import { readDevinTokenUsage } from '@/modules/providers/list/devin/devin-usage.js';
 import { resolveClaudeContextWindow } from '@/modules/providers/services/claude-context-window.js';
 import type { AnyRecord } from '@/shared/types.js';
@@ -175,6 +175,8 @@ type ClaudeScanState = {
   size: number;
   mtimeMs: number;
   offset: number;
+  /** true, когда дочитали файл до конца — `session.*` итоги полные. */
+  complete: boolean;
   pending: string;
   requests: Map<string, UsageParts>;
   totals: UsageParts;
@@ -188,6 +190,20 @@ const scanStates = new Map<string, ClaudeScanState>();
 const SCAN_STATE_LIMIT = 64;
 const SCAN_CHUNK_BYTES = 4 * 1024 * 1024;
 
+// Запрос счётчика больше не ждёт разбор всей стенограммы: у чатов в десятки
+// мегабайт первый проход занимал 8–10 с однопоточного процессора, и на это
+// время вставала вся очередь запросов сайта (замер 14.10.26: 98 МБ → 10,1 с).
+// Кнопке у поля ввода нужны только последний счёт и модель — они читаются с
+// конца файла за десятки миллисекунд. Файлы меньше порога разбираются сразу
+// целиком (как раньше), большие отдают быстрый ответ без `session`-итогов, а
+// полный разбор догоняет в фоне и кладётся в тот же кэш для следующих запросов.
+const TAIL_ANSWER_MIN_FILE_BYTES = 4 * 1024 * 1024;
+const TAIL_SCAN_CHUNK_BYTES = 1 * 1024 * 1024;
+const TAIL_SCAN_MAX_BYTES = 24 * 1024 * 1024;
+
+/** Полный разбор одного файла идёт в единственном экземпляре. */
+const runningFullScans = new Map<string, Promise<ClaudeScanState>>();
+
 function emptyParts(): UsageParts {
   return { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
 }
@@ -197,6 +213,7 @@ function newScanState(): ClaudeScanState {
     size: 0,
     mtimeMs: 0,
     offset: 0,
+    complete: false,
     pending: '',
     requests: new Map(),
     totals: emptyParts(),
@@ -307,6 +324,10 @@ async function scanClaudeTranscript(filePath: string): Promise<ClaudeScanState> 
         state.pending = tail.toString('utf8');
         state.offset += bytesRead;
         for (const line of text.split('\n')) applyClaudeLine(state, line);
+        // Между кусками отдаём событийный цикл: без уступки полный разбор
+        // многомегабайтной стенограммы — один сплошной CPU-блок на десятки
+        // секунд, в который встают все прочие запросы сайта.
+        await new Promise((resolve) => setImmediate(resolve));
       }
     } finally {
       await handle.close();
@@ -314,6 +335,9 @@ async function scanClaudeTranscript(filePath: string): Promise<ClaudeScanState> 
   }
   state.size = stat.size;
   state.mtimeMs = stat.mtimeMs;
+  if (state.offset >= stat.size) {
+    state.complete = true;
+  }
   scanStates.delete(filePath);
   scanStates.set(filePath, state);
   if (scanStates.size > SCAN_STATE_LIMIT) {
@@ -321,6 +345,138 @@ async function scanClaudeTranscript(filePath: string): Promise<ClaudeScanState> 
     if (oldest) scanStates.delete(oldest);
   }
   return state;
+}
+
+/**
+ * Быстрый ответ для кнопки счётчика: читаем файл С КОНЦА кусками и ищем
+ * последнее значимое событие — ответ основной ветки с usage или границу
+ * сжатия. Ничего не знает про суммы за чат (`session.*`) — их считает только
+ * полный разбор. `found` false = в хвосте значимых строк не нашлось, тогда
+ * вызывающий идёт полным разбором.
+ */
+async function scanClaudeTranscriptTail(filePath: string): Promise<ClaudeScanState | null> {
+  const stat = await fsp.stat(filePath);
+  const state = newScanState();
+  const handle = await fsp.open(filePath, 'r');
+  try {
+    // Идём от конца кусками. Строка, обрезанная куском у НАЧАЛА, остаётся в
+    // `pending` и доклеивается к следующему (более раннему) куску — как в
+    // прямом разборе, только в обратную сторону. Байтовая позиция каждой
+    // строки нужна лишь для сравнения «что позже»: usage или граница сжатия.
+    let end = stat.size;
+    let pending = '';
+    let scanned = 0;
+    let lastUsage: (UsageParts & { model: string | null; bytePos: number }) | null = null;
+    let lastBoundary: { postTokens: number; preTokens: number; bytePos: number } | null = null;
+    let maxObserved = 0;
+
+    while (end > 0 && scanned < TAIL_SCAN_MAX_BYTES && !(lastUsage && lastBoundary)) {
+      const length = Math.min(TAIL_SCAN_CHUNK_BYTES, end);
+      const start = end - length;
+      const buffer = Buffer.alloc(length);
+      const { bytesRead } = await handle.read(buffer, 0, length, start);
+      if (bytesRead <= 0) break;
+      scanned += bytesRead;
+      const appendedBytes = pending ? Buffer.byteLength(pending) : 0;
+      let text = buffer.subarray(0, bytesRead).toString('utf8') + pending;
+      if (start > 0) {
+        const firstNl = text.indexOf('\n');
+        if (firstNl === -1) {
+          // Кусок — одна недописанная строка: уходит в pending целиком.
+          pending = text;
+          end = start;
+          continue;
+        }
+        pending = text.slice(0, firstNl);
+        text = text.slice(firstNl + 1);
+      } else {
+        pending = '';
+      }
+      // Якорь позиций — файловый КОНЕЦ этого блока текста: старый end плюс
+      // байты доклеенного pending (фрагмент головы ПРОШЛОГО куска живёт в
+      // файле сразу за концом свежего куска, не перед ним).
+      const blockEnd = end + appendedBytes;
+      end = start;
+      const lines = text.split('\n');
+      // Приблизительная позиция строки в файле — хватает для сравнения порядка.
+      let lineEnd = blockEnd;
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i];
+        lineEnd -= line.length + 1;
+        if (!line || (!line.includes('"usage"') && !line.includes('compact_boundary'))) continue;
+        let entry: AnyRecord;
+        try {
+          entry = JSON.parse(line) as AnyRecord;
+        } catch {
+          continue;
+        }
+        if (entry.type === 'system' && entry.subtype === 'compact_boundary') {
+          if (!lastBoundary) {
+            const meta = entry.compactMetadata ?? {};
+            lastBoundary = {
+              postTokens: Math.max(0, readUsageNumber(meta.postTokens ?? meta.post_tokens)),
+              preTokens: Math.max(0, readUsageNumber(meta.preTokens ?? meta.pre_tokens)),
+              bytePos: lineEnd,
+            };
+          }
+          continue;
+        }
+        const usage = entry.type === 'assistant' ? entry.message?.usage : null;
+        if (!usage || typeof usage !== 'object') continue;
+        const parts = readUsageParts(usage as AnyRecord);
+        const isEmpty = parts.input + parts.output + parts.cacheRead + parts.cacheCreation === 0;
+        if (isEmpty) continue;
+        const model = typeof entry.message?.model === 'string' ? entry.message.model : null;
+        const isMainChain = entry.isSidechain !== true && !entry.isApiErrorMessage && model !== '<synthetic>';
+        if (!isMainChain || contextOf(parts) <= 0) continue;
+        maxObserved = Math.max(maxObserved, contextOf(parts));
+        if (!lastUsage) {
+          lastUsage = { ...parts, model, bytePos: lineEnd };
+        }
+      }
+      // Уступаем цикл между кусками — как в полном разборе.
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    if (!lastUsage && !lastBoundary) return null;
+
+    if (lastBoundary && (!lastUsage || lastBoundary.bytePos > lastUsage.bytePos)) {
+      state.compactPostTokens = lastBoundary.postTokens > 0 ? lastBoundary.postTokens : null;
+      state.maxObservedContext = Math.max(maxObserved, lastBoundary.preTokens);
+    } else if (lastUsage) {
+      state.lastMain = { ...lastUsage };
+      state.maxObservedContext = maxObserved;
+    }
+    if (lastUsage?.model) state.model = lastUsage.model;
+    state.size = stat.size;
+    state.mtimeMs = stat.mtimeMs;
+    return state;
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * Полный разбор в единственном экземпляре на файл: параллельные запросы и
+ * фоновая добивка делят один проход.
+ */
+function runScanDeduped(filePath: string): Promise<ClaudeScanState> {
+  const running = runningFullScans.get(filePath);
+  if (running) return running;
+  const task = scanClaudeTranscript(filePath)
+    .finally(() => {
+      runningFullScans.delete(filePath);
+    });
+  runningFullScans.set(filePath, task);
+  return task;
+}
+
+/**
+ * Полный разбор в фоне: следующий запрос получит `session.*` итоги из кэша.
+ * Ошибки гасим — фон не должен ронять процесс; следующий запрос попробует снова.
+ */
+function scheduleFullScan(filePath: string): void {
+  void runScanDeduped(filePath).catch(() => undefined);
 }
 
 function buildClaudeTokenUsage(
@@ -348,15 +504,22 @@ function buildClaudeTokenUsage(
     contextWindow,
     contextPercent: contextWindow > 0 ? Math.round((contextTokens / contextWindow) * 1000) / 10 : 0,
     model: state.model,
-    session: {
-      inputTokens: sessionInput,
-      outputTokens: totals.output,
-      freshInputTokens: totals.input,
-      cacheReadTokens: totals.cacheRead,
-      cacheCreationTokens: totals.cacheCreation,
-      totalTokens: sessionInput + totals.output,
-      requests: state.requests.size,
-    },
+    // Суммы за весь чат — только когда разбор дошёл до конца файла. У быстрого
+    // ответа с хвоста их нет: непроверенные «итоги» хуже, чем их отсутствие —
+    // потребитель увидит `session === undefined` и поймёт, что данных пока нет.
+    ...(state.complete
+      ? {
+        session: {
+          inputTokens: sessionInput,
+          outputTokens: totals.output,
+          freshInputTokens: totals.input,
+          cacheReadTokens: totals.cacheRead,
+          cacheCreationTokens: totals.cacheCreation,
+          totalTokens: sessionInput + totals.output,
+          requests: state.requests.size,
+        },
+      }
+      : {}),
   };
 }
 
@@ -450,11 +613,15 @@ export function createProviderTokenUsageService(
       const providerSessionId = session.provider_session_id || session.session_id || sessionId;
 
       if (session.provider === 'devin') {
-        // Devin пишет расход каждого ответа в свою sessions.db — читаем его,
-        // как читаем стенограмму Claude. Беседы у Devin нет (чат без ходов) —
-        // нули, но окно уже настоящее, а не «недоступно».
+        // Devin пишет расход каждого ответа в sessions.db своего канала —
+        // читаем его, как читаем стенограмму Claude. Беседы у Devin нет (чат
+        // без ходов) — нули, но окно уже настоящее, а не «недоступно».
+        const connXdg = session.devin_connection_id != null
+          ? devinConnectionsDb.getById(session.devin_connection_id)?.xdg_data_home
+          : null;
         const usage = dependencies.readDevinTokenUsage(providerSessionId, {
           modelHint: session.model,
+          xdgDataHome: connXdg ?? null,
         });
         if (usage) {
           return usage;
@@ -549,7 +716,33 @@ export function createProviderTokenUsageService(
         });
       }
 
-      const state = await scanClaudeTranscript(sessionFilePath);
+      const statNow = await fsp.stat(sessionFilePath);
+      let state = scanStates.get(sessionFilePath);
+      const cacheCurrent = Boolean(
+        state?.complete && state.size === statNow.size && state.mtimeMs === statNow.mtimeMs,
+      );
+      if (!cacheCurrent) {
+        // Инкрементальная добивка дописанного хвоста дёшево — делаем её сразу.
+        // Полный разбор большого файла в ответе не ждём: кнопке хватает хвоста.
+        const incrementalIsCheap = Boolean(state?.complete) && statNow.size >= (state?.size ?? 0);
+        if (statNow.size >= TAIL_ANSWER_MIN_FILE_BYTES && !incrementalIsCheap) {
+          const tailState = await scanClaudeTranscriptTail(sessionFilePath);
+          if (tailState) {
+            scheduleFullScan(sessionFilePath);
+            state = tailState;
+          } else {
+            state = await runScanDeduped(sessionFilePath);
+          }
+        } else {
+          state = await runScanDeduped(sessionFilePath);
+        }
+      }
+      if (!state) {
+        throw new AppError(`Session file for "${sessionId}" could not be scanned.`, {
+          code: 'SESSION_SCAN_FAILED',
+          statusCode: 500,
+        });
+      }
       const configuredWindow = Number.parseInt(dependencies.getClaudeContextWindow() ?? '', 10);
       const contextWindow = Number.isFinite(configuredWindow) && configuredWindow > 0
         ? configuredWindow

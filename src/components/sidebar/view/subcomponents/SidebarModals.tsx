@@ -3,7 +3,9 @@ import ReactDOM from 'react-dom';
 import { AlertTriangle, EyeOff, Trash2 } from 'lucide-react';
 import type { TFunction } from 'i18next';
 import { Button } from '../../../../shared/view/ui';
-import VersionUpgradeModal from '../../../version-upgrade/view';
+// Окно «доступна новая версия» — по требованию: оно тянет react-markdown,
+// который иначе входил в стартовую загрузку каждой страницы (14.10.26).
+const VersionUpgradeModal = lazy(() => import('../../../version-upgrade/view'));
 import type { Project } from '../../../../types/app';
 import type { ReleaseInfo } from '../../../../shared/types';
 import type { InstallMode } from '../../../../hooks/useVersionCheck';
@@ -221,14 +223,18 @@ export default function SidebarModals({
           document.body,
         )}
 
-      <VersionUpgradeModal
-        isOpen={showVersionModal}
-        onClose={onCloseVersionModal}
-        releaseInfo={releaseInfo}
-        currentVersion={currentVersion}
-        latestVersion={latestVersion}
-        installMode={installMode}
-      />
+      {showVersionModal && (
+        <Suspense fallback={null}>
+          <VersionUpgradeModal
+            isOpen={showVersionModal}
+            onClose={onCloseVersionModal}
+            releaseInfo={releaseInfo}
+            currentVersion={currentVersion}
+            latestVersion={latestVersion}
+            installMode={installMode}
+          />
+        </Suspense>
+      )}
     </>
   );
 }

@@ -163,6 +163,8 @@ function Sidebar({
     isArchivedSessionsLoading,
     recentConversations,
     recentConversationsTotal,
+    showInternalChats,
+    toggleInternalChats,
     recentConversationsHasMore,
     isRecentConversationsLoading,
     isLoadingMoreRecentConversations,
@@ -343,6 +345,8 @@ function Sidebar({
             archivedSessionsCount={archivedSessionsCount}
             isArchivedSessionsLoading={isArchivedSessionsLoading}
             recentConversations={recentConversations}
+            showInternalChats={showInternalChats}
+            onToggleInternalChats={toggleInternalChats}
             recentConversationsTotal={recentConversationsTotal}
             recentConversationsHasMore={recentConversationsHasMore}
             isRecentConversationsLoading={isRecentConversationsLoading}

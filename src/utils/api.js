@@ -290,16 +290,17 @@ export const api = {
   // делает сервер: страница берётся по 40 чатов, и отбор после выдачи
   // оставлял бы второй блок почти пустым.
   /**
-   * @param {{ limit?: number, offset?: number, serverScope?: 'main' | 'second', providerSpace?: 'codex' | 'devin' | 'claude' }} [options]
+   * @param {{ limit?: number, offset?: number, serverScope?: 'main' | 'second', providerSpace?: 'codex' | 'devin' | 'claude', includeInternal?: boolean }} [options]
    */
   recentConversations: (options = {}) => {
-    const { limit = 40, offset = 0, serverScope, providerSpace } = options;
+    const { limit = 40, offset = 0, serverScope, providerSpace, includeInternal } = options;
     const params = new URLSearchParams({
       limit: String(limit),
       offset: String(offset),
     });
     if (serverScope) params.set('serverScope', serverScope);
     if (providerSpace) params.set('space', providerSpace);
+    if (includeInternal) params.set('includeInternal', '1');
     return authenticatedFetch(`/api/providers/sessions/recent?${params.toString()}`);
   },
   providerSessionId: (sessionId) =>
@@ -327,6 +328,7 @@ export const api = {
     const params = new URLSearchParams({ q: query, limit: String(limit) });
     if (scope.projectId) params.set('projectId', scope.projectId);
     if (scope.serverScope) params.set('serverScope', scope.serverScope);
+    if (scope.providerSpace) params.set('space', scope.providerSpace);
     if (token) params.set('token', token);
     return `${getDoorBase()}/api/providers/search/sessions?${params.toString()}`;
   },
@@ -356,11 +358,17 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ serverScope }),
     }),
-  // Вешает (true) или снимает (false) ярлык-флажок на чате.
-  setSessionFlagged: (sessionId, flagged) =>
-    authenticatedFetch(`/api/providers/sessions/${encodeURIComponent(sessionId)}/flag`, {
+  // Устанавливает метку чата: 'none', 'flag' или 'done'.
+  setSessionMark: (sessionId, mark) =>
+    authenticatedFetch(`/api/providers/sessions/${encodeURIComponent(sessionId)}/mark`, {
       method: 'POST',
-      body: JSON.stringify({ flagged }),
+      body: JSON.stringify({ mark }),
+    }),
+  // Отмечает чат «Промптов» как использованный кнопкой «В новый чат».
+  setSessionPromptLaunched: (sessionId, launched = true) =>
+    authenticatedFetch(`/api/providers/sessions/${encodeURIComponent(sessionId)}/prompt-launched`, {
+      method: 'POST',
+      body: JSON.stringify({ launched }),
     }),
   // Clusters this project's currently ungrouped sessions by topic via one
   // LLM call. Assignments land through the usual session_upserted websocket
@@ -495,6 +503,7 @@ export const api = {
   user: {
     usageLimits: () => authenticatedFetch('/api/user/usage-limits'),
     codexAccount: () => authenticatedFetch('/api/user/codex-account'),
+    devinAccount: () => authenticatedFetch('/api/user/devin-account'),
     devinAccount: () => authenticatedFetch('/api/user/devin-account'),
     devinSelectSlot: (slot) =>
       authenticatedFetch('/api/user/devin-account/slot', {

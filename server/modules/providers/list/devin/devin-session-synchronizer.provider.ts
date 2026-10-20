@@ -4,10 +4,11 @@ import path from 'node:path';
 
 import Database from 'better-sqlite3';
 
-import { sessionsDb } from '@/modules/database/index.js';
+import { devinConnectionsDb, sessionsDb } from '@/modules/database/index.js';
 import type { IProviderSessionSynchronizer } from '@/shared/interfaces.js';
 import {
   getDevinDatabasePath,
+  getDevinDataDir,
   normalizeProviderTimestamp,
   normalizeSessionName,
   readOptionalString,
@@ -31,17 +32,6 @@ type DevinSessionRow = {
   last_activity_at: number | null;
 };
 
-type SynchronizeRowsResult = {
-  processed: number;
-  firstSessionId: string | null;
-};
-
-/**
- * How many distinct user messages a chat needs before its Devin-generated
- * title may replace the naive first-words name. The prompt start is an
- * acceptable placeholder early on, but the topic only becomes clear after a
- * couple of exchanges — promote once the conversation has that context.
- */
 const MIN_USER_MESSAGES_FOR_TITLE = 2;
 
 /**
@@ -92,20 +82,6 @@ function messageText(chatMessageJson: string): string | undefined {
   return undefined;
 }
 
-/**
- * Devin's session store is machine-global: stamp rows with the owner's account
- * dir — the server's own config dir, NOT the request context (a guest listing
- * projects triggers this sync and must not claim the owner's sessions).
- */
-function getMachineAccountDir(): string {
-  const dir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
-  try {
-    return fsSync.realpathSync.native(dir);
-  } catch {
-    return path.resolve(dir);
-  }
-}
-
 /** Чего достаточно модели для имени: сессия, папка, черновик CLI и первые реплики. */
 type TitleCandidate = {
   sessionId: string;
@@ -116,17 +92,44 @@ type TitleCandidate = {
   updatedAt: number | null;
 };
 
+type SynchronizeRowsResult = {
+  processed: number;
+  firstSessionId: string | null;
+};
+
 /**
- * Session indexer for Devin's shared `sessions.db` (`~/.local/share/devin/cli`).
+ * Devin's session store is machine-global: stamp rows with the owner's account
+ * dir — the server's own config dir, NOT the request context (a guest listing
+ * projects triggers this sync and must not claim the owner's sessions).
+ * Каноническое написание пути: realpath, а при недоступном/несуществующем
+ * пути — разрешённый абсолют. Симлинки team-access (`workspace/work` →
+ * `people/<имя>/home/work`) схлопываются в одно написание.
+ */
+function resolveCanonicalPath(dir: string): string {
+  try {
+    return fsSync.realpathSync.native(dir);
+  } catch {
+    return path.resolve(dir);
+  }
+}
+
+function getMachineAccountDir(): string {
+  const dir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+  return resolveCanonicalPath(dir);
+}
+
+/**
+ * Session indexer for Devin's `sessions.db` files. С Connection Layer база —
+ * одна на канал (`<xdg_data_home канала>/devin/cli/sessions.db`), поэтому
+ * synchronize() обходит все включённые каналы, а watcher-событие резолвится в
+ * канал по пути файла.
  *
- * Devin sessions are machine-global (the CLI has one credential per host), so
- * indexed rows are stamped with the owner's account dir — under
- * OPEN_REGISTRATION guests never see another user's Devin history, same as
- * they cannot run the provider (see the /devin route gate).
+ * Машинные (CLI-созданные) сессии штампуются каталогом владельца; у уже
+ * известных чатов account_dir НЕ перетираем — у веб-чата свой автор, и
+ * перештамповка отняла бы его у инициатора.
  */
 export class DevinSessionSynchronizer implements IProviderSessionSynchronizer {
   private readonly provider = 'devin' as const;
-
   /**
    * Имя чата пишет разовый `devin -p` (devin-title.ts): сырой `sessions.title`
    * длинный и начинается с общих слов — в узкой панели различительное съезжало
@@ -169,17 +172,29 @@ export class DevinSessionSynchronizer implements IProviderSessionSynchronizer {
     await Promise.allSettled([...this.pendingTitleJobs]);
   }
 
+
   /**
    * Scans the Devin session table and upserts non-hidden sessions into DB.
    */
   async synchronize(since?: Date): Promise<number> {
-    const result = this.synchronizeRows(since);
-    this.archiveHiddenSessions();
-    return result.processed;
+    // Обход всех включённых каналов + машинный дефолт (наследие до Layer'а).
+    const dataDirs = new Set<string>([getDevinDataDir()]);
+    for (const conn of devinConnectionsDb.list()) {
+      if (conn.enabled) {
+        dataDirs.add(getDevinDataDir(conn.xdg_data_home));
+      }
+    }
+    let processed = 0;
+    for (const dir of dataDirs) {
+      processed += this.synchronizeRows(since, undefined, dir).processed;
+      this.archiveHiddenSessions(dir);
+    }
+    return processed;
   }
 
   /**
    * Handles watcher changes for `sessions.db` (and its -wal sibling).
+   * Канал резолвится по пути файла: чужие базы под тем же именем не трогаем.
    */
   async synchronizeFile(filePath: string): Promise<string | null> {
     const base = path.basename(filePath);
@@ -187,12 +202,14 @@ export class DevinSessionSynchronizer implements IProviderSessionSynchronizer {
       return null;
     }
 
-    const result = this.synchronizeRows(undefined, 1);
+    const result = this.synchronizeRows(undefined, 1, path.dirname(path.dirname(filePath)));
     return result.firstSessionId;
   }
 
-  private synchronizeRows(since?: Date, limit?: number): SynchronizeRowsResult {
-    const dbPath = getDevinDatabasePath();
+  private synchronizeRows(since?: Date, limit?: number, dataDir?: string): SynchronizeRowsResult {
+    const dbPath = dataDir
+      ? path.join(dataDir, 'cli', 'sessions.db')
+      : getDevinDatabasePath();
     if (!fsSync.existsSync(dbPath)) {
       return { processed: 0, firstSessionId: null };
     }
@@ -244,60 +261,6 @@ export class DevinSessionSynchronizer implements IProviderSessionSynchronizer {
     }
   }
 
-  /**
-   * Сессии, ставшие hidden=1 в базе Devin, вычищаются из индекса: фильтр
-   * `hidden=0` в SELECT лишь не пускает их ВНОВЬ, а проиндексированные до
-   * сокрытия (разовые вызовы `devin -p` успевают попасть в список до
-   * пометки) висели бы призраками в сайдбаре вечно. Архив, не удаление —
-   * обратимо и не трогает историю.
-   */
-  private archiveHiddenSessions(): void {
-    const dbPath = getDevinDatabasePath();
-    let db: InstanceType<typeof Database>;
-    try {
-      db = new Database(dbPath, { readonly: true, fileMustExist: true });
-    } catch {
-      return;
-    }
-    try {
-      const hidden = db.prepare(
-        `SELECT id FROM sessions WHERE COALESCE(hidden, 0) = 1`,
-      ).all() as Array<{ id: string }>;
-      for (const { id } of hidden) {
-        const indexed = sessionsDb.getSessionByProviderSessionId(id)
-          ?? sessionsDb.getSessionById(id);
-        if (indexed && !indexed.isArchived) {
-          sessionsDb.updateSessionIsArchived(indexed.session_id, true);
-        }
-      }
-    } catch {
-      // База без таблицы/залочена — вычистим на следующем проходе.
-    } finally {
-      db.close();
-    }
-  }
-
-  /**
-   * Whether Devin's title merely repeats the chat's opening prompt.
-   */
-  private echoesFirstPrompt(
-    db: InstanceType<typeof Database>,
-    sessionId: string,
-    title: string,
-  ): boolean {
-    try {
-      const row = db.prepare(`
-        SELECT chat_message FROM message_nodes
-        WHERE session_id = ? AND json_extract(chat_message, '$.role') = 'user'
-        ORDER BY node_id LIMIT 1
-      `).get(sessionId) as { chat_message: string } | undefined;
-      const content = row ? messageText(row.chat_message) : undefined;
-      return content !== undefined && isEchoTitle(title, content);
-    } catch {
-      return false;
-    }
-  }
-
   private upsertSession(db: InstanceType<typeof Database>, row: DevinSessionRow): string | null {
     const sessionId = readOptionalString(row.id);
     const projectPath = readOptionalString(row.working_directory);
@@ -310,7 +273,8 @@ export class DevinSessionSynchronizer implements IProviderSessionSynchronizer {
     const fallbackTitle = 'Untitled Devin Session';
     const pendingAppSession = sessionsDb.getSessionByProviderSessionId(sessionId)
       ?? sessionsDb.getSessionById(sessionId)
-      ?? sessionsDb.findLatestPendingAppSession(this.provider, projectPath);
+      ?? sessionsDb.findLatestPendingAppSession(this.provider, projectPath)
+      ?? this.findPendingAppSessionByRealpath(projectPath);
     if (pendingAppSession && !pendingAppSession.provider_session_id) {
       // Race guard: the DB watcher can index a session before the runtime's
       // provider-id mapping lands — bind the id to the fresh app row first.
@@ -321,11 +285,9 @@ export class DevinSessionSynchronizer implements IProviderSessionSynchronizer {
       ?? sessionsDb.getSessionById(sessionId);
     // Беседа, о которой приложение не знает, запущена мимо интерфейса:
     // разовые `devin -p`, сторонние ACP-прогоны, заём модели скриптами.
-    // Это машинные запуски — в обычном списке Егора их быть не должно:
-    // ниже им ставится origin 'auto', а createSession архивирует такие
-    // строки при вставке (переписка на диске и строка в архиве остаются).
-    // Имя моделью им тоже не генерируем — это расход подписки на чат,
-    // который никто не видит.
+    // Это машинные запуски — в обычном списке их быть не должно (origin
+    // 'auto' архивирует строку при вставке); имя моделью им тоже не
+    // генерируем — расход подписки на чат, который никто не видит.
     const appOwned = Boolean(existingSession);
     const existingName = existingSession?.custom_name;
     const existingSource = existingSession?.title_source;
@@ -354,9 +316,9 @@ export class DevinSessionSynchronizer implements IProviderSessionSynchronizer {
       ?? undefined;
 
     // sessions.db is shared storage — jsonl_path must stay null so deleting an
-    // app session never removes other sessions' history. The name candidate
-    // here is only the provisional one (raw CLI title or the existing name):
-    // the generated short name lands via the async job with source 'ai'.
+    // app session never removes other sessions' history. account_dir: у уже
+    // известной строки оставляем как есть (COALESCE(?, account_dir) — NULL
+    // не трогает), у новой CLI-строки авторства нет — это каталог владельца.
     return sessionsDb.createSession(
       sessionId,
       this.provider,
@@ -366,15 +328,79 @@ export class DevinSessionSynchronizer implements IProviderSessionSynchronizer {
       normalizeProviderTimestamp(row.last_activity_at ?? row.created_at),
       null,
       undefined,
-      { accountDir: getMachineAccountDir(), origin: appOwned ? 'terminal' : 'auto' },
+      { accountDir: existingSession?.account_dir ? null : getMachineAccountDir(), origin: appOwned ? 'terminal' : 'auto' },
     );
   }
+
+  /**
+   * Devin пишет `working_directory` в realpath-написании, а app-строка
+   * рождается с лексическим путём, который человек выбрал в интерфейсе (у
+   * гостей team-access `workspace/work` — симлинк на `people/<имя>/home/work`).
+   * Равенство строк их не связывает, и чат уезжал в одноимённый проект-
+   * двойник — сверяем realpath каждой ожидающей app-строки провайдера.
+   */
+  /**
+   * Сессии, ставшие hidden=1 в базе Devin, вычищаются из индекса: фильтр
+   * `hidden=0` в SELECT лишь не пускает их ВНОВЬ, а проиндексированные до
+   * сокрытия (разовые вызовы `devin -p` успевают попасть в список до
+   * пометки) висели бы призраками в сайдбаре вечно. Архив, не удаление —
+   * обратимо и не трогает историю.
+   */
+  private archiveHiddenSessions(dataDir?: string): void {
+    const dbPath = dataDir
+      ? path.join(dataDir, 'cli', 'sessions.db')
+      : getDevinDatabasePath();
+    let db: InstanceType<typeof Database>;
+    try {
+      db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    } catch {
+      return;
+    }
+    try {
+      const hidden = db.prepare(
+        `SELECT id FROM sessions WHERE COALESCE(hidden, 0) = 1`,
+      ).all() as Array<{ id: string }>;
+      for (const { id } of hidden) {
+        const indexed = sessionsDb.getSessionByProviderSessionId(id)
+          ?? sessionsDb.getSessionById(id);
+        if (indexed && !indexed.isArchived) {
+          sessionsDb.updateSessionIsArchived(indexed.session_id, true);
+        }
+      }
+    } catch {
+      // База без таблицы/залочена — вычистим на следующем проходе.
+    } finally {
+      db.close();
+    }
+  }
+
 
   /**
    * Первые различные реплики человека — материал для имени. Тот же лес и
    * тот же фильтр, что у счётчика: дедупликация по blob, ветки
    * суммаризатора не считаются.
    */
+  /**
+   * Whether Devin's title merely repeats the chat's opening prompt.
+   */
+  private echoesFirstPrompt(
+    db: InstanceType<typeof Database>,
+    sessionId: string,
+    title: string,
+  ): boolean {
+    try {
+      const row = db.prepare(`
+        SELECT chat_message FROM message_nodes
+        WHERE session_id = ? AND json_extract(chat_message, '$.role') = 'user'
+        ORDER BY node_id LIMIT 1
+      `).get(sessionId) as { chat_message: string } | undefined;
+      const content = row ? messageText(row.chat_message) : undefined;
+      return content !== undefined && isEchoTitle(title, content);
+    } catch {
+      return false;
+    }
+  }
+
   private firstUserMessages(db: InstanceType<typeof Database>, sessionId: string): string[] {
     try {
       const rows = db.prepare(`
@@ -382,6 +408,7 @@ export class DevinSessionSynchronizer implements IProviderSessionSynchronizer {
         WHERE session_id = ?
           AND json_extract(chat_message, '$.role') = 'user'
           AND instr(chat_message, 'onversation to summarize') = 0
+          AND instr(chat_message, 'cc2-auto-continue') = 0
         GROUP BY chat_message
         ORDER BY first_seen
         LIMIT 3
@@ -475,5 +502,15 @@ export class DevinSessionSynchronizer implements IProviderSessionSynchronizer {
     void import('../../services/sessions-watcher.service.js')
       .then(({ broadcastSessionUpserted }) => broadcastSessionUpserted(internalSessionId))
       .catch(() => undefined);
+  }
+
+  private findPendingAppSessionByRealpath(projectPath: string) {
+    const target = resolveCanonicalPath(projectPath);
+    for (const row of sessionsDb.findPendingAppSessions(this.provider)) {
+      if (row.project_path && resolveCanonicalPath(row.project_path) === target) {
+        return row;
+      }
+    }
+    return null;
   }
 }

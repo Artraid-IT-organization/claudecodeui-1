@@ -27,7 +27,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import readline from 'node:readline';
 
-import { sessionsDb } from '@/modules/database/index.js';
+import { devinConnectionsDb, sessionsDb } from '@/modules/database/index.js';
 import { rewindDevinSession } from '@/modules/providers/list/devin/devin-rewind.js';
 import { isSurvivorRunning, stopSurvivor } from '@/modules/providers/list/claude/survivor-runs.js';
 import { forgetTranscriptTail } from '@/modules/providers/list/claude/transcript-tail-cache.js';
@@ -307,6 +307,12 @@ export const sessionRewindService = {
         providerSessionId,
         messageId: input.messageId,
         text: input.text,
+        // Беседа живёт в sessions.db канала чата (Connection Layer): у второго
+        // аккаунта своя база — без привязки возврат искал в машинной и не
+        // находил беседу («Беседы нет у Devin», 18.10.26).
+        xdgDataHome: session.devin_connection_id != null
+          ? devinConnectionsDb.getById(session.devin_connection_id)?.xdg_data_home ?? null
+          : null,
       });
     }
     if (session.provider !== 'claude') {

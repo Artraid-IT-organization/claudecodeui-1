@@ -111,6 +111,13 @@ export interface NormalizedMessage {
    */
   clientNotice?: string;
   /**
+   * Номер одной отправки, придуманный вкладкой до ухода в сокет. Он же —
+   * id строки серверной очереди и середина id эха `queued_<номер>`, поэтому
+   * по нему сверка узнаёт копии одной отправки независимо от меток времени
+   * (локальный пузырь ставит время нажатия, эхо — время доставки из очереди).
+   */
+  clientMessageId?: string;
+  /**
    * Measured seconds a live thinking block streamed for, set once by
    * `finalizeThinkingStreaming` when the block closes. Lets the Reasoning
    * header show an accurate "Thought for Ns" without relying on the
@@ -126,6 +133,36 @@ export interface NormalizedMessage {
 // ─── Per-session slot ────────────────────────────────────────────────────────
 
 export type SessionStatus = 'idle' | 'loading' | 'streaming' | 'error';
+
+/** Причина неудачной загрузки истории — UI показывает конкретное сообщение. */
+export type HistoryErrorKind =
+  | 'auth'
+  | 'denied'
+  | 'notfound'
+  | 'server'
+  | 'timeout'
+  | 'network'
+  | 'unknown';
+
+const classifyHistoryError = (error: unknown): HistoryErrorKind => {
+  const status = error instanceof Error ? Number(/HTTP (\d{3})/.exec(error.message)?.[1]) : NaN;
+  if (status === 401) return 'auth';
+  if (status === 403) return 'denied';
+  if (status === 404) return 'notfound';
+  if (status >= 500 && status < 600) return 'server';
+  if (error instanceof DOMException && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+    return 'timeout';
+  }
+  if (error instanceof TypeError) return 'network';
+  return 'unknown';
+};
+
+/** Чем кончился последний ход чата — плашка под лентой, когда тишина. */
+export type RunOutcome = {
+  status: 'failed' | 'aborted' | 'interrupted' | 'completed';
+  error: string | null;
+  finishedAt: string | null;
+};
 
 export interface SessionSlot {
   serverMessages: NormalizedMessage[];
@@ -147,6 +184,13 @@ export interface SessionSlot {
   tokenUsage: unknown;
   /** Номер разговора есть, файла переписки на диске нет — первый ход оборвался. */
   transcriptMissing: boolean;
+  /** Категория последней ошибки загрузки истории (null — ошибок не было). */
+  errorKind: HistoryErrorKind | null;
+  /**
+   * Исход последнего хода от сервера (chat_subscribed.lastRun / run_terminal):
+   * ход, оборвавшийся без результата, показывается плашкой, а не тишиной.
+   */
+  runOutcome: RunOutcome | null;
 }
 
 const EMPTY: NormalizedMessage[] = [];
@@ -170,6 +214,8 @@ function createEmptySlot(): SessionSlot {
     offset: 0,
     tokenUsage: null,
     transcriptMissing: false,
+    errorKind: null,
+    runOutcome: null,
     _historyMutationQueue: Promise.resolve(),
   };
 }
@@ -465,6 +511,7 @@ export function useSessionStore() {
         slot.transcriptMissing = Boolean(data.transcriptMissing);
         slot.fetchedAt = Date.now();
         slot.status = 'idle';
+        slot.errorKind = null;
         slot.realtimeMessages = pruneRealtimeSupersededByServer(
           slot.serverMessages,
           slot.realtimeMessages,
@@ -479,6 +526,7 @@ export function useSessionStore() {
       } catch (error) {
         console.error(`[SessionStore] fetch failed for ${sessionId}:`, error);
         slot.status = 'error';
+        slot.errorKind = classifyHistoryError(error);
         notify(sessionId);
         return slot;
       }
@@ -646,6 +694,21 @@ export function useSessionStore() {
   }, [getSlot, notify]);
 
   /**
+   * Исход последнего хода чата (сервер: chat_subscribed.lastRun или живая
+   * рассылка run_terminal). Плашка «чем кончилось» читает его из слота.
+   */
+  const setRunOutcome = useCallback((sessionId: string, outcome: RunOutcome | null) => {
+    const slot = getSlot(sessionId);
+    if (slot.runOutcome?.status === outcome?.status
+      && slot.runOutcome?.error === outcome?.error
+      && slot.runOutcome?.finishedAt === outcome?.finishedAt) {
+      return;
+    }
+    slot.runOutcome = outcome;
+    notify(sessionId);
+  }, [getSlot, notify]);
+
+  /**
    * Check if a session's data is stale (>30s old).
    */
   const isStale = useCallback((sessionId: string) => {
@@ -806,6 +869,7 @@ export function useSessionStore() {
     refreshLatestFromServer,
     setActiveSession,
     setStatus,
+    setRunOutcome,
     isStale,
     updateStreaming,
     finalizeStreaming,
@@ -818,7 +882,7 @@ export function useSessionStore() {
   }), [
     getSlot, has, fetchFromServer, fetchMore,
     appendRealtime, appendRealtimeBatch, refreshLatestFromServer,
-    setActiveSession, setStatus, isStale, updateStreaming, finalizeStreaming,
+    setActiveSession, setStatus, setRunOutcome, isStale, updateStreaming, finalizeStreaming,
     updateThinkingStreaming, finalizeThinkingStreaming,
     clearRealtime, removeRealtimeWhere, getMessages, getSessionSlot,
   ]);

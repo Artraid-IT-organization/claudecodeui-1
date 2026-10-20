@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 
 import multer from 'multer';
@@ -103,13 +103,53 @@ const audioArchive = createAudioArchiveService({
   fetchTelegram: fetch,
   convertToVoice: (inputPath, outputPath) => new Promise((resolve, reject) => {
     // nice + ionice: перекодирование не должно отнимать процессор и диск у чатов и sshd.
-    execFile(
+    //
+    // ffmpeg — внук через nice/ionice. Таймаут execFile убивал только обёртку,
+    // и осиротевший ffmpeg доделывал работу на фоне (видели 26 мин против
+    // лимита 10), а повторный прогон доставки запускал ещё одну копию на ТОТ ЖЕ
+    // файл — на нагруженной машине они копились (14.10.26: 3 копии на одну
+    // запись). detached: ребёнок — лидер своей группы, kill(-pid) гасит и
+    // обёртку, и ffmpeg вместе.
+    const child = spawn(
       'nice',
       ['-n', '19', 'ionice', '-c', '3', 'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-i', inputPath,
         '-vn', '-ac', '1', '-c:a', 'libopus', '-b:a', '32k', outputPath],
-      { timeout: 10 * 60 * 1000 },
-      (error) => (error ? reject(error) : resolve()),
+      { detached: true, stdio: 'ignore' },
     );
+    const killGroup = (signal: NodeJS.Signals) => {
+      if (!child.pid) return;
+      try {
+        process.kill(-child.pid, signal);
+      } catch {
+        // Группа уже ушла — значит, процесс завершился сам.
+      }
+    };
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      killGroup('SIGTERM');
+      const killTimer = setTimeout(() => killGroup('SIGKILL'), 5_000);
+      killTimer.unref();
+      reject(new Error('ffmpeg conversion timed out'));
+    }, 10 * 60 * 1000);
+    timer.unref();
+    child.on('error', (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`ffmpeg exited with code ${code}`));
+      }
+    });
   }),
   isArchivableRequest: () => {
     if (!OPEN_REGISTRATION) {

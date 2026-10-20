@@ -21,46 +21,23 @@ import {
   isPlatformOwnerWebUser,
   normalizeServerScope,
   OPEN_REGISTRATION,
+  resolveScopedWorkingDirectory,
 } from '@/shared/utils.js';
+import { getWebUserWorkspaceRoot } from '@/shared/web-user-paths.js';
+import { hasOwnClaudeAccess, resolveWebUserRuntimeContext } from '@/shared/web-user-runtime.js';
 
 /**
- * Devin sessions may only ever be read by the platform owner: the provider's
- * credentials and session store are machine-global. A guest who guesses a
- * session id must not be able to read history or provider ids through the
- * provider-agnostic session endpoints.
- */
-const assertSessionProviderAllowed = (provider: string): void => {
-  if (provider !== 'devin' || !OPEN_REGISTRATION) {
-    return;
-  }
-  const userId = getRequestRuntimeContext()?.userId;
-  const numericUserId = userId === undefined || userId === null ? NaN : Number(userId);
-  if (!Number.isFinite(numericUserId) || !isPlatformOwnerWebUser(numericUserId)) {
-    throw new AppError('The Devin provider is only available to the platform owner.', {
-      code: 'PROVIDER_NOT_ALLOWED',
-      statusCode: 403,
-    });
-  }
-};
-
-/**
- * Любой чат читает/меняет владелец площадки и человек, которому чат
- * принадлежит (`initiated_by_user_id` автора или `account_dir` аккаунта —
- * то же правило, что `assertSessionRowAllowed` в provider.routes).
- * Строки без владельца (наследие до атрибуции) — только владельцу площадки.
- *
- * Проверка общая для ВСЕХ провайдеров: раньше гейт стоял только на devin,
- * и чужой claude/codex-чат читался, переименовывался и удалялся по прямой
- * ссылке (IDOR, аудит корпоративной линии 10.10.26 — fe3cc270).
+ * Любой чат читает владелец площадки и человек, которому чат принадлежит
+ * (`initiated_by_user_id` или каталог аккаунта — то же правило, что у
+ * `assertSessionRowAllowed` в provider.routes). Чужой session id не должен
+ * отдавать ни историю, ни provider id, ни метаданные: проверка раньше стояла
+ * только на devin, и claude-чаты открывались по прямой ссылке (IDOR, аудит
+ * 10.10.26).
  */
 const assertSessionReadable = (session: {
-  provider: string;
   initiated_by_user_id: number | null;
   account_dir: string | null;
 }): void => {
-  // Креды Devin одни на машину — провайдерный гейт владельца остаётся
-  // поверх проверки владения чатом (до Connection Layer интеграции).
-  assertSessionProviderAllowed(session.provider);
   if (!OPEN_REGISTRATION) {
     return;
   }
@@ -118,6 +95,31 @@ async function upgradeHeicAttachmentsToImages(messages: NormalizedMessage[]): Pr
   }
 }
 
+/**
+ * Провайдер, под которым реально пойдёт ход человека общей площадки.
+ *
+ * У гостя без своего входа в Claude (ни ключа API, ни подписки в его
+ * каталоге) `claude` мёртв: браузер мог запомнить его выбор или человек
+ * открыл старый чат, и оба пути упирались в «войдите в Claude». Такой чат и
+ * такое создание молча переводятся на корпоративный Devin — история при этом
+ * остаётся на месте (fetchHistory доклеивает jsonl-стенограмму). Владельца
+ * площадки правило не касается: у него вход в Claude свой и живой.
+ */
+export async function resolveEffectiveProvider(
+  provider: LLMProvider,
+  userId: string | number | null | undefined,
+): Promise<LLMProvider> {
+  if (!OPEN_REGISTRATION || provider !== 'claude') {
+    return provider;
+  }
+  const numericUserId = userId === undefined || userId === null ? NaN : Number(userId);
+  if (!Number.isFinite(numericUserId) || isPlatformOwnerWebUser(numericUserId)) {
+    return provider;
+  }
+  const runtimeContext = resolveWebUserRuntimeContext(userId ?? null);
+  return (await hasOwnClaudeAccess(runtimeContext)) ? 'claude' : 'devin';
+}
+
 type CreateAppSessionResult = {
   sessionId: string;
   provider: LLMProvider;
@@ -137,11 +139,14 @@ type ArchivedSessionListItem = {
   lastActivity: string | null;
   isProjectArchived: boolean;
   serverScope: ServerScope;
+  flagged: boolean;
+  done: boolean;
+  promptLaunched: boolean;
 };
 
 type RecentSessionListItem = Pick<
   ArchivedSessionListItem,
-  'sessionId' | 'provider' | 'projectId' | 'projectDisplayName' | 'sessionTitle' | 'lastActivity'
+  'sessionId' | 'provider' | 'projectId' | 'projectDisplayName' | 'sessionTitle' | 'lastActivity' | 'flagged' | 'done'
 > & {
   /** Блок верхней панели, в котором виден чат. */
   serverScope: ServerScope;
@@ -270,12 +275,15 @@ export const sessionsService = {
     offset: number,
     serverScope?: ServerScope,
     providerSpace?: 'codex' | 'devin' | 'claude',
+    includeInternal = false,
   ): RecentSessionsPage {
     const requestContext = getRequestRuntimeContext();
     const canUseCodex = requestContext === undefined
       || isCodexAllowedForWebUser(requestContext.userId);
-    if ((providerSpace === 'codex' || providerSpace === 'devin') && !canUseCodex) {
-      // Codex and Devin share one owner boundary (isCodexAllowedForWebUser).
+    if (providerSpace === 'codex' && !canUseCodex) {
+      // У гостя нет хостового входа Codex, а Devin — корпоративный помощник
+      // для всех: свои Devin-чаты гость получает отбором initiated_by_user_id
+      // внутри hide-codex (sessions.db.ts), пустоту отдавать нельзя.
       return { conversations: [], total: 0, hasMore: false };
     }
     const accountVisibility = canUseCodex ? 'shared-codex' : 'hide-codex';
@@ -285,6 +293,7 @@ export const sessionsService = {
       serverScope,
       providerSpace,
       accountVisibility,
+      includeInternal,
     );
     const projectCache = new Map<string, ReturnType<typeof projectsDb.getProjectPath>>();
     const conversations = page.sessions.map((session) => {
@@ -305,6 +314,9 @@ export const sessionsService = {
         projectDisplayName: resolveProjectDisplayName(projectPath, project?.custom_project_name),
         sessionTitle: session.custom_name?.trim() || session.session_id,
         lastActivity: session.updated_at ?? session.created_at ?? null,
+        flagged: Boolean(session.is_flagged),
+        done: Boolean(session.is_done),
+        promptLaunched: Boolean(session.prompt_launched),
         // Блок верхней панели: своё значение чата важнее значения папки.
         serverScope: normalizeServerScope(session.server_scope ?? project?.server_scope),
       };
@@ -356,12 +368,26 @@ export const sessionsService = {
    * comes directly from the first visible CloudCLI message and is limited to
    * four whole words before any provider-owned storage exists.
    */
-  createAppSession(
+  async createAppSession(
     provider: LLMProvider,
     projectPath: string,
     initialMessage: string,
-  ): CreateAppSessionResult {
-    const normalizedProjectPath = projectPath.trim();
+    userId?: string | number | null,
+  ): Promise<CreateAppSessionResult> {
+    // Устаревший выбор провайдера в браузере («Claude» без живого входа)
+    // заменяется рабочим — строка сразу ложится под тем провайдером, под
+    // которым пойдёт первый ход, и чат не переводится посреди отправки.
+    const effectiveProvider = await resolveEffectiveProvider(provider, userId);
+    // Рабочая зона не-владельца — его ~/.claude-webuser-<id>/workspace:
+    // проект вне зоны (устаревший/чужой путь от клиента) не записывается,
+    // чат приземляется в корень зоны — зона у человека одна.
+    const numericUserId = userId != null ? Number(userId) : NaN;
+    const scopeRoot = OPEN_REGISTRATION
+      && Number.isFinite(numericUserId)
+      && !isPlatformOwnerWebUser(numericUserId)
+      ? getWebUserWorkspaceRoot(numericUserId)
+      : null;
+    const normalizedProjectPath = resolveScopedWorkingDirectory(projectPath, scopeRoot) ?? '';
     if (!normalizedProjectPath) {
       throw new AppError('projectPath is required.', {
         code: 'PROJECT_PATH_REQUIRED',
@@ -371,11 +397,11 @@ export const sessionsService = {
 
     const sessionId = randomUUID();
     const sessionName = buildCloudCliSessionName(initialMessage);
-    sessionsDb.createAppSession(sessionId, provider, normalizedProjectPath, sessionName);
+    sessionsDb.createAppSession(sessionId, effectiveProvider, normalizedProjectPath, sessionName);
 
     return {
       sessionId,
-      provider,
+      provider: effectiveProvider,
       projectPath: normalizedProjectPath,
       sessionName,
     };
@@ -404,10 +430,10 @@ export const sessionsService = {
   },
 
   /**
-   * Вешает или снимает ярлык-флажок на чате. Только метка в базе: файл
-   * переписки и порядок чатов не меняются.
+   * Вешает, снимает или переключает метку чата ('none' | 'flag' | 'done').
+   * Только метка в базе: файл переписки и порядок чатов не меняются.
    */
-  setSessionFlagged(sessionId: string, flagged: boolean): { flagged: boolean } {
+  setSessionMark(sessionId: string, mark: 'none' | 'flag' | 'done'): { mark: 'none' | 'flag' | 'done' } {
     const session = sessionsDb.getSessionById(sessionId);
     if (!session) {
       throw new AppError(`Session "${sessionId}" was not found.`, {
@@ -417,8 +443,26 @@ export const sessionsService = {
     }
     assertSessionReadable(session);
 
-    sessionsDb.setSessionFlagged(sessionId, flagged);
-    return { flagged };
+    sessionsDb.setSessionMark(sessionId, mark);
+    return { mark };
+  },
+
+  /**
+   * Ставит/снимает признак «промпт из этого чата «Промптов» уже ушёл
+   * кнопкой «В новый чат». Независима от mark — метка чата не меняется.
+   */
+  setSessionPromptLaunched(sessionId: string, launched: boolean): { promptLaunched: boolean } {
+    const session = sessionsDb.getSessionById(sessionId);
+    if (!session) {
+      throw new AppError(`Session "${sessionId}" was not found.`, {
+        code: 'SESSION_NOT_FOUND',
+        statusCode: 404,
+      });
+    }
+    assertSessionReadable(session);
+
+    sessionsDb.setSessionPromptLaunched(sessionId, launched);
+    return { promptLaunched: launched };
   },
 
   /**
@@ -466,10 +510,16 @@ export const sessionsService = {
       });
     }
     assertSessionReadable(session);
+    // Чат, переведённый с мёртвого Claude на Devin, держит файл старой
+    // переписки в jsonl_path — она доклеивается префиксом ленты, иначе после
+    // перевода человек увидел бы пустой чат. У родных devin-строк jsonl_path
+    // всегда NULL, поэтому признак встречается только на переведённых.
+    const hasLegacyTranscript = session.provider !== 'claude' && Boolean(session.jsonl_path);
 
     // App-created sessions that never produced a provider transcript yet
-    // (e.g. first message still streaming) simply have no history.
-    if (!session.provider_session_id) {
+    // (e.g. first message still streaming) simply have no history — unless a
+    // legacy transcript remains from the provider migration above.
+    if (!session.provider_session_id && !hasLegacyTranscript) {
       return {
         messages: [],
         total: 0,
@@ -480,22 +530,107 @@ export const sessionsService = {
     }
 
     const provider = session.provider as LLMProvider;
-    const result = await providerRegistry.resolveProvider(provider).sessions.fetchHistory(sessionId, {
-      limit: options.limit ?? null,
-      offset: options.offset ?? 0,
+    const result = session.provider_session_id
+      ? await providerRegistry.resolveProvider(provider).sessions.fetchHistory(sessionId, {
+          limit: options.limit ?? null,
+          offset: options.offset ?? 0,
+          projectPath: session.project_path ?? '',
+          providerSessionId: session.provider_session_id,
+        })
+      : { messages: [], total: 0, hasMore: false, offset: 0, limit: null };
+
+    if (!hasLegacyTranscript) {
+      return {
+        ...result,
+        messages: result.messages.map((message) => ({
+          ...message,
+          sessionId,
+        })),
+      };
+    }
+
+    // Читалка Claude фильтрует строки стенограммы по provider-native id —
+    // он же имя файла (`<id>.jsonl`); в строке его уже нет, после перевода
+    // туда записан id нового провайдера.
+    const legacyProviderSessionId = path.basename(session.jsonl_path as string, '.jsonl');
+    const legacy = await providerRegistry.resolveProvider('claude').sessions.fetchHistory(sessionId, {
+      limit: null,
+      offset: 0,
       projectPath: session.project_path ?? '',
-      providerSessionId: session.provider_session_id,
+      providerSessionId: legacyProviderSessionId,
     });
 
     await upgradeHeicAttachmentsToImages(result.messages);
 
     return {
       ...result,
-      messages: result.messages.map((message) => ({
+      messages: [
+        ...legacy.messages,
+        ...result.messages,
+      ].map((message) => ({
         ...message,
         sessionId,
       })),
+      total: legacy.total + result.total,
     };
+  },
+
+  /**
+   * Полная переписка потоком — для выгрузки чата в файл
+   * (`GET /sessions/:id/messages/export`, NDJSON). Разрешает сеанс и права так
+   * же, как `fetchHistory`, затем отдаёт сообщения по мере чтения источника:
+   * у Claude-читалки безлимитный поток по файлу (постраничный путь режет
+   * начало стенограмм длиннее 12 МБ, и выгрузка начиналась с середины чата —
+   * Егор 17.10.26). Провайдер без потокового чтения отдаётся через
+   * `fetchHistory` без предела — у остальных источников потолка нет.
+   * Наследие переведённых чатов идёт первым, как в `fetchHistory`.
+   */
+  async *streamHistory(sessionId: string): AsyncGenerator<NormalizedMessage> {
+    const session = sessionsDb.getSessionById(sessionId);
+    if (!session) {
+      throw new AppError(`Session "${sessionId}" was not found.`, {
+        code: 'SESSION_NOT_FOUND',
+        statusCode: 404,
+      });
+    }
+    assertSessionReadable(session);
+    const hasLegacyTranscript = session.provider !== 'claude' && Boolean(session.jsonl_path);
+
+    if (hasLegacyTranscript) {
+      const legacyProviderSessionId = path.basename(session.jsonl_path as string, '.jsonl');
+      const legacyStream = providerRegistry.resolveProvider('claude').sessions.streamHistory;
+      if (legacyStream) {
+        for await (const message of legacyStream(sessionId, {
+          projectPath: session.project_path ?? '',
+          providerSessionId: legacyProviderSessionId,
+        })) {
+          yield { ...message, sessionId };
+        }
+      }
+    }
+
+    if (!session.provider_session_id) return;
+
+    const provider = providerRegistry.resolveProvider(session.provider as LLMProvider).sessions;
+    if (provider.streamHistory) {
+      for await (const message of provider.streamHistory(sessionId, {
+        projectPath: session.project_path ?? '',
+        providerSessionId: session.provider_session_id,
+      })) {
+        yield { ...message, sessionId };
+      }
+      return;
+    }
+
+    const result = await provider.fetchHistory(sessionId, {
+      limit: null,
+      offset: 0,
+      projectPath: session.project_path ?? '',
+      providerSessionId: session.provider_session_id,
+    });
+    for (const message of result.messages) {
+      yield { ...message, sessionId };
+    }
   },
 
   /**
@@ -580,6 +715,9 @@ export const sessionsService = {
         updatedAt: session.updated_at ?? null,
         lastActivity: session.updated_at ?? session.created_at ?? null,
         isProjectArchived: Boolean(project?.isArchived),
+        flagged: Boolean(session.is_flagged),
+        done: Boolean(session.is_done),
+        promptLaunched: Boolean(session.prompt_launched),
         // Блок верхней панели: архив тоже делится на блоки, иначе дела
         // второго сервера всплывали бы в архиве обычных «Проектов».
         serverScope: normalizeServerScope(session.server_scope ?? project?.server_scope),

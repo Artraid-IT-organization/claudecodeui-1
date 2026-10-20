@@ -10,6 +10,7 @@ import type { ChatInterfaceProps, ChatMessage, PermissionMode, Provider  } from 
 import { useChatProviderState } from '../hooks/useChatProviderState';
 import { useChatSessionState, chatMessageToNormalized } from '../hooks/useChatSessionState';
 import { useChatRealtimeHandlers } from '../hooks/useChatRealtimeHandlers';
+import { createStreamingScheduler } from '../hooks/streamingScheduler';
 import { useChatComposerState } from '../hooks/useChatComposerState';
 import { useSessionStore } from '../../../stores/useSessionStore';
 import { authenticatedFetch } from '../../../utils/api';
@@ -21,9 +22,11 @@ import ChatRequestBar from './subcomponents/ChatRequestBar';
 import ChatComposer from './subcomponents/ChatComposer';
 import CommandResultModal from './subcomponents/CommandResultModal';
 import RewindConfirmDialog from './subcomponents/RewindConfirmDialog';
+import { RunOutcomeBanner } from './subcomponents/RunOutcomeBanner';
 import { knownRunStartedAt } from '../utils/liveRunCursor';
 import { normalizedToChatMessages } from '../hooks/useChatMessages';
 import { waitForFreshTailAfterReconnect } from '../utils/reconnectVerdict';
+import { readSelectedProviderRaw } from '../../../utils/selectedProvider';
 
 /**
  * Сколько ждать после восстановления связи, прежде чем признать ответ
@@ -53,6 +56,7 @@ function ChatInterface({
   newSessionTrigger,
   onStartNewChat,
   onShowAllTasks,
+  isMobileSidebarOpen,
 }: ChatInterfaceProps) {
   const { tasksEnabled, isTaskMasterInstalled } = useTasksSettings();
   const { subscribe, isConnected } = useWebSocket();
@@ -69,16 +73,9 @@ function ChatInterface({
   // Keyed by session id, NOT one buffer for the whole component. A client can
   // receive live deltas for more than one session at a time — watching a run
   // started elsewhere (another device, the CLI) while typing in your own is
-  // the ordinary case, not an edge case. With a single shared buffer those
+  // the ordinary case, not an edge case. With a single shared scheduler those
   // two streams concatenate into each other and both sessions render text
   // that belongs to the other one.
-  const streamTimerRef = useRef(new Map<string, number>());
-  const accumulatedStreamRef = useRef(new Map<string, string>());
-  // Mirrors streamTimerRef/accumulatedStreamRef for the live thinking block —
-  // a separate accumulator because thinking and reply text are independent
-  // live rows within one turn (see useChatRealtimeHandlers' flushThinking).
-  const thinkingStreamTimerRef = useRef(new Map<string, number>());
-  const accumulatedThinkingRef = useRef(new Map<string, string>());
   const thinkingStartedAtRef = useRef(new Map<string, number>());
   // When each session's `chat.subscribe` was last sent; idle acks older than
   // a later local request are discarded as stale.
@@ -87,16 +84,6 @@ function ChatInterface({
   // on every sequenced frame, read whenever a `chat.subscribe` is sent so the
   // server replays only the events this client actually missed.
   const lastSeqRef = useRef(new Map<string, number>());
-
-  const resetStreamingState = useCallback(() => {
-    for (const timer of streamTimerRef.current.values()) clearTimeout(timer);
-    for (const timer of thinkingStreamTimerRef.current.values()) clearTimeout(timer);
-    streamTimerRef.current.clear();
-    thinkingStreamTimerRef.current.clear();
-    accumulatedStreamRef.current.clear();
-    accumulatedThinkingRef.current.clear();
-    thinkingStartedAtRef.current.clear();
-  }, []);
 
   const {
     provider,
@@ -132,9 +119,30 @@ function ChatInterface({
     selectedProject,
   });
 
+  // Frame-coalesced schedulers for live text/thinking streams. The scheduler
+  // callback reads the provider from a ref so a mid-stream provider switch
+  // does not flush stale metadata.
+  const providerRef = useRef(provider);
+  providerRef.current = provider;
+  const streamSchedulerRef = useRef(createStreamingScheduler((sid, text) => {
+    sessionStore.updateStreaming(sid, text, providerRef.current);
+  }));
+  const thinkingSchedulerRef = useRef(createStreamingScheduler((sid, text) => {
+    sessionStore.updateThinkingStreaming(sid, text, providerRef.current);
+  }));
+
+  const resetStreamingState = useCallback(() => {
+    streamSchedulerRef.current?.reset();
+    thinkingSchedulerRef.current?.reset();
+    thinkingStartedAtRef.current.clear();
+  }, []);
+
   const {
     chatMessages,
     addMessage,
+    addPendingSendMessage,
+    bindPendingMessages,
+    discardPendingSendMessages,
     sessionActivity,
     isProcessing,
     canAbortSession,
@@ -164,6 +172,7 @@ function ChatInterface({
     requestLatestMessages,
     loadOlderMessagesNow,
     historyLoadError,
+    historyLoadErrorKind,
     retryHistoryLoad,
     transcriptMissing,
     setTopSentinel,
@@ -266,6 +275,9 @@ function ChatInterface({
     onStartNewChat,
     onSessionProcessing,
     onSessionEstablished: handleSessionEstablished,
+    addPendingSendMessage,
+    bindPendingMessages,
+    discardPendingSendMessages,
     onInputFocusChange,
     onFileOpen,
     onShowSettings,
@@ -387,7 +399,7 @@ function ChatInterface({
         if (armedSid) {
           // Плашка принадлежит чату, где ждали ответ: addMessage целился бы
           // в открытый к этому моменту чат, а снятие ниже ищет в armedSid.
-          const prov = (localStorage.getItem('selected-provider') as Provider) || 'claude';
+          const prov = (readSelectedProviderRaw() as Provider) || 'claude';
           const normalized = chatMessageToNormalized(
             { type: 'error', clientNotice: 'connection-lost', content, timestamp: new Date() },
             armedSid,
@@ -464,11 +476,9 @@ function ChatInterface({
     setTokenBudget,
     pendingPermissionRequests,
     setPendingPermissionRequests,
-    streamTimerRef,
-    accumulatedStreamRef,
-    thinkingStreamTimerRef,
-    accumulatedThinkingRef,
     thinkingStartedAtRef,
+    streamSchedulerRef,
+    thinkingSchedulerRef,
     lastSeqRef,
     statusCheckSentAtRef,
     onSessionProcessing,
@@ -606,6 +616,14 @@ function ChatInterface({
   // overlapping the last message.
   const hasActivityIndicator = Boolean(sessionActivity && pendingPermissionRequests.length === 0);
 
+  // Чем кончился последний ход — из слота стора (сервер: chat_subscribed
+  // .lastRun / рассылка run_terminal). Пока идёт ход — плашки нет, её
+  // место занимает индикатор работы.
+  const outcomeSessionId = currentSessionId || selectedSession?.id || null;
+  const runOutcome = !isProcessing && outcomeSessionId
+    ? (sessionStore.getSessionSlot(outcomeSessionId)?.runOutcome ?? null)
+    : null;
+
   const selectedProviderLabel =
     provider === 'cursor'
       ? t('messageTypes.cursor')
@@ -674,6 +692,7 @@ function ChatInterface({
           onLoadOlderMessages={loadOlderMessagesNow}
           topSentinelRef={setTopSentinel}
           historyLoadError={historyLoadError}
+          historyLoadErrorKind={historyLoadErrorKind}
           onRetryHistoryLoad={retryHistoryLoad}
           transcriptMissing={transcriptMissing}
           totalMessages={totalMessages}
@@ -702,17 +721,19 @@ function ChatInterface({
           />
         )}
 
+        {runOutcome && <RunOutcomeBanner outcome={runOutcome} />}
+
         <div className="relative flex-shrink-0">
           {isUserScrolledUp && chatMessages.length > 0 && (
-            <div className="pointer-events-none absolute -top-11 left-0 right-0 z-20 flex justify-center">
+            <div className={`pointer-events-none absolute left-0 right-0 z-20 flex justify-center ${hasActivityIndicator ? '-top-20' : '-top-12'}`}>
               <button
                 type="button"
                 onClick={scrollToBottomAndReset}
                 aria-label={t('input.scrollToBottom', { defaultValue: 'Scroll to bottom' })}
-                className="pointer-events-auto flex h-8 w-8 items-center justify-center rounded-full border border-border/50 bg-card text-muted-foreground shadow-sm transition-all duration-200 hover:bg-accent hover:text-foreground"
+                className="pointer-events-auto flex h-[30px] w-[30px] touch-manipulation items-center justify-center rounded-full border border-primary/40 bg-card text-primary shadow-[0_0_0_1px_hsl(var(--primary)/0.08),0_0_12px_hsl(var(--primary)/0.24)] transition-all duration-200 hover:border-primary/60 hover:bg-accent hover:shadow-[0_0_0_1px_hsl(var(--primary)/0.12),0_0_16px_hsl(var(--primary)/0.34)] active:scale-95"
                 title={t('input.scrollToBottom', { defaultValue: 'Scroll to bottom' })}
               >
-                <ArrowDownIcon className="h-4 w-4" aria-hidden />
+                <ArrowDownIcon className="h-3.5 w-3.5" aria-hidden />
               </button>
             </div>
           )}
@@ -787,6 +808,7 @@ function ChatInterface({
           placeholder={t('input.placeholder', { provider: selectedProviderLabel })}
           isTextareaExpanded={isTextareaExpanded}
           sendByCtrlEnter={sendByCtrlEnter}
+          isMobileSidebarOpen={isMobileSidebarOpen}
         />
         </div>
       </div>

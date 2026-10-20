@@ -13,10 +13,12 @@ import { reportCatchupProbe } from '../utils/catchupProbe';
 import { createCachedDiffCalculator, type DiffCalculator } from '../utils/messageTransforms';
 
 import { normalizedToChatMessages } from './useChatMessages';
+import { DEFAULT_PROVIDER } from '../../../utils/defaultProvider';
 import { useScrollAnchor } from './useScrollAnchor';
 import { useRowPrewarm } from './useRowPrewarm';
 import { useRowHeightRecorder } from './useRowHeightRecorder';
 import { knownRunStartedAt } from '../utils/liveRunCursor';
+import { readSelectedProviderRaw } from '../../../utils/selectedProvider';
 
 /**
  * Сколько загруженных сообщений показывать сразу.
@@ -117,6 +119,7 @@ export function chatMessageToNormalized(
     kind: 'text',
     role: msg.type === 'user' ? 'user' : 'assistant',
     content: msg.content || '',
+    clientMessageId: typeof msg.clientMessageId === 'string' ? msg.clientMessageId : undefined,
     // Keep attachment references on the local echo so the user bubble shows
     // its files immediately, before the server-backed copy replaces it.
     images: Array.isArray(msg.images) && msg.images.length > 0 ? msg.images : undefined,
@@ -164,6 +167,7 @@ export function useChatSessionState({
   // Запрос истории упал (обрыв связи, перезапуск сайта). Без этого признака
   // лента рисовала «Продолжить разговор», будто чат пуст (Егор, 15.09.26).
   const [historyLoadError, setHistoryLoadError] = useState(false);
+  const [historyLoadErrorKind, setHistoryLoadErrorKind] = useState<string | null>(null);
   const [historyRetryTick, setHistoryRetryTick] = useState(0);
   const historyRetryAttemptsRef = useRef(0);
   // Переписка чата не сохранилась (первый ход оборвался перезапуском сайта):
@@ -242,7 +246,7 @@ export function useChatSessionState({
      *
      * Why this is essential:
      * - Chat keeps local state that is not fully derived from `selectedSession`:
-     *   `currentSessionId`, `pendingUserMessage`, streaming/status flags, message
+     *   `currentSessionId`, `pendingFeedMessages`, streaming/status flags, message
      *   pagination/scroll bookkeeping, and provider-specific sessionStorage keys.
      * - If the user clicks New Session while already on the same route with no
      *   selected session, parent state updates can be idempotent and this local
@@ -255,7 +259,7 @@ export function useChatSessionState({
      */
     resetStreamingState();
     setCurrentSessionId(null);
-    setPendingUserMessage(null);
+    setPendingFeedMessages([]);
     messagesOffsetRef.current = 0;
     setHasMoreMessages(false);
     setTotalMessages(0);
@@ -411,8 +415,23 @@ export function useChatSessionState({
   /* ---------------------------------------------------------------- */
   /*  Derive chatMessages from the store                              */
   /* ---------------------------------------------------------------- */
-  const [pendingUserMessage, setPendingUserMessage] = useState<ChatMessage | null>(null);
-  const flushedPendingUserMessageRef = useRef<ChatMessage | null>(null);
+  /**
+   * Пузыри сообщений, показанные до появления сессии (новый чат: пузырь
+   * рисуется при нажатии «Отправить», ещё до ответа POST /api/providers/sessions).
+   *
+   * `sessionId` — привязка к создаваемому чату. Пока POST в полёте, человек
+   * может открыть другой разговор: без привязки пузырь при первом же
+   * activeSessionId дописывался бы в чужую ленту. Записи с
+   * `awaitSessionId: true` ждут bindPendingMessages и переливаются только в
+   * созданную сессию; обычные записи (sessionId === null, awaitSessionId
+   * false) сохраняют прежнее поведение — уходят в первый открывшийся чат.
+   */
+  type PendingFeedEntry = {
+    message: ChatMessage;
+    sessionId: string | null;
+    awaitSessionId: boolean;
+  };
+  const [pendingFeedMessages, setPendingFeedMessages] = useState<PendingFeedEntry[]>([]);
 
   // Hidden Chat tabs keep collecting realtime rows without re-rendering the
   // CSS-hidden tree. Activation itself renders once and reads the latest cache.
@@ -424,28 +443,34 @@ export function useChatSessionState({
   }
 
   useEffect(() => {
-    if (!pendingUserMessage) {
-      flushedPendingUserMessageRef.current = null;
+    if (pendingFeedMessages.length === 0 || !activeSessionId) {
       return;
     }
 
-    if (!activeSessionId) {
-      return;
+    const prov = (readSelectedProviderRaw() as LLMProvider) || DEFAULT_PROVIDER;
+    const flushable: NormalizedMessage[] = [];
+    const remaining: PendingFeedEntry[] = [];
+    for (const entry of pendingFeedMessages) {
+      const canFlush = entry.awaitSessionId
+        ? entry.sessionId !== null && entry.sessionId === activeSessionId
+        : entry.sessionId === null || entry.sessionId === activeSessionId;
+      if (!canFlush) {
+        remaining.push(entry);
+        continue;
+      }
+      const normalized = chatMessageToNormalized(entry.message, activeSessionId, prov);
+      if (normalized) {
+        flushable.push(normalized);
+      }
     }
 
-    if (flushedPendingUserMessageRef.current === pendingUserMessage) {
-      return;
+    if (flushable.length > 0) {
+      sessionStore.appendRealtimeBatch(activeSessionId, flushable);
     }
-
-    const prov = (localStorage.getItem('selected-provider') as LLMProvider) || 'claude';
-    const normalized = chatMessageToNormalized(pendingUserMessage, activeSessionId, prov);
-    if (normalized) {
-      sessionStore.appendRealtime(activeSessionId, normalized);
+    if (remaining.length !== pendingFeedMessages.length) {
+      setPendingFeedMessages(remaining);
     }
-
-    flushedPendingUserMessageRef.current = pendingUserMessage;
-    setPendingUserMessage(null);
-  }, [activeSessionId, pendingUserMessage, sessionStore]);
+  }, [activeSessionId, pendingFeedMessages, sessionStore]);
 
   const storeMessages = activeSessionId ? sessionStore.getMessages(activeSessionId) : [];
 
@@ -458,13 +483,28 @@ export function useChatSessionState({
 
   const chatMessages = useMemo(() => {
     const all = normalizedToChatMessages(storeMessages);
-    // Show pending user message when no session data exists yet (new session, pre-backend-response)
-    if (pendingUserMessage && all.length === 0) {
-      return [pendingUserMessage];
+    // Пузыри до появления сессии: ждущие свою сессию (awaitSessionId) видны на
+    // экране нового чата и в своём чате — в чужом пустом чате нет; обычные
+    // записи держат прежнее поведение.
+    if (pendingFeedMessages.length > 0 && all.length === 0) {
+      const visible = pendingFeedMessages
+        .filter((entry) =>
+          entry.awaitSessionId
+            ? entry.sessionId === null
+              ? !activeSessionId
+              : entry.sessionId === activeSessionId
+            : !activeSessionId ||
+              entry.sessionId === null ||
+              entry.sessionId === activeSessionId,
+        )
+        .map((entry) => entry.message);
+      if (visible.length > 0) {
+        return visible;
+      }
     }
     if (viewHiddenCount > 0 && viewHiddenCount < all.length) return all.slice(0, -viewHiddenCount);
     return all;
-  }, [storeMessages, viewHiddenCount, pendingUserMessage]);
+  }, [storeMessages, viewHiddenCount, pendingFeedMessages, activeSessionId]);
 
   /* ---------------------------------------------------------------- */
   /*  addMessage / clearMessages / rewindMessages                     */
@@ -473,15 +513,47 @@ export function useChatSessionState({
   const addMessage = useCallback((msg: ChatMessage) => {
     if (!activeSessionId) {
       // No session yet — show as pending until the backend creates one
-      setPendingUserMessage(msg);
+      setPendingFeedMessages((prev) => [
+        ...prev,
+        { message: msg, sessionId: null, awaitSessionId: false },
+      ]);
       return;
     }
-    const prov = (localStorage.getItem('selected-provider') as LLMProvider) || 'claude';
+    const prov = (readSelectedProviderRaw() as LLMProvider) || DEFAULT_PROVIDER;
     const normalized = chatMessageToNormalized(msg, activeSessionId, prov);
     if (normalized) {
       sessionStore.appendRealtime(activeSessionId, normalized);
     }
   }, [activeSessionId, sessionStore]);
+
+  /**
+   * Пузырь сообщения, отправленного в ещё не созданный чат. Отличается от
+   * addMessage тем, что ждёт именно СВОЮ сессию (bindPendingMessages), а не
+   * переливается в первый открывшийся разговор.
+   */
+  const addPendingSendMessage = useCallback((msg: ChatMessage) => {
+    setPendingFeedMessages((prev) => [
+      ...prev,
+      { message: msg, sessionId: null, awaitSessionId: true },
+    ]);
+  }, []);
+
+  /** Сессия создана — ждущие её пузыри закрепляются за ней. Уже привязанные
+   * (чужая партия, например предыдущий «новый чат» той же папки) не трогаем. */
+  const bindPendingMessages = useCallback((sessionId: string) => {
+    setPendingFeedMessages((prev) =>
+      prev.map((entry) =>
+        entry.awaitSessionId && entry.sessionId === null
+          ? { ...entry, sessionId }
+          : entry,
+      ),
+    );
+  }, []);
+
+  /** Доставка не состоялась — убрать ждавшие сессию пузыри из ленты. */
+  const discardPendingSendMessages = useCallback(() => {
+    setPendingFeedMessages((prev) => prev.filter((entry) => !entry.awaitSessionId));
+  }, []);
 
   const clearMessages = useCallback(() => {
     if (!activeSessionId) return;
@@ -1023,9 +1095,11 @@ export function useChatSessionState({
       if (activeSessionIdRef.current === selectedSessionId) {
         if (slot?.status === 'error') {
           setHistoryLoadError(true);
+          setHistoryLoadErrorKind(slot.errorKind ?? null);
         } else if (slot) {
           historyRetryAttemptsRef.current = 0;
           setHistoryLoadError(false);
+          setHistoryLoadErrorKind(null);
           setTranscriptMissing(slot.transcriptMissing);
         }
       }
@@ -1362,6 +1436,9 @@ export function useChatSessionState({
   return {
     chatMessages,
     addMessage,
+    addPendingSendMessage,
+    bindPendingMessages,
+    discardPendingSendMessages,
     clearMessages,
     rewindMessages,
     sessionActivity,
@@ -1395,6 +1472,7 @@ export function useChatSessionState({
     requestLatestMessages,
     loadOlderMessagesNow,
     historyLoadError,
+    historyLoadErrorKind,
     retryHistoryLoad,
     transcriptMissing,
     setTopSentinel,

@@ -143,6 +143,23 @@ test('recent sessions are globally ordered, paginated, and limited to visible co
   });
 });
 
+test('recent sessions keep Prompts chats out of the general feed in every internal visibility mode', async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createSession('regular', 'claude', '/workspace/regular', 'Regular');
+    sessionsDb.createSession('prompts-by-path', 'claude', '/home/claude/prompts', 'Prompt by path');
+    sessionsDb.createSession('prompts-by-name', 'claude', '/workspace/renamed-prompts', 'Prompt by name');
+    sessionsDb.createSession('internal', 'claude', '/tmp/internal', 'Internal');
+    projectsDb.updateCustomProjectName('/workspace/renamed-prompts', 'Промпты');
+
+    const visibleIds = sessionsDb.getRecentSessionsPage(10, 0).sessions.map((session) => session.session_id);
+    const internalIds = sessionsDb.getRecentSessionsPage(10, 0, undefined, undefined, 'current', true)
+      .sessions.map((session) => session.session_id);
+
+    assert.deepEqual(visibleIds, ['regular']);
+    assert.deepEqual(internalIds.sort(), ['internal', 'regular']);
+  });
+});
+
 test('Devin has its own list: owner sees it across Claude accounts, Claude and Codex lists do not, guests never', async () => {
   await withIsolatedDatabase(() => {
     const projectPath = '/workspace/devin-space-project';
@@ -254,6 +271,81 @@ test('owner lists share Codex across Claude accounts without sharing Claude chat
     assert.deepEqual(
       sessionsDb.getSessionsByProjectPathIncludingArchived(projectPath, 'hide-codex'),
       [],
+    );
+  });
+});
+
+/**
+ * project_path app-строки (origin='web') синхронизатор не перетирает.
+ *
+ * Devin записывает в свою sessions.db `working_directory` в realpath-
+ * написании, а чат, созданный из веба, хранит лексический путь, который
+ * выбрал человек (у гостей team-access `workspace/work` — симлинк). До
+ * исправления следующий проход синхронизатора переписывал project_path
+ * realpath'ом — и чат уезжал в одноимённый проект-двойник («не все чаты в
+ * списке», аудит 10.10.26). Строкам без веб-выбора (terminal/auto) cwd
+ * провайдера по-прежнему правда: чат мог физически переехать.
+ */
+test('createSession keeps the web-chosen project_path on provider upserts', async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createAppSession('app-bound', 'devin', '/home/guest/workspace/work', 'Веб-чат');
+    sessionsDb.assignProviderSessionId('app-bound', 'provider-xyz');
+
+    sessionsDb.createSession('provider-xyz', 'devin', '/home/guest/team-access/home/work', 'Веб-чат');
+
+    const row = sessionsDb.getSessionById('app-bound');
+    assert.equal(row?.provider_session_id, 'provider-xyz');
+    assert.equal(row?.project_path, '/home/guest/workspace/work');
+    assert.equal(sessionsDb.getSessionByProviderSessionId('provider-xyz')?.session_id, 'app-bound');
+  });
+});
+
+test('createSession still applies provider cwd for non-web rows', async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createSession(
+      'cli-chat', 'claude', '/old/place', 'CLI chat',
+      undefined, undefined, null, undefined,
+      { accountDir: null, origin: 'terminal' },
+    );
+
+    sessionsDb.createSession(
+      'cli-chat', 'claude', '/new/place', 'CLI chat',
+      undefined, undefined, null, undefined,
+      { accountDir: null, origin: 'terminal' },
+    );
+
+    assert.equal(sessionsDb.getSessionById('cli-chat')?.project_path, '/new/place');
+  });
+});
+
+/**
+ * Архивный вид проекта — тоже скоуплен по аккаунту: один и тот же
+ * project_path у разных webuser-корней (симлинк/realpath даёт одинаковое
+ * написание) не должен показывать чужие сессии даже в архиве.
+ */
+test('getSessionsByProjectPathIncludingArchived filters other accounts rows', async () => {
+  await withIsolatedDatabase(() => {
+    const myDir = getActiveAccountDir();
+    sessionsDb.createSession('mine-archived', 'claude', '/shared/path', 'Mine', undefined, undefined, null, undefined, {
+      accountDir: myDir,
+      origin: 'web',
+    });
+    sessionsDb.createSession('foreign-archived', 'claude', '/shared/path', 'Foreign', undefined, undefined, null, undefined, {
+      accountDir: '/home/other/.claude-webuser-999',
+      origin: 'web',
+    });
+    sessionsDb.createSession('legacy-null-dir', 'claude', '/shared/path', 'Legacy', undefined, undefined, null, undefined, {
+      accountDir: null,
+      origin: 'terminal',
+    });
+    for (const id of ['mine-archived', 'foreign-archived', 'legacy-null-dir']) {
+      sessionsDb.updateSessionIsArchived(id, true);
+    }
+
+    const rows = sessionsDb.getSessionsByProjectPathIncludingArchived('/shared/path');
+    assert.deepEqual(
+      rows.map((session) => session.session_id).sort(),
+      ['legacy-null-dir', 'mine-archived'],
     );
   });
 });

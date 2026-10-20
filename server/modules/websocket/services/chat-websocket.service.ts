@@ -2,23 +2,28 @@ import path from 'node:path';
 
 import type { WebSocket } from 'ws';
 
-import { chatMessageQueueDb, sessionsDb, type StoredQueuedChatMessage } from '@/modules/database/index.js';
+import { chatMessageQueueDb, chatRunsDb, sessionsDb, type StoredQueuedChatMessage } from '@/modules/database/index.js';
 import {
   getSurvivorPhase,
   getSurvivorProvider,
   isSurvivorRunning,
   providerModelsService,
+  resolveEffectiveProvider,
   stopSurvivor,
+  clampDevinModelForUser,
+  describeDevinFailureForUser,
 } from '@/modules/providers/index.js';
 import { chatRunRegistry, onChatRunCompleted } from '@/modules/websocket/services/chat-run-registry.service.js';
 import {
   broadcastChatQueue,
   clearChatQueue,
   dispatchChatQueues,
+  failQueuedMessageNow,
   listChatQueue,
   queueChatMessage,
   removeChatQueueItem,
   reorderChatQueue,
+  returnClaimedToQueue,
   setQueuedChatMessageRunner,
   startChatQueueHeartbeat,
 } from '@/modules/websocket/services/chat-queue.service.js';
@@ -48,10 +53,9 @@ import type {
   RealtimeClientConnection,
 } from '@/shared/types.js';
 import type { ProviderAdoptedTurn, ProviderAdoptPayload, ProviderSteerPayload } from '@/shared/interfaces.js';
-import { isCodexAllowedForWebUser, isPlatformOwnerWebUser, OPEN_REGISTRATION, parseIncomingJsonObject } from '@/shared/utils.js';
+import { isCodexAllowedForWebUser, isPlatformOwnerWebUser, OPEN_REGISTRATION, parseIncomingJsonObject, resolveScopedWorkingDirectory } from '@/shared/utils.js';
 import {
   getImageAssetsDirForUser,
-  hasOwnClaudeAccess,
   readRequestUserId,
   resolveWebUserRuntimeContext,
 } from '@/shared/web-user-runtime.js';
@@ -64,10 +68,25 @@ import {
  * fact that SOME ceiling exists, and 5 is generous for one interactive user
  * while still bounding the worst case (raised from 3 to 5 on 16.09.26 - one
  * person routinely keeps 3+ chats busy; 8 GB server has room).
+ * Both ceilings read from env so the cap is tunable without a rebuild. The
+ * box owner gets a separate, higher ceiling: their chats are most of the
+ * interactive load, while the regular cap still bounds every other user's
+ * aggregate footprint on the shared instance (owner ceiling added 15.10.26).
  */
-const MAX_CONCURRENT_RUNS_PER_USER = 5;
+function parseConcurrentRunLimit(rawValue: string | undefined, fallback: number): number {
+  const parsed = Number.parseInt(rawValue ?? '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
 
+const MAX_CONCURRENT_RUNS_PER_USER = parseConcurrentRunLimit(process.env.CLOUDCLI_MAX_RUNS_PER_USER, 5);
+const OWNER_MAX_CONCURRENT_RUNS = parseConcurrentRunLimit(process.env.CLOUDCLI_OWNER_MAX_RUNS, 10);
 
+function maxConcurrentRunsForUser(userId: string | number): number {
+  const numericUserId = Number(userId);
+  return Number.isFinite(numericUserId) && isPlatformOwnerWebUser(numericUserId)
+    ? OWNER_MAX_CONCURRENT_RUNS
+    : MAX_CONCURRENT_RUNS_PER_USER;
+}
 
 /**
  * Trust boundary for client-supplied image attachments: chat.send options come
@@ -174,6 +193,18 @@ function sendProtocolError(
 
 /** Метка страницы, понимающей расписки и `server_capabilities` (src/contexts/WebSocketContext.tsx). */
 const CHAT_SEND_ACK_CAP = 'send-ack-1';
+/**
+ * Метка страницы, принимающей прикладной пинг `server_ping` (15.10.26).
+ *
+ * Протокольный ping/pong (heartbeat в websocket-server.service) для страницы
+ * невидим: браузер отвечает на него сам, JS кадра не получает. Поэтому живой
+ * с виду сокет на замёрзшем пути (смена сети, ТСПУ-«заморозка») страница не
+ * замечала, пока сама что-то не отправляла. Прикладной кадр раз в
+ * SERVER_PING_MS — это сигнал «путь жив», по которому сторож связи в
+ * WebSocketContext считает молчание.
+ */
+const SERVER_PING_CAP = 'server-ping-1';
+const SERVER_PING_MS = 25_000;
 
 function readSocketCaps(request: AuthenticatedWebSocketRequest): string[] {
   const rawUrl = (request as { url?: string }).url || '';
@@ -237,44 +268,36 @@ async function handleChatSend(
     return;
   }
 
-  const provider = session.provider as LLMProvider;
+  let provider = session.provider as LLMProvider;
   if (!dependencies.runtime.hasRuntime(provider)) {
     sendProtocolError(ws, 'UNSUPPORTED_PROVIDER', `Provider "${provider}" is not available.`, sessionId, clientMessageId);
     return;
   }
 
-  const openRegistrationContext = resolveWebUserRuntimeContext(userId);
-  const numericUserId = userId !== null ? Number(userId) : NaN;
-  // Devin credentials are machine-global — guests on OPEN_REGISTRATION never run it.
-  if (OPEN_REGISTRATION && provider === 'devin' && !isPlatformOwnerWebUser(numericUserId)) {
-    sendProtocolError(
-      ws,
-      'PROVIDER_NOT_ALLOWED',
-      'The Devin provider is only available to the platform owner.',
-      sessionId,
-      clientMessageId,
-    );
-    return;
-  }
-  // Owner bypass: when the owner's ~/.claude-webuser-<id> is symlinked to
-  // their real ~/.claude, the SDK authenticates via the existing OAuth session
-  // in that directory — no explicit API key is needed or stored.
-  // Остальным хватает любого СВОЕГО доступа: ключа API или входа подпиской в
-  // командной строке сайта (shared/web-user-runtime.ts, hasOwnClaudeAccess).
-  if (
-    OPEN_REGISTRATION &&
-    provider === 'claude' &&
-    !isPlatformOwnerWebUser(numericUserId) &&
-    !(await hasOwnClaudeAccess(openRegistrationContext))
-  ) {
-    sendProtocolError(
-      ws,
-      'CLAUDE_LOGIN_REQUIRED',
-      CLAUDE_LOGIN_REQUIRED_MESSAGE,
-      sessionId,
-      clientMessageId,
-    );
-    return;
+  // Доступа к Claude у человека общей площадки нет — чат мёртвого провайдера
+  // переводится на корпоративный Devin: старая переписка остаётся в
+  // jsonl_path (её доклеивает fetchHistory), новые ходы пишет Devin в своё
+  // хранилище. Владельца и вошедших своим ключом это не касается — проверка
+  // доступа внутри resolveEffectiveProvider.
+  const effectiveProvider = await resolveEffectiveProvider(provider, userId);
+  let providerMigrated = false;
+  if (effectiveProvider !== provider) {
+    if (dependencies.runtime.hasRuntime(effectiveProvider)) {
+      sessionsDb.retargetSessionProvider(sessionId, effectiveProvider);
+      provider = effectiveProvider;
+      providerMigrated = true;
+      session.provider_session_id = null;
+      console.log(`[Chat] чат ${sessionId} переведён с Claude на ${effectiveProvider} — у пользователя ${String(userId)} нет доступа к Claude`);
+    } else {
+      sendProtocolError(
+        ws,
+        'CLAUDE_LOGIN_REQUIRED',
+        CLAUDE_LOGIN_REQUIRED_MESSAGE,
+        sessionId,
+        clientMessageId,
+      );
+      return;
+    }
   }
 
   // Вход в Codex на сервере один — хозяина (~/.codex). Гость общего
@@ -284,21 +307,28 @@ async function handleChatSend(
     return;
   }
 
-  if (OPEN_REGISTRATION && userId !== null && chatRunRegistry.countRunningRunsForUser(userId) >= MAX_CONCURRENT_RUNS_PER_USER) {
+  const userRunLimit = userId === null ? MAX_CONCURRENT_RUNS_PER_USER : maxConcurrentRunsForUser(userId);
+  if (OPEN_REGISTRATION && userId !== null && chatRunRegistry.countRunningRunsForUser(userId) >= userRunLimit) {
     sendProtocolError(
       ws,
       'TOO_MANY_CONCURRENT_RUNS',
-      `You already have ${MAX_CONCURRENT_RUNS_PER_USER} chats running at once. Wait for one to finish before starting another.`,
+      `You already have ${userRunLimit} chats running at once. Wait for one to finish before starting another.`,
       sessionId,
       clientMessageId,
       // Страница не выбрасывает такое сообщение, а держит в очереди и досылает,
       // когда место освободится (src/contexts/chatOutbox.ts, «ждёт места»).
-      { limit: MAX_CONCURRENT_RUNS_PER_USER },
+      { limit: userRunLimit },
     );
     return;
   }
 
   const clientOptions = (data.options ?? {}) as AnyRecord;
+  if (providerMigrated) {
+    // Клиент прислал выбор для старого провайдера (модель/усилие Claude) —
+    // Devin такие имена не знает, и ход упал бы на `--model claude-…`.
+    delete clientOptions.model;
+    delete clientOptions.effort;
+  }
   const command = typeof data.content === 'string' ? data.content : '';
 
   const run = chatRunRegistry.startRun({
@@ -307,6 +337,15 @@ async function handleChatSend(
     providerSessionId: session.provider_session_id,
     connection: ws,
     userId,
+    // Сообщение держим на ходу, пока оно не доехало до агента: сервер,
+    // погибший посреди сборки хода, возвращает его в очередь (requeue),
+    // иначе оно сгорало молча между «принято» и session/prompt.
+    pendingMessage: {
+      id: clientMessageId || `q_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`,
+      userId: userId === null ? null : String(userId),
+      content: command,
+      options: clientOptions,
+    },
   });
 
   if (!run && data.sendNow === true) {
@@ -354,6 +393,28 @@ async function handleChatSend(
       });
     }
     return;
+  }
+
+  // Строка в очереди как write-ahead: до подтверждённой передачи prompt
+  // агенту (якорь) сообщение лежит в базе захваченным — падение сервера или
+  // хода вернёт его обходом очередей, а не потеряет (14.10.26). Захваченные
+  // строки обход не трогает и док не показывает — внешне ничего не меняется.
+  const pendingForWriteAhead = run.pendingMessage;
+  if (pendingForWriteAhead) {
+    try {
+      chatMessageQueueDb.appendClaimedLast({
+        id: pendingForWriteAhead.id,
+        sessionId,
+        userId: pendingForWriteAhead.userId,
+        content: pendingForWriteAhead.content,
+        options: pendingForWriteAhead.options,
+      });
+    } catch (writeAheadError) {
+      // Без строки сообщение держит только память хода — не лучший вариант,
+      // но ход запускать всё равно надо: ошибка записи не отменяет отправку.
+      const text = writeAheadError instanceof Error ? writeAheadError.message : String(writeAheadError);
+      console.error(`[Chat] write-ahead очереди не записался (чат ${sessionId}): ${text}`);
+    }
   }
 
   // Расписка в получении — сразу, до обращения к провайдеру, который может
@@ -422,16 +483,36 @@ async function steerIntoRunningTurn(input: {
   }
   const attachments = verifiedClientAttachments(clientOptions, userId);
   const session = sessionsDb.getSessionById(sessionId);
+  const runtimeContext = resolveWebUserRuntimeContext(userId);
   return dependencies.runtime.steer(run.provider, sessionId, {
     content,
     images: attachments.filter(isImageAttachmentDescriptor),
     files: attachments.filter((descriptor) => !isImageAttachmentDescriptor(descriptor)),
-    cwd: (typeof clientOptions.cwd === 'string' && clientOptions.cwd) || session?.project_path || undefined,
+    cwd: resolveScopedWorkingDirectory(
+      (typeof clientOptions.cwd === 'string' && clientOptions.cwd) || session?.project_path || undefined,
+      runtimeContext.workspaceRoot,
+    ),
   });
 }
 
 /** Заведённый запуск: и обычная отправка, и отправка из очереди ведут его одинаково. */
 type StartedChatRun = NonNullable<ReturnType<typeof chatRunRegistry.startRun>>;
+
+/**
+ * Причина гибели хода словами человека. Devin-классы знают готовые
+ * формулировки (лимит, вход, замок); остальное обрезаем до первой строки —
+ * сырой хвост с trace id и журналом CLI человеку не помогает.
+ */
+function describeRunFailure(provider: LLMProvider, raw: string): string {
+  if (provider === 'devin') {
+    const human = describeDevinFailureForUser(raw);
+    if (human) {
+      return human;
+    }
+  }
+  const firstLine = raw.replace(/\(trace id:[\s\S]*$/i, '').split('\n').map((line) => line.trim()).filter(Boolean)[0] ?? '';
+  return (firstLine || 'Ход завершился ошибкой.').slice(0, 300);
+}
 
 /**
  * Ведёт один ход: разбирает настройки составителя, проверяет вложения и
@@ -452,7 +533,12 @@ async function runProviderTurn(input: {
   dependencies: ChatWebSocketDependencies;
 }): Promise<void> {
   const { run, sessionId, provider, userId, projectPath, content, clientOptions, dependencies } = input;
+  let turnError: string | null = null;
   const runtimeContext = resolveWebUserRuntimeContext(userId);
+  // Персональные белые списки (devin-model-policy): недопустимая для этого
+  // аккаунта модель приводится к разрешённой до записи на сессию и до
+  // передачи ходу провайдера — устаревший выбор или прямой вызов не сработают.
+  clientOptions.model = clampDevinModelForUser(provider, userId, clientOptions.model);
   // Record what this turn runs with so reopening the session later restores the
   // same model and reasoning effort, and so the resume path has a
   // session-scoped model answer to use.
@@ -492,14 +578,29 @@ async function runProviderTurn(input: {
     images: uniqueAttachments.filter(isImageAttachmentDescriptor),
     files: uniqueAttachments.filter((descriptor) => !isImageAttachmentDescriptor(descriptor)),
     sessionId,
-    cwd: clientOptions.cwd ?? projectPath ?? undefined,
-    projectPath: projectPath ?? clientOptions.projectPath,
+    // Рабочая зона не-владельца — его workspace; путь за её пределами
+    // (устаревший, удалённый или чужой) приводится к корню зоны, чтобы
+    // процесс ни при каких клиентских данных не стартовал в каталоге хоста.
+    cwd: resolveScopedWorkingDirectory(
+      (typeof clientOptions.cwd === 'string' && clientOptions.cwd.trim() ? clientOptions.cwd : undefined)
+        ?? projectPath ?? undefined,
+      runtimeContext.workspaceRoot,
+    ),
+    projectPath: resolveScopedWorkingDirectory(
+      projectPath ?? (typeof clientOptions.projectPath === 'string' ? clientOptions.projectPath : undefined),
+      runtimeContext.workspaceRoot,
+    ),
     // Per-user Claude SDK env override (claude-runtime.provider.js). Both are
     // null outside OPEN_REGISTRATION, so the runtime falls back to
     // process.env exactly as it always has for Account 1/2.
     claudeConfigDir: runtimeContext.claudeConfigDir ?? undefined,
     anthropicApiKey: runtimeContext.anthropicApiKey ?? undefined,
     isolateInheritedClaudeAuth: runtimeContext.isolateInheritedClaudeAuth || undefined,
+    // Рантайм отмечает, когда prompt реально попал к выживающему процессу
+    // (Devin — session/prompt записан в сокет супервизора, Codex — worker
+    // запущен, Claude — первое событие SDK). До якоря ход держит перезапуск,
+    // а при гашении сообщение возвращается в очередь.
+    onPromptAnchored: () => chatRunRegistry.markRunPromptAnchored(run),
   };
 
   try {
@@ -520,15 +621,53 @@ async function runProviderTurn(input: {
       })
       : null;
     if (adopted) {
+      // Сообщение ушло в уже живой выживающий процесс — ход заякорен.
+      chatRunRegistry.markRunPromptAnchored(run);
       console.log(`[Chat] сообщение передано живому процессу чата ${sessionId} (идёт фоновая работа)`);
       await adopted.done;
     } else {
       await dependencies.runtime.run(provider, content, runtimeOptions, run.writer);
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error(`[Chat] Provider runtime "${provider}" failed`, { sessionId, error: message });
+    turnError = error instanceof Error ? error.message : String(error);
+    console.error(`[Chat] Provider runtime "${provider}" failed`, { sessionId, error: turnError });
+    // Причина — в журнал хода и в плашку человеку: без неё ход «просто
+    // перестал» и страница после перезагрузки не знает, чем он кончился.
+    chatRunRegistry.noteRunFailure(run, describeRunFailure(provider, turnError));
   } finally {
+    // Строка очереди, которую вёз этот ход: доехала — снята с очереди на якоре
+    // (markRunPromptAnchored → markDelivered). Не доехала — возвращаем со
+    // счётчиком попыток, после потолка — видимая ошибка, а не тихая пропажа
+    // (потеря 14.10.26, три сообщения чата 13fa2cd9). Отмена человеком уже
+    // обнулила pendingMessage — отменённое не воскресаем.
+    const pending = run.pendingMessage;
+    if (pending && !run.promptAnchored) {
+      run.pendingMessage = null;
+      const outcome = returnClaimedToQueue(
+        {
+          id: pending.id,
+          sessionId,
+          userId: pending.userId,
+          content: pending.content,
+          options: (pending.options ?? {}) as Record<string, unknown>,
+          createdAt: '',
+        },
+        turnError ?? 'ход завершился, не успев передать сообщение агенту',
+      );
+      if (outcome === 'requeued') {
+        console.warn(`[Chat] сообщение ${pending.id} чата ${sessionId} не дошло до агента (${turnError ?? '?'}) — вернул в очередь`);
+      } else {
+        // Открытая вкладка видит сбой и в ленте: строка в доке очереди уже
+        // помечена ошибкой, но лента — первое, куда смотрит человек.
+        broadcastJson({
+          kind: 'error',
+          sessionId,
+          provider,
+          content: 'Сервер не смог передать сообщение агенту — оно осталось в очереди с ошибкой.',
+          timestamp: new Date().toISOString(),
+        });
+      }
+    }
     // Safety net: a runtime that crashed (or resolved) without emitting its
     // terminal `complete` would otherwise leave the session stuck in
     // "processing" forever on every connected client. Scoped to THIS run —
@@ -560,9 +699,10 @@ function broadcastJson(payload: unknown): void {
 }
 
 /**
- * Devin sessions may only exist for the platform owner — a guest's socket must
- * not observe, subscribe to, abort, or queue-edit one. The check keys off the
- * stored session row: no row → nothing to gate (handlers fail their own way).
+ * Devin-чат — собственность инициировавшего пользователя (как и любой чат):
+ * чужой сокет не должен наблюдать его поток, отвечать на его permission-
+ * запросы, останавливать его или править очередь. Наследие без автора —
+ * только владельцу площадки. Нет строки — гейтить нечего.
  */
 function isDevinSessionForbiddenForUser(
   sessionId: string | null | undefined,
@@ -576,7 +716,12 @@ function isDevinSessionForbiddenForUser(
     return false;
   }
   const numericUserId = userId === null || userId === undefined ? NaN : Number(userId);
-  return !Number.isFinite(numericUserId) || !isPlatformOwnerWebUser(numericUserId);
+  if (Number.isFinite(numericUserId) && isPlatformOwnerWebUser(numericUserId)) {
+    return false;
+  }
+  return !Number.isFinite(numericUserId)
+    || session.initiated_by_user_id == null
+    || Number(session.initiated_by_user_id) !== numericUserId;
 }
 
 /**
@@ -596,41 +741,45 @@ async function runQueuedChatMessage(
   const session = sessionsDb.getSessionById(sessionId);
   if (!session) {
     console.warn(`[Очередь чата] чат ${sessionId} не найден — сообщение ${message.id} отброшено`);
+    // Чата нет — и док показывать некуда: строку просто снимаем.
+    chatMessageQueueDb.markDelivered(message.id);
     return true;
   }
 
-  const provider = session.provider as LLMProvider;
+  let provider = session.provider as LLMProvider;
   if (!dependencies.runtime.hasRuntime(provider)) {
-    console.warn(`[Очередь чата] провайдер "${provider}" недоступен — сообщение ${message.id} отброшено`);
+    console.warn(`[Очередь чата] провайдер "${provider}" недоступен — сообщение ${message.id} помечено ошибкой`);
+    failQueuedMessageNow(message, `провайдер "${provider}" недоступен`);
     return true;
   }
 
   const userId = message.userId;
-  const runtimeContext = resolveWebUserRuntimeContext(userId);
-  const numericUserId = userId !== null ? Number(userId) : NaN;
-  // Devin — только владелец площадки; очередь не должна быть обходом гейта.
-  if (OPEN_REGISTRATION && provider === 'devin' && !isPlatformOwnerWebUser(numericUserId)) {
-    console.warn(`[Очередь чата] devin для не-владельца ${String(userId)} — сообщение ${message.id} отброшено`);
-    return true;
-  }
-  if (
-    OPEN_REGISTRATION
-    && provider === 'claude'
-    && !isPlatformOwnerWebUser(numericUserId)
-    && !(await hasOwnClaudeAccess(runtimeContext))
-  ) {
-    console.warn(`[Очередь чата] пользователь ${String(userId)} не вошёл в Claude и не добавил ключ — сообщение ${message.id} отброшено`);
-    return true;
+  // Та же миграция, что в handleChatSend: стоявшее в очереди сообщение чата
+  // мёртвого провайдера уходит через корпоративный Devin, а не отбрасывается.
+  const effectiveProvider = await resolveEffectiveProvider(provider, userId);
+  let providerMigrated = false;
+  if (effectiveProvider !== provider) {
+    if (dependencies.runtime.hasRuntime(effectiveProvider)) {
+      sessionsDb.retargetSessionProvider(sessionId, effectiveProvider);
+      provider = effectiveProvider;
+      providerMigrated = true;
+      session.provider_session_id = null;
+    } else {
+      console.warn(`[Очередь чата] пользователь ${String(userId)} не вошёл в Claude и не добавил ключ — сообщение ${message.id} помечено ошибкой`);
+      failQueuedMessageNow(message, 'нет доступа к Claude (вход или ключ в «Настройки → Агенты»)');
+      return true;
+    }
   }
 
   if (provider === 'codex' && !isCodexAllowedForWebUser(userId)) {
-    console.warn(`[Очередь чата] Codex недоступен пользователю ${String(userId)} — сообщение ${message.id} отброшено`);
+    console.warn(`[Очередь чата] Codex недоступен пользователю ${String(userId)} — сообщение ${message.id} помечено ошибкой`);
+    failQueuedMessageNow(message, 'Codex недоступен этому пользователю');
     return true;
   }
 
   // Предел одновременных чатов: место освободится — строку заберёт следующий
   // обход очередей, поэтому здесь именно «вернуть в очередь», а не «отбросить».
-  if (OPEN_REGISTRATION && userId !== null && chatRunRegistry.countRunningRunsForUser(userId) >= MAX_CONCURRENT_RUNS_PER_USER) {
+  if (OPEN_REGISTRATION && userId !== null && chatRunRegistry.countRunningRunsForUser(userId) >= maxConcurrentRunsForUser(userId)) {
     return false;
   }
 
@@ -640,12 +789,31 @@ async function runQueuedChatMessage(
     providerSessionId: session.provider_session_id,
     connection: broadcastConnection(provider),
     userId,
+    // Тот же якорь, что у прямой отправки: снятая с очереди строка уже не в
+    // базе — до доставки prompt агенту её держит ход, а при гашении сервера
+    // вернёт в очередь.
+    pendingMessage: {
+      id: message.id,
+      userId: message.userId === null ? null : String(message.userId),
+      content: message.content,
+      options: (message.options ?? {}) as AnyRecord,
+    },
   });
   if (!run) {
     return false;
   }
 
-  const clientOptions = (message.options ?? {}) as AnyRecord;
+  // Копия: `message.options` — тот же объект, что у pendingMessage, а там
+  // живут служебные ключи доставки (__redispatch, __notBefore) — из копии
+  // их убираем, чтобы провайдеру служебное не уезжало, из записи — не стираем.
+  const clientOptions = { ...((message.options ?? {}) as AnyRecord) };
+  delete clientOptions.__redispatch;
+  delete clientOptions.__notBefore;
+  if (providerMigrated) {
+    // Модель/усилие в сообщении выбраны под старый провайдер — Devin их не знает.
+    delete clientOptions.model;
+    delete clientOptions.effort;
+  }
   console.log(`[Очередь чата] отправляю сообщение ${message.id} (чат ${sessionId})`);
 
   // Плашка «работает» во всех вкладках: ход начался не по нажатию человека,
@@ -715,9 +883,17 @@ export function initChatQueueDispatch(dependencies: ChatWebSocketDependencies): 
   onChatRunCompleted(() => {
     dispatchChatQueues();
   });
-  // Первый обход делает server/index.ts после adoptSurvivors(). Иначе
-  // очередь могла запустить второй ход за миг до того, как новый
-  // сайт увидит живой Claude/Codex worker прошлого поколения.
+  // Захваты прошлого процесса: его держатели мертвы, а строки обязаны доехать.
+  // Снимаем их до первого обхода — иначе строки висели бы невидимками.
+  const released = chatMessageQueueDb.releaseAllClaims();
+  if (released > 0) {
+    console.warn(`[Очередь чата] снято ${released} захват(а/ов) прошлого процесса — строки вернулись в очередь`);
+  }
+  // Перезапуск сайта (выкатка, перезагрузка) не должен задерживать очередь,
+  // но и подхват выживших агентов ещё не закончился: обход отсюда снимал
+  // строку до того, как isSurvivorRunning узнал о держателе сессии, — запуск
+  // упирался в session_locked и сообщение сгорало (потеря 14.10.26). Первый
+  // обход делает index.ts ПОСЛЕ adoptSurvivors, до него — раз в минуту сторож.
   startChatQueueHeartbeat();
 }
 
@@ -744,10 +920,28 @@ async function handleChatAbort(
   }
 
   const run = chatRunRegistry.getRun(sessionId);
+  // Человек нажал «остановить» ДО того, как prompt доехал до агента: сообщение
+  // не воскрешать — снимаем его и с хода, и со строки очереди, и из журнала
+  // хода, иначе обход отправил бы «отменённое» снова.
+  if (run && run.status === 'running' && !run.promptAnchored && run.pendingMessage) {
+    const cancelled = run.pendingMessage;
+    run.pendingMessage = null;
+    try {
+      chatMessageQueueDb.remove(sessionId, cancelled.id);
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      console.error(`[Chat] остановка хода ${sessionId}: не удалось снять сообщение ${cancelled.id} с очереди: ${text}`);
+    }
+    try {
+      chatRunsDb.clearPending(run.runId);
+    } catch {
+      // журнал не написался — сверка при старте подчистит
+    }
+  }
   // Агент пережил перезапуск сайта: канала к нему у сервера нет, остановить
   // можно только сигналом процессу.
   if ((!run || run.status !== 'running') && isSurvivorRunning(sessionId)) {
-    const survivorProvider = getSurvivorProvider(sessionId) || 'claude';
+    const survivorProvider = getSurvivorProvider(sessionId);
     stopSurvivor(sessionId);
     // «Работа завершена» с отметкой отмены: «чат свободен» вкладка может
     // отбросить как устаревший (см. onGone в server/index.ts).
@@ -849,6 +1043,27 @@ function handleChatSubscribe(
       ? getSurvivorPhase(sessionId)
       : null;
 
+    // Чем кончился последний ход — вкладке, открывшей чат после конца:
+    // живые события исхода ушли в сокет, которого могло уже не быть
+    // (iOS убивает страницу в фоне), а журнал chat_runs терминальный
+    // исход держит всегда. Показываем только неуспех — «завершился
+    // нормально» баннером не нужен.
+    let lastRun: Record<string, unknown> | null = null;
+    if (!isProcessing) {
+      try {
+        const finished = chatRunsDb.latestFinishedForSession(sessionId);
+        if (finished && finished.status !== 'completed') {
+          lastRun = {
+            status: finished.status,
+            error: finished.error,
+            finishedAt: finished.finishedAt,
+          };
+        }
+      } catch {
+        // журнал не читается — работе подписки это не мешает
+      }
+    }
+
     sendJson(ws, {
       kind: 'chat_subscribed',
       sessionId,
@@ -858,6 +1073,7 @@ function handleChatSubscribe(
       lastSeq: run?.lastSeq ?? 0,
       runStartedAt: run?.startedAt ?? null,
       pendingPermissions,
+      lastRun,
       // Очередь приходит вместе с состоянием чата: вкладка её только
       // показывает, хранит и отправляет сервер.
       queue: listChatQueue(sessionId),
@@ -901,14 +1117,29 @@ async function handleChatQueueSendNow(
     // Уже ушло (второе нажатие, другое устройство, конец хода) — делать нечего.
     return;
   }
+  if (item.claimedAt) {
+    // Строку уже везёт ход — «Сейчас» не нужно, она и так в пути.
+    return;
+  }
+  if (item.state === 'failed') {
+    // «Сейчас» на отказавшей строке — это ручной повтор: ошибку стираем,
+    // строка снова обычная ждущая.
+    chatMessageQueueDb.markQueued(item.id);
+  }
 
   if (!chatRunRegistry.isProcessing(sessionId)) {
-    reorderChatQueue(sessionId, [id, ...queue.filter((entry) => entry.id !== id).map((entry) => entry.id)]);
+    reorderChatQueue(sessionId, [id, ...queue.filter((entry) => entry.id !== id && !entry.claimedAt).map((entry) => entry.id)]);
     dispatchChatQueues();
     return;
   }
 
-  removeChatQueueItem(sessionId, id);
+  // Захватываем строку ДО передачи: пока идёт передача, ход может закончиться,
+  // и обход очереди отправил бы ту же строку второй раз. Не получилось —
+  // захват возвращается, человеку объясняем.
+  if (!chatMessageQueueDb.claim(id)) {
+    return;
+  }
+  broadcastChatQueue(sessionId);
   let steered = false;
   try {
     steered = await steerIntoRunningTurn({
@@ -923,11 +1154,14 @@ async function handleChatQueueSendNow(
     console.error('[Очередь чата] «отправить сейчас» не удалось', { sessionId, error: message });
   }
   if (steered) {
+    // Сообщение уже в идущем ходе — та же подтверждённая доставка, что и якорь.
+    chatMessageQueueDb.markDelivered(id);
+    broadcastChatQueue(sessionId);
     console.log(`[Очередь чата] сообщение ${id} отправлено в идущий ход (чат ${sessionId})`);
     return;
   }
 
-  chatMessageQueueDb.pushFront(item);
+  chatMessageQueueDb.releaseClaim(id);
   broadcastChatQueue(sessionId);
   // Ход мог закончиться, пока шла попытка: тогда строка уйдёт обычным путём.
   dispatchChatQueues();
@@ -1029,7 +1263,9 @@ export function handleChatConnection(
   request: AuthenticatedWebSocketRequest,
   dependencies: ChatWebSocketDependencies
 ): void {
-  console.log('[INFO] Chat WebSocket connected');
+  const ua = String(request.headers?.['user-agent'] ?? '');
+  const uaShort = /iPhone/.test(ua) ? 'iPhone' : /Mac/.test(ua) ? 'Mac' : /Android/.test(ua) ? 'Android' : ua.slice(0, 40) || '?';
+  console.log(`[INFO] Chat WebSocket connected ua=${uaShort}`);
   connectedClients.add(ws);
   // Первым делом — что умеет этот сервер. Страница досылает сообщения только
   // серверу, который расписывается в получении и узнаёт повторы; со старым
@@ -1037,8 +1273,25 @@ export function handleChatConnection(
   // Шлём только странице, которая сама сказала, что понимает это событие
   // (`caps` в адресе подключения): старая страница вывела бы незнакомое
   // событие в ленту строкой.
-  if (readSocketCaps(request).includes(CHAT_SEND_ACK_CAP)) {
-    sendJson(ws, { kind: 'server_capabilities', chatSendAck: true });
+  const socketCaps = readSocketCaps(request);
+  if (socketCaps.includes(CHAT_SEND_ACK_CAP)) {
+    sendJson(ws, { kind: 'server_capabilities', chatSendAck: true, serverPingMs: SERVER_PING_MS });
+  }
+
+  // Прикладной пинг, видимый странице — только ей (кадр `server_ping`):
+  // протокольный ping браузер проглатывает молча, и страница не может
+  // отличить живой сокет от замёрзшего в пути. Шлём только заявившим
+  // `server-ping-1`: старая страница показала бы кадр в ленте строкой.
+  let appPingTimer: ReturnType<typeof setInterval> | null = null;
+  if (socketCaps.includes(SERVER_PING_CAP)) {
+    appPingTimer = setInterval(() => {
+      try {
+        sendJson(ws, { kind: 'server_ping', timestamp: new Date().toISOString() });
+      } catch {
+        // сокет умер между проверкой состояния и отправкой — сторож приберёт
+      }
+    }, SERVER_PING_MS);
+    appPingTimer.unref?.();
   }
 
   const userId = readRequestUserId(request);
@@ -1077,6 +1330,11 @@ export function handleChatConnection(
         case 'chat.queue.sendNow':
           await handleChatQueueSendNow(ws, data, dependencies);
           return;
+        case 'ping':
+          // Проба связи от сторожа страницы: любой ответ доказывает, что
+          // сокет жив. `server_pong` — чтобы отличать от других кадров.
+          sendJson(ws, { kind: 'server_pong', timestamp: new Date().toISOString() });
+          return;
         default:
           sendProtocolError(ws, 'UNKNOWN_MESSAGE_TYPE', `Unknown message type "${messageType}".`);
           return;
@@ -1093,7 +1351,11 @@ export function handleChatConnection(
   // на iPhone не оставлял следа — этот код один из немногих признаков.
   const openedAt = Date.now();
   ws.on('close', (code: number) => {
-    console.log(`[INFO] Chat client disconnected code=${code} livedSec=${Math.round((Date.now() - openedAt) / 1000)}`);
+    console.log(`[INFO] Chat client disconnected code=${code} livedSec=${Math.round((Date.now() - openedAt) / 1000)} ua=${uaShort}`);
+    if (appPingTimer) {
+      clearInterval(appPingTimer);
+      appPingTimer = null;
+    }
     connectedClients.delete(ws);
   });
 }

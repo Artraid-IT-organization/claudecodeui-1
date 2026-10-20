@@ -6,6 +6,7 @@ import test from 'node:test';
 
 import { closeConnection, initializeDatabase, projectsDb, sessionsDb } from '@/modules/database/index.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
+import { getActiveAccountDir } from '@/shared/session-scope.js';
 import { AppError, normalizeProjectPath } from '@/shared/utils.js';
 
 async function withIsolatedDatabase(runTest: () => void | Promise<void>): Promise<void> {
@@ -33,7 +34,12 @@ async function withIsolatedDatabase(runTest: () => void | Promise<void>): Promis
 test('getSessionDetailsById resolves the owning project for a disk-indexed session', async () => {
   await withIsolatedDatabase(() => {
     const projectPath = '/home/user/example-project';
-    const sessionId = sessionsDb.createSession('provider-abc', 'claude', projectPath, 'My session');
+    // Диск-индексированные строки несут каталог своего аккаунта — без него
+    // строка «ничья» и на общей площадке (OPEN_REGISTRATION) читается только
+    // владельцем; контекст-free вызов тогда отказал бы (IDOR-фикс 10.10.26).
+    const sessionId = sessionsDb.createSession('provider-abc', 'claude', projectPath, 'My session',
+      undefined, undefined, null, undefined,
+      { accountDir: getActiveAccountDir(), origin: 'terminal' });
     const projectRow = projectsDb.getProjectPath(projectPath);
     assert.ok(projectRow, 'project row should exist after createSession');
 

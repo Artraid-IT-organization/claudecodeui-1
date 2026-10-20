@@ -34,10 +34,16 @@ type SessionRow = {
   server_scope: ServerScope | null;
   /** Ярлык-флажок на чате: 1 — висит, 0 — нет. */
   is_flagged: number;
-  /** Каталог аккаунта, которому принадлежит переписка (атрибуция владельца). */
+  /** Галочка «сделано»: 1 — стоит, 0 — нет. Взаимоисключает флажок. */
+  is_done: number;
+  /** Промпт из чата «Промптов» уже ушёл кнопкой «В новый чат»: 1 — да. */
+  prompt_launched: number;
+  /** Каталог аккаунта, которому принадлежит чат (изоляция пользователей). */
   account_dir: string | null;
-  /** Веб-пользователь, начавший чат через приложение; NULL — строки наследия. */
+  /** Кто из веб-пользователей инициировал чат (NULL у наследия и у строк с диска). */
   initiated_by_user_id: number | null;
+  /** devin_connections.id — канал, через который идёт devin-чат. */
+  devin_connection_id: number | null;
   isArchived: number;
   created_at: string;
   updated_at: string;
@@ -49,7 +55,7 @@ type RecentSessionsPage = {
 };
 
 const SESSION_ROW_COLUMNS =
-  'session_id, provider, provider_session_id, project_path, jsonl_path, custom_name, title_source, model, effort, group_id, group_label, server_scope, is_flagged, account_dir, initiated_by_user_id, isArchived, created_at, updated_at';
+  'session_id, provider, provider_session_id, project_path, jsonl_path, custom_name, title_source, model, effort, group_id, group_label, server_scope, is_flagged, is_done, prompt_launched, account_dir, initiated_by_user_id, devin_connection_id, isArchived, created_at, updated_at';
 
 /**
  * Decides whether a freshly-derived title candidate should replace the
@@ -146,7 +152,7 @@ function normalizeProjectPathForProvider(provider: string, projectPath: string):
  */
 const ACCOUNT_SCOPE_SQL = ' AND (account_dir IS NULL OR account_dir = ?)';
 
-type SessionAccountVisibility = 'current' | 'shared-codex' | 'hide-codex';
+type SessionAccountVisibility = 'current' | 'shared-codex' | 'hide-codex' | 'all';
 
 /**
  * Builds the account boundary used by session-list queries.
@@ -164,11 +170,23 @@ function accountVisibilitySql(
   const prefix = tableAlias ? `${tableAlias}.` : '';
   const currentAccount = `(${prefix}account_dir IS NULL OR ${prefix}account_dir = ?)`;
 
+  if (visibility === 'all') {
+    return '';
+  }
   if (visibility === 'shared-codex') {
     return ` AND (${prefix}provider IN ('codex', 'devin') OR ${currentAccount})`;
   }
   if (visibility === 'hide-codex') {
-    return ` AND ${prefix}provider NOT IN ('codex', 'devin') AND ${currentAccount}`;
+    // Гость видит свои же чаты Codex/Devin: через корпоративный слой Devin —
+    // помощник по умолчанию для всех, и гостевые чаты идут через него
+    // (initiated_by_user_id проставляется при создании). Прячутся только
+    // чужие строки хостовых входов — то же правило «свой чат» у
+    // assertSessionRowAllowed: initiated_by_user_id = я.
+    const initiatedBy = Number(getRequestRuntimeContext()?.userId);
+    const ownInitiated = Number.isFinite(initiatedBy)
+      ? ` OR ${prefix}initiated_by_user_id = ${initiatedBy}`
+      : '';
+    return ` AND (${prefix}provider NOT IN ('codex', 'devin')${ownInitiated}) AND ${currentAccount}`;
   }
   return ` AND ${currentAccount}`;
 }
@@ -228,6 +246,14 @@ export const sessionsDb = {
    * behavior unchanged, so this fix stays scoped to the provider it was
    * reported for.
    */
+  /*
+   * `project_path` у рождённой в вебе строки (`origin='web'`) провайдер не
+   * перетирает: человек выбрал проект при создании, а cwd, который присылает
+   * синхронизатор, может быть другим написанием того же места (Devin пишет в
+   * sessions.db realpath — у гостей team-access `workspace/work` это симлинк,
+   * и чат уезжал в одноимённую папку-двойник: «не все чаты в списке»).
+   * Строкам без веб-выбора (terminal/auto/CLI) cwd провайдера — правда.
+   */
   createSession(
     providerSessionId: string,
     provider: string,
@@ -265,7 +291,10 @@ export const sessionsDb = {
           `UPDATE sessions SET
              provider = ?,
              updated_at = COALESCE(?, CURRENT_TIMESTAMP),
-             project_path = ?,
+             project_path = CASE
+               WHEN origin = 'web' AND project_path IS NOT NULL THEN project_path
+               ELSE ?
+             END,
              jsonl_path = ?,
              account_dir = COALESCE(?, account_dir),
              origin = COALESCE(origin, ?),
@@ -288,7 +317,10 @@ export const sessionsDb = {
           `UPDATE sessions SET
              provider = ?,
              updated_at = COALESCE(?, CURRENT_TIMESTAMP),
-             project_path = ?,
+             project_path = CASE
+               WHEN origin = 'web' AND project_path IS NOT NULL THEN project_path
+               ELSE ?
+             END,
              jsonl_path = ?,
              account_dir = COALESCE(?, account_dir),
              origin = COALESCE(origin, ?),
@@ -322,7 +354,11 @@ export const sessionsDb = {
          provider = excluded.provider,
          provider_session_id = excluded.provider_session_id,
          updated_at = excluded.updated_at,
-         project_path = excluded.project_path,
+         project_path = CASE
+           WHEN sessions.origin = 'web' AND sessions.project_path IS NOT NULL
+             THEN sessions.project_path
+           ELSE excluded.project_path
+         END,
          jsonl_path = excluded.jsonl_path,
          account_dir = COALESCE(excluded.account_dir, sessions.account_dir),
          origin = COALESCE(sessions.origin, excluded.origin),
@@ -393,6 +429,17 @@ export const sessionsDb = {
   },
 
   /**
+   * Прибивает devin-чат к корпоративному каналу (devin_connections.id).
+   * Ставится рантаймом в момент session/new и при resume: канал чата не
+   * меняется — sessions.db живёт внутри каталога канала.
+   */
+  setSessionDevinConnection(sessionId: string, connectionId: number | null): void {
+    getConnection()
+      .prepare('UPDATE sessions SET devin_connection_id = ?, updated_at = CURRENT_TIMESTAMP WHERE session_id = ?')
+      .run(connectionId, sessionId);
+  },
+
+  /**
    * Records the provider-native session id for one app-allocated session.
    *
    * If the filesystem watcher indexed the provider transcript before this
@@ -436,6 +483,53 @@ export const sessionsDb = {
     });
 
     merge();
+  },
+
+  /**
+   * Переводит чат на другого провайдера (миграция Claude → Devin у человека
+   * без своего доступа к Claude).
+   *
+   * `provider_session_id` обнуляется намеренно: новый провайдер не умеет
+   * продолжать чужую сессию, он начнёт свою и назовёт свой id — его запишет
+   * `assignProviderSessionId`. `model`/`effort` сбрасываются тоже — записанная
+   * Claude-модель передалась бы новому провайдеру как `--model claude-…` и
+   * завалила бы ход. Переписка до перевода не теряется: файл остаётся в
+   * `jsonl_path`, и читалка истории доклеивает его к ленте
+   * (sessions.service.fetchHistory).
+   */
+  retargetSessionProvider(sessionId: string, provider: string): void {
+    const db = getConnection();
+    db.prepare(
+      `UPDATE sessions
+       SET provider = ?,
+           provider_session_id = NULL,
+           model = NULL,
+           effort = NULL,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE session_id = ?`
+    ).run(provider, sessionId);
+  },
+
+  /**
+   * Строка чата, которой принадлежит файл переписки.
+   *
+   * Синхронизатор Claude пропускает стенограмму, занятую переведённым на
+   * другого провайдера чатом (`provider <> 'claude'`): иначе обход файлов
+   * посеял бы вторую строку того же разговора под старым провайдером, и в
+   * списке возникал чат-призрак.
+   */
+  getSessionByTranscriptPath(jsonlPath: string): Pick<SessionRow, 'session_id' | 'provider'> | null {
+    const db = getConnection();
+    const row = db
+      .prepare(
+        `SELECT session_id, provider
+         FROM sessions
+         WHERE jsonl_path = ?
+         LIMIT 1`
+      )
+      .get(jsonlPath) as Pick<SessionRow, 'session_id' | 'provider'> | undefined;
+
+    return row ?? null;
   },
 
   /**
@@ -532,16 +626,30 @@ export const sessionsDb = {
   },
 
   /**
-   * Вешает или снимает ярлык-флажок. `updated_at` не трогаем: ярлык — метка,
-   * а не активность, и чат не должен от него подниматься в списке.
+   * Вешает, снимает или переключает метку чата. `updated_at` не трогаем:
+   * метка — не активность, и чат не должен от неё подниматься в списке.
+   * Флажок и галочка взаимоисключаются.
    */
-  setSessionFlagged(sessionId: string, flagged: boolean): void {
+  setSessionMark(sessionId: string, mark: 'none' | 'flag' | 'done'): void {
     const db = getConnection();
     db.prepare(
       `UPDATE sessions
-       SET is_flagged = ?
+       SET is_flagged = ?, is_done = ?
        WHERE session_id = ?`
-    ).run(flagged ? 1 : 0, sessionId);
+    ).run(mark === 'flag' ? 1 : 0, mark === 'done' ? 1 : 0, sessionId);
+  },
+
+  /**
+   * Отмечает/снимает признак «промпт из этого чата «Промптов» уже ушёл
+   * кнопкой «В новый чат». `updated_at` не трогаем — метка не активность.
+   */
+  setSessionPromptLaunched(sessionId: string, launched: boolean): void {
+    const db = getConnection();
+    db.prepare(
+      `UPDATE sessions
+       SET prompt_launched = ?
+       WHERE session_id = ?`
+    ).run(launched ? 1 : 0, sessionId);
   },
 
   setSessionGroup(sessionId: string, groupId: string | null, groupLabel: string | null): void {
@@ -674,6 +782,46 @@ export const sessionsDb = {
     return normalizeSessionRow(row) ?? null;
   },
 
+  /**
+   * Все ожидающие provider-id app-строки провайдера — кандидаты на привязку,
+   * когда точного совпадения `project_path` нет. Devin хранит в sessions.db
+   * `working_directory` в realpath-написании, а app-строка рождается с
+   * лексическим путём (у гостей team-access `workspace/work` — симлинк), так
+   * что равенство строк тут не работает: сравнивать по realpath обязан
+   * вызывающий. Потребитель — devin-session-synchronizer.
+   */
+  findPendingAppSessions(provider: string): SessionRow[] {
+    const db = getConnection();
+    const rows = db
+      .prepare(
+        `SELECT ${SESSION_ROW_COLUMNS}
+         FROM sessions
+         WHERE provider = ?
+           AND provider_session_id IS NULL
+           AND isArchived = 0
+         ORDER BY datetime(COALESCE(updated_at, created_at)) DESC, session_id DESC`
+      )
+      .all(provider) as SessionRow[];
+
+    return normalizeSessionRows(rows);
+  },
+
+  /**
+   * Все известные пути транскриптов из таблицы сессий. Инкрементальный скан
+   * сверяет с ними диск: файл, которого нет в базе, индексируется независимо
+   * от mtime — иначе появившийся с «старым» временем (копия с сохранённым
+   * mtime, файл, долившийся между курсором и границей скана) навсегда
+   * оставался невидимым. Потребитель — claude-session-synchronizer.
+   */
+  listTranscriptPaths(): string[] {
+    const db = getConnection();
+    const rows = db
+      .prepare(`SELECT jsonl_path FROM sessions WHERE jsonl_path IS NOT NULL`)
+      .all() as { jsonl_path: string }[];
+
+    return rows.map((row) => row.jsonl_path);
+  },
+
   getAllSessions(): SessionRow[] {
     const db = getConnection();
     const rows = db
@@ -701,6 +849,7 @@ export const sessionsDb = {
     serverScope?: ServerScope,
     providerSpace?: 'codex' | 'devin' | 'claude',
     accountVisibility: SessionAccountVisibility = 'current',
+    includeInternal = false,
   ): RecentSessionsPage {
     const db = getConnection();
     // Лента отдаётся по одному блоку верхней панели за раз. Отбирать на
@@ -715,10 +864,28 @@ export const sessionsDb = {
       + (providerSpace === 'codex' ? ` AND sessions.provider = 'codex'` : '')
       + (providerSpace === 'devin' ? ` AND sessions.provider = 'devin'` : '')
       + (providerSpace === 'claude' ? ` AND sessions.provider NOT IN ('codex', 'devin')` : '');
+    // Лента — только чаты, запущенные человеком (Егор 15.10.26: «запуски
+    // нейросетей я не должен видеть, мне важен результат»). Служебные =
+    // origin='auto' + одноразовые папки (та же логика, что isMachineMadeChat
+    // в chat-groups). includeInternal возвращает служебные одним параметром —
+    // маленькая кнопка «показать служебные» внизу списка. Проект «Промпты»
+    // всегда остаётся только в своей закреплённой секции (Егор 19.10.26).
+    const internalClause = includeInternal ? '' : `
+      AND (sessions.origin IS NULL OR sessions.origin <> 'auto')
+      AND (sessions.project_path IS NULL OR (
+        sessions.project_path NOT LIKE '/tmp/%'
+        AND lower(sessions.project_path) NOT GLOB '*e2e[-_]*'
+        AND lower(sessions.project_path) NOT GLOB '*e2e'
+      ))
+    `;
+    const promptsClause = `
+      AND COALESCE(sessions.project_path, '') <> '/home/claude/prompts'
+      AND COALESCE(projects.custom_project_name, '') <> 'Промпты'
+    `;
     const visibilityClause = `
       sessions.isArchived = 0
       AND (projects.isArchived IS NULL OR projects.isArchived = 0)
-    ` + accountVisibilitySql(accountVisibility, 'sessions') + scopeClause;
+    ` + internalClause + promptsClause + accountVisibilitySql(accountVisibility, 'sessions') + scopeClause;
     const accountDir = getActiveAccountDir();
     const scopeParams = serverScope ? [serverScope] : [];
     const rows = db
@@ -786,14 +953,14 @@ export const sessionsDb = {
    */
   getSessionsByProjectPathIncludingArchived(
     projectPath: string,
-    accountVisibility?: SessionAccountVisibility,
+    accountVisibility: SessionAccountVisibility = 'current',
   ): SessionRow[] {
     const db = getConnection();
     const normalizedProjectPath = normalizeProjectPath(projectPath);
-    // Permanent project deletion intentionally omits accountVisibility so it
-    // can still clean every transcript for the path. Sidebar/archive reads
-    // pass it explicitly and retain the same owner/guest boundary as active
-    // project pages.
+    // Скоуп обязателен и здесь: путь проекта не уникален между аккаунтами
+    // (симлинк/realpath дают один project_path у разных webuser-корней), и без
+    // него архивный вид показывал чужие сессии. Permanent project deletion
+    // передаёт 'all' явно — оно обязано вычистить транскрипты всех владельцев.
     const visibilitySql = accountVisibility
       ? accountVisibilitySql(accountVisibility)
       : '';
@@ -843,6 +1010,150 @@ export const sessionsDb = {
       .all(normalizedProjectPath, getActiveAccountDir(), ...scopeSql.params, limit, offset) as SessionRow[];
 
     return normalizeSessionRows(rows);
+  },
+
+  /**
+   * Порции чатов сразу для всех папок списка проектов: одна выборка с
+   * нумерацией строк внутри каждой папки вместо отдельного запроса на папку.
+   * Отбор и порядок — ровно как у getSessionsByProjectPathPage (перенесённые
+   * в другой блок чаты первыми, дальше по дате). 14.10.26 список проектов
+   * делал ~3 запроса на каждую из ~110 папок — на занятом процессоре это
+   * стоило больше секунды на запрос списка.
+   */
+  getSessionsByProjectPathsPage(
+    projectPaths: string[],
+    limit: number,
+    offset: number,
+    accountVisibility: SessionAccountVisibility = 'current',
+    scope?: SessionListScope,
+  ): Map<string, SessionRow[]> {
+    const result = new Map<string, SessionRow[]>();
+    if (projectPaths.length === 0) return result;
+    const db = getConnection();
+    const normalized = projectPaths.map((p) => normalizeProjectPath(p));
+    const visibilitySql = accountVisibilitySql(accountVisibility, 's');
+    const scopeSql = sessionListScopeSql(scope, 's');
+    const params: unknown[] = [...normalized];
+    if (visibilitySql.includes('?')) params.push(getActiveAccountDir());
+    params.push(...scopeSql.params, offset, offset + limit);
+    const columns = SESSION_ROW_COLUMNS.split(', ').map((c) => `s.${c}`).join(', ');
+    const rows = db
+      .prepare(
+        `SELECT * FROM (
+           SELECT ${columns},
+             ROW_NUMBER() OVER (
+               PARTITION BY s.project_path
+               ORDER BY (
+                 s.server_scope IS NOT NULL
+                 AND s.server_scope <> COALESCE(
+                   (SELECT projects.server_scope FROM projects WHERE projects.project_path = s.project_path),
+                   'main'
+                 )
+               ) DESC,
+               datetime(COALESCE(s.updated_at, s.created_at)) DESC,
+               s.session_id DESC
+             ) AS __rn
+           FROM sessions s
+           WHERE s.project_path IN (${normalized.map(() => '?').join(',')})
+             AND s.isArchived = 0` + visibilitySql + scopeSql.sql + `
+         )
+         WHERE __rn > ? AND __rn <= ?
+         ORDER BY project_path, __rn`
+      )
+      .all(...params) as Array<SessionRow & { __rn: number }>;
+
+    for (const row of rows) {
+      const key = normalizeProjectPath(row.project_path ?? '');
+      const list = result.get(key) ?? [];
+      list.push(row);
+      result.set(key, list);
+    }
+    for (const [key, list] of result) {
+      result.set(key, normalizeSessionRows(list));
+    }
+    return result;
+  },
+
+  /**
+   * «Сколько чатов» для всех папок одним GROUP BY — пара к
+   * getSessionsByProjectPathsPage.
+   */
+  countSessionsByProjectPaths(
+    projectPaths: string[],
+    accountVisibility: SessionAccountVisibility = 'current',
+    scope?: SessionListScope,
+  ): Map<string, number> {
+    const result = new Map<string, number>();
+    if (projectPaths.length === 0) return result;
+    const db = getConnection();
+    const normalized = projectPaths.map((p) => normalizeProjectPath(p));
+    const visibilitySql = accountVisibilitySql(accountVisibility, 's');
+    const scopeSql = sessionListScopeSql(scope, 's');
+    const params: unknown[] = [...normalized];
+    if (visibilitySql.includes('?')) params.push(getActiveAccountDir());
+    params.push(...scopeSql.params);
+    const rows = db
+      .prepare(
+        `SELECT s.project_path AS project_path, COUNT(*) AS count
+         FROM sessions s
+         WHERE s.project_path IN (${normalized.map(() => '?').join(',')})
+           AND s.isArchived = 0` + visibilitySql + scopeSql.sql + `
+         GROUP BY s.project_path`
+      )
+      .all(...params) as Array<{ project_path: string; count: number }>;
+
+    for (const row of rows) {
+      result.set(normalizeProjectPath(row.project_path), Number(row.count));
+    }
+    return result;
+  },
+
+  /**
+   * Раскладка чатов по помощнику и блоку для всех папок одним запросом —
+   * пакетная версия countSessionsByProjectPathGrouped.
+   */
+  countSessionsByProjectPathsGrouped(
+    projectPaths: string[],
+    accountVisibility: SessionAccountVisibility = 'current',
+  ): Map<string, Array<{ provider: string; serverScope: ServerScope; count: number }>> {
+    const result = new Map<string, Array<{ provider: string; serverScope: ServerScope; count: number }>>();
+    if (projectPaths.length === 0) return result;
+    const db = getConnection();
+    const normalized = projectPaths.map((p) => normalizeProjectPath(p));
+    const visibilitySql = accountVisibilitySql(accountVisibility, 's');
+    const params: unknown[] = [...normalized];
+    if (visibilitySql.includes('?')) params.push(getActiveAccountDir());
+    const rows = db
+      .prepare(
+        `SELECT s.project_path AS project_path,
+                s.provider AS provider,
+                COALESCE(s.server_scope,
+                  (SELECT projects.server_scope FROM projects WHERE projects.project_path = s.project_path),
+                  'main') AS effective_scope,
+                COUNT(*) AS count
+         FROM sessions s
+         WHERE s.project_path IN (${normalized.map(() => '?').join(',')})
+           AND s.isArchived = 0` + visibilitySql + `
+         GROUP BY s.project_path, s.provider, effective_scope`
+      )
+      .all(...params) as Array<{
+        project_path: string;
+        provider: string;
+        effective_scope: ServerScope;
+        count: number;
+      }>;
+
+    for (const row of rows) {
+      const key = normalizeProjectPath(row.project_path);
+      const list = result.get(key) ?? [];
+      list.push({
+        provider: row.provider,
+        serverScope: row.effective_scope,
+        count: Number(row.count),
+      });
+      result.set(key, list);
+    }
+    return result;
   },
 
   /**

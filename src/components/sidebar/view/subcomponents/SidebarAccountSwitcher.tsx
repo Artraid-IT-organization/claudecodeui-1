@@ -1,18 +1,28 @@
-import { Check, ChevronsUpDown, Plus, Users } from 'lucide-react';
+import { Check, ChevronsUpDown, Users } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
+import { switchChatProvider, useCodexAccount, useSelectedChatProvider } from '../../../../hooks/useCodexAccount';
 import {
-  DEVIN_ACCOUNT_CHANGED_EVENT,
-  selectChatProvider,
-  switchChatProvider,
-  useCodexAccount,
-  useDevinAccount,
-  useSelectedChatProvider,
-} from '../../../../hooks/useCodexAccount';
-import { api } from '../../../../utils/api';
-import DevinLoginModal from '../../../provider-auth/view/DevinLoginModal';
+  selectDevinConnection,
+  useDevinConnections,
+  useSelectedDevinConnectionId,
+  type DevinConnectionOption,
+} from '../../../../hooks/useDevinConnectionPicker';
 import { useOwnerAccountSettings } from '../../../settings/hooks/useOwnerAccountSettings';
+import { scrollMovesAnchor } from '../../../../shared/scrollMovesAnchor';
+import { reportProviderProbe } from '../../../../hooks/providerProbe';
+
+/** Короткая отметка канала Devin в меню: норма — «Devin», иначе — что мешает ходу. */
+function devinConnectionStatus(connection: DevinConnectionOption): string {
+  if (connection.health === 'auth_failed') return 'нужна креда';
+  const cooldownEnd = connection.cooldownUntil ? Date.parse(`${connection.cooldownUntil.replace(' ', 'T')}Z`) : NaN;
+  if (cooldownEnd > Date.now()) {
+    const time = new Date(cooldownEnd).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+    return `лимит до ${time}`;
+  }
+  return 'Devin';
+}
 
 type SidebarAccountSwitcherProps = {
   /** Operator-chosen instance label (ACCOUNT_LABEL), e.g. "Shared". */
@@ -45,55 +55,24 @@ export default function SidebarAccountSwitcher({
 }: SidebarAccountSwitcherProps) {
   const { activeSlot, accounts, pendingSlot, errorMessage, activateSlot } = useOwnerAccountSettings();
   const [isOpen, setIsOpen] = useState(false);
-  const [devinLoginOpen, setDevinLoginOpen] = useState(false);
-  const [devinPendingSlot, setDevinPendingSlot] = useState<number | null>(null);
   const [anchor, setAnchor] = useState<{ left: number; bottom: number; width: number } | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
   const available = accounts.filter((account) => account.available);
   // Подписка Codex — третий аккаунт хозяина. Выбор её не переключает слот
-  // Claude, а направляет новые чаты к Codex (см. selectChatProvider).
+  // Claude, а направляет новые чаты к Codex (см. switchChatProvider).
   const codex = useCodexAccount();
   const codexReady = Boolean(codex?.available);
   const selectedProvider = useSelectedChatProvider();
   const codexSelected = codexReady && selectedProvider === 'codex';
-  // Подписка Devin — четвёртый аккаунт хозяина (Егор 03.10.26): свой список
-  // чатов, только токены Devin, только SWE-2. Слот Claude тоже не трогает.
-  const devin = useDevinAccount();
-  const devinReady = Boolean(devin?.available);
-  const devinSelected = devinReady && selectedProvider === 'devin';
-  const otherSelected = codexSelected || devinSelected;
-  // Devin пропал (вышли из аккаунта, сняли доступ), а выбор остался запомненным:
-  // вернуть Claude, иначе список чатов остался бы пустым.
-  useEffect(() => {
-    if (devin && !devin.available && selectedProvider === 'devin') {
-      selectChatProvider('claude');
-    }
-  }, [devin, selectedProvider]);
-  // Аккаунты Devin (до двух): по строке на каждый, где есть вход, плюс
-  // «Добавить аккаунт», пока второго нет (Егор 07.10.26).
-  const devinAccounts = (devin?.accounts ?? []).filter((account) => account.available);
-  const canAddDevin = Boolean(devin?.canAddSecond);
-  const canSwitch = available.length + (codexReady ? 1 : 0) + devinAccounts.length + (canAddDevin ? 1 : 0) > 1;
-
-  const selectDevinAccount = async (slot: 1 | 2) => {
-    if (devin && slot !== devin.slot) {
-      setDevinPendingSlot(slot);
-      try {
-        const response = await api.user.devinSelectSlot(slot);
-        if (response.ok) {
-          window.dispatchEvent(new Event(DEVIN_ACCOUNT_CHANGED_EVENT));
-        }
-      } catch {
-        // Слот не переключился — чат пойдёт через прежний аккаунт; меню покажет это при следующем чтении.
-      } finally {
-        setDevinPendingSlot(null);
-      }
-    }
-    switchChatProvider('devin');
-    setIsOpen(false);
-  };
+  // Каналы Devin — все подключённые аккаунты (владелец); новый появился в реестре — появился и тут.
+  const { connections: devinConnections, reload: reloadDevinConnections } = useDevinConnections();
+  const selectedDevinId = useSelectedDevinConnectionId();
+  const devinSelected = selectedProvider === 'devin' && devinConnections.length > 0;
+  const nonClaudeSelected = codexSelected || devinSelected;
+  const selectedDevin = devinConnections.find((connection) => connection.id === selectedDevinId) ?? null;
+  const canSwitch = available.length + (codexReady ? 1 : 0) + devinConnections.length > 1;
 
   useEffect(() => {
     if (!isOpen) return;
@@ -110,18 +89,25 @@ export default function SidebarAccountSwitcher({
       if (triggerRef.current?.contains(target ?? null)) return;
       setIsOpen(false);
     };
+    // Закрываться только от прокрутки, которая двигает саму кнопку (страница,
+    // панель). Прокрутка ленты чата рядом кнопку не сдвигает, а закрывала меню
+    // за миг до щелчка — щелчок падал в папку под меню и открывал там «Новый
+    // сеанс» (Егор 14.10.26, Mac: «нажимаю аккаунт — перебрасывает в другой чат»).
+    const onScroll = (event: Event) => {
+      if (scrollMovesAnchor(event, triggerRef.current)) setIsOpen(false);
+    };
     document.addEventListener('pointerdown', onPointerDown);
     window.addEventListener('resize', close);
-    window.addEventListener('scroll', close, true);
+    window.addEventListener('scroll', onScroll, true);
     return () => {
       document.removeEventListener('pointerdown', onPointerDown);
       window.removeEventListener('resize', close);
-      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('scroll', onScroll, true);
     };
   }, [isOpen]);
 
   const activeEmail = devinSelected
-    ? (devin?.name ?? 'Devin')
+    ? (selectedDevin?.accountEmail ?? selectedDevin?.name ?? 'Devin')
     : codexSelected
       ? (codex?.email ?? 'Codex')
       : (available.find((account) => account.slot === activeSlot)?.email ?? accountEmail);
@@ -166,6 +152,7 @@ export default function SidebarAccountSwitcher({
     if (rect) {
       setAnchor({ left: rect.left, bottom: window.innerHeight - rect.top + 8, width: rect.width });
     }
+    void reloadDevinConnections();
     setIsOpen((previous) => !previous);
   };
 
@@ -195,7 +182,7 @@ export default function SidebarAccountSwitcher({
                   Ваши аккаунты
                 </div>
                 {available.map((account) => {
-                  const isActive = account.slot === activeSlot && !otherSelected;
+                  const isActive = account.slot === activeSlot && !codexSelected && !devinSelected;
                   const isBusy = pendingSlot === account.slot;
                   return (
                     <button
@@ -204,10 +191,9 @@ export default function SidebarAccountSwitcher({
                       role="menuitem"
                       disabled={isActive || pendingSlot !== null}
                       onClick={() => {
-                        const fromOther = otherSelected;
-                        if (fromOther) switchChatProvider('claude');
+                        if (nonClaudeSelected) switchChatProvider('claude');
                         if (account.slot === activeSlot) {
-                          // Слот уже этот — вернуться с Codex или Devin на Claude.
+                          // Слот уже этот — вернуться с Codex на Claude.
                           setIsOpen(false);
                           return;
                         }
@@ -227,6 +213,35 @@ export default function SidebarAccountSwitcher({
                     </button>
                   );
                 })}
+                {devinConnections.map((connection) => {
+                  const isActive = devinSelected && connection.id === selectedDevinId;
+                  return (
+                    <button
+                      key={`devin-${connection.id}`}
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        reportProviderProbe('prov-menu', { to: 'devin', conn: connection.id, cur: selectedProvider });
+                        selectDevinConnection(connection.id);
+                        setIsOpen(false);
+                      }}
+                      className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm transition-colors hover:bg-accent/60"
+                    >
+                      <span className="flex h-4 w-4 flex-shrink-0 items-center justify-center">
+                        {isActive && <Check className="h-4 w-4 text-green-600 dark:text-green-400" />}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate" title={connection.description || undefined}>
+                        {connection.accountEmail ?? connection.name}
+                      </span>
+                      <span className="flex-shrink-0 text-[10px] text-muted-foreground">{devinConnectionStatus(connection)}</span>
+                    </button>
+                  );
+                })}
+                {devinConnections.length > 0 && (
+                  <div className="px-3 pb-2 pt-0.5 text-[10px] leading-snug text-muted-foreground">
+                    Подписка Devin платит за следующий ответ — и в новом, и в открытом чате. Кончился лимит — чат сам продолжится на другой.
+                  </div>
+                )}
                 {codexReady && (
                   <button
                     type="button"
@@ -245,43 +260,6 @@ export default function SidebarAccountSwitcher({
                     <span className="flex-shrink-0 text-[10px] text-muted-foreground">Codex</span>
                   </button>
                 )}
-                {devinAccounts.map((account) => {
-                  const isActive = devinSelected && account.slot === devin?.slot;
-                  return (
-                    <button
-                      key={`devin-${account.slot}`}
-                      type="button"
-                      role="menuitem"
-                      disabled={isActive || pendingSlot !== null || devinPendingSlot !== null}
-                      onClick={() => void selectDevinAccount(account.slot)}
-                      className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm transition-colors hover:bg-accent/60 disabled:cursor-default"
-                    >
-                      <span className="flex h-4 w-4 flex-shrink-0 items-center justify-center">
-                        {isActive && <Check className="h-4 w-4 text-green-600 dark:text-green-400" />}
-                      </span>
-                      <span className="min-w-0 flex-1 truncate">{account.name ?? 'Devin'}</span>
-                      {devinPendingSlot === account.slot
-                        ? <span className="text-xs text-muted-foreground">…</span>
-                        : <span className="flex-shrink-0 text-[10px] text-muted-foreground">Devin · SWE-2</span>}
-                    </button>
-                  );
-                })}
-                {canAddDevin && (
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                      setIsOpen(false);
-                      setDevinLoginOpen(true);
-                    }}
-                    className="flex w-full items-center gap-2 border-t border-border/60 px-3 py-2.5 text-left text-sm text-muted-foreground transition-colors hover:bg-accent/60"
-                  >
-                    <span className="flex h-4 w-4 flex-shrink-0 items-center justify-center">
-                      <Plus className="h-4 w-4" />
-                    </span>
-                    <span className="min-w-0 flex-1 truncate">Добавить аккаунт Devin</span>
-                  </button>
-                )}
                 {errorMessage && (
                   <p className="border-t border-border/60 px-3 py-2 text-xs text-destructive">{errorMessage}</p>
                 )}
@@ -290,7 +268,6 @@ export default function SidebarAccountSwitcher({
             document.body,
           )
         : null}
-      {devinLoginOpen && <DevinLoginModal onClose={() => setDevinLoginOpen(false)} />}
     </>
   );
 }

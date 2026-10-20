@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
-import { mkdir } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -30,10 +31,14 @@ const MODEL_TIMEOUT_MS = 5 * 60 * 1000;
  */
 export async function askDevinOnce(prompt: string, timeoutMs = MODEL_TIMEOUT_MS): Promise<string> {
   await mkdir(DEVIN_MODEL_CWD, { recursive: true }).catch(() => undefined);
+  // Промпт едет файлом, не аргументом: один argv на Linux упирается в
+  // MAX_ARG_STRLEN (128 КиБ), и выжимка длинного чата умирала на `spawn E2BIG`.
+  const promptFile = path.join(DEVIN_MODEL_CWD, `.prompt-${process.pid}-${randomUUID().slice(0, 8)}.txt`);
+  await writeFile(promptFile, prompt, 'utf8');
   const result = await new Promise<{ text: string; error: string | null }>((resolve) => {
     const child = spawn(resolveDevinCliCommand(), [
       '--respect-workspace-trust', 'false',
-      '-p', prompt,
+      '-p', '--prompt-file', promptFile,
     ], {
       cwd: DEVIN_MODEL_CWD,
       env: buildDevinChildEnv(),
@@ -64,6 +69,7 @@ export async function askDevinOnce(prompt: string, timeoutMs = MODEL_TIMEOUT_MS)
       });
     });
   });
+  await rm(promptFile, { force: true }).catch(() => undefined);
   // Беседа вызова пишется в общую базу Devin — прячем, чтобы не всплыла чатом.
   hideDevinSessionsInDirectory(DEVIN_MODEL_CWD);
   if (result.error || !result.text.trim()) {

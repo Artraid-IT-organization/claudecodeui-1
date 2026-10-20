@@ -8,6 +8,8 @@ export interface QueuedMessageView {
   id: string;
   content: string;
   attachmentCount: number;
+  /** Строка не дошла до агента за все попытки сервера — причина под текстом. */
+  error?: string;
 }
 
 interface MessageQueueDockProps {
@@ -194,6 +196,11 @@ export default function MessageQueueDock({
                           defaultValue: '{{count}} files attached',
                           count: item.attachmentCount,
                         })}
+                      </span>
+                    )}
+                    {item.error && (
+                      <span className="mt-0.5 block text-xs font-medium text-destructive">
+                        {t('input.queue.deliveryError', { defaultValue: 'Не отправлено: {{reason}}', reason: item.error })}
                       </span>
                     )}
                   </button>

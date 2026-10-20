@@ -6,6 +6,8 @@ import type { Terminal } from '@xterm/xterm';
 import type { Project, ProjectSession } from '../../../types/app';
 import { TERMINAL_INIT_DELAY_MS } from '../constants/constants';
 import { getShellWebSocketUrl, parseShellMessage, sendSocketMessage } from '../utils/socket';
+import { DEFAULT_PROVIDER } from '../../../utils/defaultProvider';
+import { readSelectedProviderRaw } from '../../../utils/selectedProvider';
 
 const ANSI_ESCAPE_REGEX =
   /(?:\u001B\[[0-?]*[ -/]*[@-~]|\u009B[0-?]*[ -/]*[@-~]|\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\\)|\u009D[^\u0007\u009C]*(?:\u0007|\u009C)|\u001B[PX^_][^\u001B]*\u001B\\|[\u0090\u0098\u009E\u009F][^\u009C]*\u009C|\u001B[@-Z\\-_])/g;
@@ -58,6 +60,30 @@ export function useShellConnection({
   const connectingRef = useRef(false);
   const forceRestartOnInitRef = useRef(false);
   const suppressAutoConnectRef = useRef(false);
+  /**
+   * Повторное подключение терминала после обрыва: пауза растёт с каждой
+   * неудачей (1 → 2 → 4 → 8 с, ±30%), чтобы вкладки не стучались в мёртвый
+   * сервер в один темп. Без этого закрытый сокет терминала не
+   * переподключался вообще — после обрыва оставался мёртвым до действия
+   * человека (тот же класс, что у чатового сокета).
+   */
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dropCountRef = useRef(0);
+  const autoConnectRef = useRef(autoConnect);
+  autoConnectRef.current = autoConnect;
+
+  // Размонтирование глушит повтор: иначе закрытый при уходе со страницы
+  // сокет назначил бы переподключение, которое открыло бы терминал в пустоту.
+  useEffect(
+    () => () => {
+      suppressAutoConnectRef.current = true;
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+    },
+    [],
+  );
 
   const handleProcessCompletion = useCallback(
     (output: string) => {
@@ -143,6 +169,7 @@ export function useShellConnection({
           setIsConnected(true);
           setIsConnecting(false);
           connectingRef.current = false;
+          dropCountRef.current = 0;
 
           window.setTimeout(() => {
             const currentTerminal = terminalRef.current;
@@ -161,7 +188,7 @@ export function useShellConnection({
               projectPath: currentProject.fullPath || currentProject.path || '',
               sessionId: isPlainShellRef.current ? null : selectedSessionRef.current?.id || null,
               hasSession: isPlainShellRef.current ? false : Boolean(selectedSessionRef.current),
-              provider: isPlainShellRef.current ? 'plain-shell' : (selectedSessionRef.current?.__provider || localStorage.getItem('selected-provider') || 'claude'),
+              provider: isPlainShellRef.current ? 'plain-shell' : (selectedSessionRef.current?.__provider || readSelectedProviderRaw() || DEFAULT_PROVIDER),
               cols: currentTerminal.cols,
               rows: currentTerminal.rows,
               initialCommand: initialCommandRef.current,
@@ -182,6 +209,21 @@ export function useShellConnection({
           setIsConnecting(false);
           connectingRef.current = false;
           clearTerminalScreen();
+
+          // Непрошеный обрыв (не disconnect человеком): переподключаемся сами
+          // — сервер хранит PTY и вернёт снапшот экрана, прерванная работа
+          // терминала не теряется.
+          if (!suppressAutoConnectRef.current && autoConnectRef.current) {
+            dropCountRef.current += 1;
+            const delay = Math.round(
+              Math.min(8_000, 1_000 * 2 ** Math.min(dropCountRef.current - 1, 3)) * (0.7 + Math.random() * 0.6),
+            );
+            if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+            reconnectTimerRef.current = setTimeout(() => {
+              reconnectTimerRef.current = null;
+              connectWebSocketRef.current();
+            }, delay);
+          }
         };
 
         socket.onerror = () => {
@@ -211,6 +253,10 @@ export function useShellConnection({
       wsRef,
     ],
   );
+  // Ссылка для повтора из `onclose`: обработчик сокета снимается с замыкания
+  // в момент создания, поэтому зовём всегда свежую версию.
+  const connectWebSocketRef = useRef(connectWebSocket);
+  connectWebSocketRef.current = connectWebSocket;
 
   const connectToShell = useCallback((options?: { forceRestart?: boolean }) => {
     if (!isInitialized || isConnected || isConnecting || connectingRef.current) {
@@ -227,6 +273,10 @@ export function useShellConnection({
   const disconnectFromShell = useCallback((options?: { suppressAutoConnect?: boolean }) => {
     if (options?.suppressAutoConnect) {
       suppressAutoConnectRef.current = true;
+    }
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
     }
 
     closeSocket();

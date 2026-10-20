@@ -2,7 +2,9 @@
   "codeBlock": {
     "copy": "Copy",
     "copied": "Copied",
-    "copyCode": "Copy code"
+    "copyCode": "Copy code",
+    "runInNewChat": "New chat",
+    "runInNewChatTitle": "Insert into a new chat and run"
   },
   "copyMessage": {
     "copy": "Copy message",
@@ -11,6 +13,26 @@
     "copyAsMarkdown": "Copy as markdown",
     "copyAsText": "Copy as text",
     "textShort": "TXT"
+  },
+  "feedback": {
+    "like": "Response format works well",
+    "dislike": "Response format is inconvenient",
+    "saved": "Rating saved",
+    "cleared": "Rating cleared",
+    "saveError": "Could not save the rating",
+    "dialogTitle": "What was inconvenient about the format?",
+    "commentPlaceholder": "Comment, if needed",
+    "cancel": "Cancel",
+    "save": "Save",
+    "categories": {
+      "too_long": "Too long",
+      "too_short": "Too short",
+      "wrong_structure": "Poor structure",
+      "missing_table": "Missing a table",
+      "too_verbose": "Too much filler",
+      "unclear": "Unclear",
+      "custom": "Other"
+    }
   },
   "messageTypes": {
     "user": "U",
@@ -199,6 +221,12 @@
       "olderMessages": "Loading older messages...",
       "sessionMessages": "Loading session messages...",
       "failed": "Couldn't load the conversation — retrying",
+      "failed_auth": "Your sign-in expired — please log in again",
+      "failed_denied": "You don't have access to this conversation",
+      "failed_notfound": "Conversation not found — it may have been deleted",
+      "failed_server": "Server temporarily unavailable — retrying",
+      "failed_timeout": "Server didn't respond in time — retrying",
+      "failed_network": "No connection to the server — check your network, retrying",
       "retry": "Retry now",
       "retrying": "Loading…",
       "transcriptMissingTitle": "This chat's history wasn't saved",

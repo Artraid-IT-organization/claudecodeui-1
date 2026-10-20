@@ -2,7 +2,9 @@
   "codeBlock": {
     "copy": "複製",
     "copied": "已複製",
-    "copyCode": "複製程式碼"
+    "copyCode": "複製程式碼",
+    "runInNewChat": "新聊天",
+    "runInNewChatTitle": "插入新聊天並執行"
   },
   "copyMessage": {
     "copy": "複製訊息",

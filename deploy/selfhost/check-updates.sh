@@ -100,6 +100,19 @@ TARGET="$(git -C "$REPO" rev-parse "$REMOTE" 2>/dev/null || true)"
 
 PENDING_FILE="$STATE/pending.json"
 
+if [ -f "$PENDING_FILE" ] && python3 - "$PENDING_FILE" <<'PY'
+import json, sys
+try:
+    pending = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+sys.exit(0 if pending.get("remote") == "local-build" else 1)
+PY
+then
+    log "локальная готовая версия ждёт нажатия «Обновить» — внешний пул её не заменяет"
+    exit 0
+fi
+
 if git -C "$REPO" merge-base --is-ancestor "$TARGET" "$BASE"; then
     rm -f "$PENDING_FILE"
     log "актуально: ${TARGET:0:12}"

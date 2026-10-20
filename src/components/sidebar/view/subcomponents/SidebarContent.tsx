@@ -1,5 +1,5 @@
 import { type ReactNode, useMemo, useState } from 'react';
-import { Archive, Folder, RotateCcw, Terminal, Trash2, X } from 'lucide-react';
+import { Archive, Folder, Plus, RotateCcw, Terminal, Trash2 } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
 import { ScrollArea, Tooltip } from '../../../../shared/view/ui';
@@ -7,16 +7,16 @@ import { cn } from '../../../../lib/utils';
 import type { AppTab, Project, ProjectSession } from '../../../../types/app';
 import type { ReleaseInfo } from '../../../../shared/types';
 import type { ConversationSearchResults, SearchProgress } from '../../hooks/useSidebarController';
-import type { ArchivedProjectListItem, ArchivedSessionListItem, RecentConversationListItem, SessionWithProvider, SidebarSearchMode } from '../../types/types';
+import type { ArchivedProjectListItem, ArchivedSessionListItem, RecentConversationListItem, SidebarSearchMode } from '../../types/types';
 import LLMProviderLogo from '../../../llm-provider-logo/LLMProviderLogo';
-import { formatCompactAge, getAllSessions, getSessionDate } from '../../utils/utils';
+import { formatCompactAge, getAllSessions, isPromptsProject, readPromptsPinnedExpanded, resolveMainChatProject, sessionTitleMatches, writePromptsPinnedExpanded } from '../../utils/utils';
 
 import SidebarFooter from './SidebarFooter';
 import SidebarHeader from './SidebarHeader';
-import SidebarUsageLimits from './SidebarUsageLimits';
-import SidebarProjectList, { type SidebarProjectListProps } from './SidebarProjectList';
-import SidebarProjectPickerTrigger from './SidebarProjectPickerTrigger';
+import { type SidebarProjectListProps } from './SidebarProjectList';
 import SidebarProjectSessions from './SidebarProjectSessions';
+import SidebarPromptsPinned from './SidebarPromptsPinned';
+import SidebarRecentConversations from './SidebarRecentConversations';
 import { useSecondServerLabel, useServerScope } from '../../hooks/useServerScope';
 
 function HighlightedSnippet({ snippet, highlights }: { snippet: string; highlights: { start: number; end: number }[] }) {
@@ -105,6 +105,8 @@ type SidebarContentProps = {
   archivedSessionsCount: number;
   isArchivedSessionsLoading: boolean;
   recentConversations: RecentConversationListItem[];
+  showInternalChats: boolean;
+  onToggleInternalChats: () => void;
   recentConversationsTotal: number;
   recentConversationsHasMore: boolean;
   isRecentConversationsLoading: boolean;
@@ -160,6 +162,8 @@ export default function SidebarContent({
   archivedSessionsCount,
   isArchivedSessionsLoading,
   recentConversations,
+  showInternalChats,
+  onToggleInternalChats,
   recentConversationsTotal,
   recentConversationsHasMore,
   isRecentConversationsLoading,
@@ -209,98 +213,83 @@ export default function SidebarContent({
 
   const [serverScope] = useServerScope();
   const secondServerLabel = useSecondServerLabel();
-  // Flat-mode: when exactly ONE project is starred, show its sessions directly
-  // without the project-header/expand-step clutter.  0 or 2+ starred = normal mode.
-  const starredProjects = projectListProps.projects.filter((p) =>
-    projectListProps.isProjectStarred(p.projectId),
+
+  /*
+   * Список чатов — плоская лента ВСЕХ чатов блока по свежести, без папок
+   * (Егор 14.10.26: вернуть «как было раньше» — один список). Папки больше
+   * не показываются; добраться до чужого блока и архива — вкладками шапки.
+   *
+   * Над лентой закреплён проект «Промпты» (/home/claude/prompts): свёрнут в
+   * одну строку, раскрывается в обычный список своих чатов. Папка ищется по
+   * пути и по имени — displayName мог быть переименован.
+   */
+  const promptsProject = useMemo(() => {
+    const project = projectListProps.projects.find((candidate) => isPromptsProject(candidate));
+    return project && (project.serverScope ?? 'main') === serverScope ? project : null;
+  }, [projectListProps.projects, serverScope]);
+
+  // Кнопка «Новый чат» создаёт обычный чат вне «Промптов»: основная папка —
+  // домашняя (/home/claude), на другом срезе — папка с наибольшим числом
+  // чатов. До плоской ленты такой кнопкой был «Новый сеанс» в карточке
+  // каждой папки; с уходом папок пропала и кнопка (Егор 15.10.26).
+  const newChatProject = useMemo(
+    () => resolveMainChatProject(projectListProps.projects, serverScope),
+    [projectListProps.projects, serverScope],
   );
-  // Ни одной звёздочки (свежая установка) — тот же плоский вид для главной
-  // папки: той, где больше всего чатов. Раньше без звёздочки новая копия
-  // показывала список папок, и выглядела «неполной и совсем другой»
-  // (Егор, 17.09.26). Две и больше звёздочек — по-прежнему список папок.
-  const mainProjectWithoutStars = starredProjects.length === 0 && projectListProps.projects.length > 0
-    ? projectListProps.projects.reduce((best, project) => (
-      (project.sessionMeta?.total ?? 0) > (best.sessionMeta?.total ?? 0) ? project : best
-    ))
-    : null;
-  const fallbackFlatProject = starredProjects.length === 1 ? starredProjects[0] : mainProjectWithoutStars;
-  // Во втором блоке ведущей становится папка, которая сама к нему приписана,
-  // а не отмеченная звёздочкой: звезда стоит на главной папке этого сервера,
-  // и новый чат из второго блока заводился бы в ней — то есть не там, где
-  // человек его просил. Чаты, перенесённые во второй блок поимённо, остаются
-  // в своих папках и видны через выбор папки.
-  const secondServerProject = serverScope === 'second'
-    ? projectListProps.projects
-      .filter((project) => project.serverScope === 'second')
-      .reduce<Project | null>((best, project) => (
-        !best || (project.sessionMeta?.total ?? 0) > (best.sessionMeta?.total ?? 0) ? project : best
-      ), null)
-    : null;
-  const singleStarredProject = secondServerProject ?? fallbackFlatProject;
+  const [promptsExpanded, setPromptsExpanded] = useState(readPromptsPinnedExpanded);
+  const togglePromptsExpanded = () => {
+    setPromptsExpanded((previous) => {
+      writePromptsPinnedExpanded(!previous);
+      return !previous;
+    });
+  };
 
+  // Строка поиска фильтрует ленту по названию чата и имени папки — та же
+  // функция с транслитом, что и внутри списка чатов папки.
+  const visibleConversations = useMemo(() => {
+    const query = searchFilter.trim();
+    if (!query) return recentConversations;
 
-  // Which project to display in the flat session list (null = show starred project).
-  // Picker sets this when user selects a different project from the overlay.
-  const [pickerProject, setPickerProject] = useState<import('../../../../types/app').Project | null>(null);
-  // The project whose sessions fill the flat view.
-  const flatDisplayProject = singleStarredProject
-    ? (pickerProject ?? singleStarredProject)
-    : null;
-  // Чаты, перенесённые в этот блок поимённо из папки другого блока. Файл
-  // переписки остаётся в своей папке, и раньше такой чат был виден только
-  // через «все папки»: Егор 25.09.26 перенёс рабочий чат из «2-го сервера»
-  // в «Проекты» и потерял его — во «2-м сервере» чата уже нет, а плоский
-  // список «Проектов» показывает одну ведущую папку. Теперь они стоят в
-  // общем списке блока, по дате, и открываются в своей папке. Список папок
-  // приходит уже отобранным по блоку, поэтому у папки чужого блока здесь
-  // только перенесённые сюда чаты.
-  const flatSessions = useMemo(() => {
-    const sessionProjects = new Map<string, Project>();
-    if (!flatDisplayProject) {
-      return { sessions: [] as SessionWithProvider[], sessionProjects };
+    const local = recentConversations.filter((conversation) =>
+      sessionTitleMatches(String(conversation.sessionTitle ?? ''), query)
+      || sessionTitleMatches(String(conversation.projectDisplayName ?? ''), query));
+    if (query.length < 2 || !conversationResults) return local;
+
+    const byId = new Map<string, RecentConversationListItem>();
+    const existingById = new Map(recentConversations.map((conversation) => [conversation.sessionId, conversation]));
+    for (const result of conversationResults.titleResults) {
+      const existing = existingById.get(result.sessionId);
+      byId.set(result.sessionId, {
+        sessionId: result.sessionId,
+        provider: result.provider as RecentConversationListItem['provider'],
+        projectId: result.projectId,
+        projectDisplayName: result.projectDisplayName,
+        sessionTitle: result.sessionTitle,
+        lastActivity: result.lastActivity,
+        flagged: existing?.flagged ?? false,
+        done: existing?.done ?? false,
+        serverScope,
+      });
     }
-    const own = projectListProps.getProjectSessions(flatDisplayProject);
-    if (pickerProject || !secondServerLabel) {
-      return { sessions: own, sessionProjects };
-    }
-    const movedIn: SessionWithProvider[] = [];
-    for (const project of projectListProps.projects) {
-      if (project.projectId === flatDisplayProject.projectId || (project.serverScope ?? 'main') === serverScope) {
-        continue;
-      }
-      for (const session of projectListProps.getProjectSessions(project)) {
-        sessionProjects.set(session.id, project);
-        movedIn.push(session);
+    for (const project of conversationResults.results) {
+      for (const session of project.sessions) {
+        if (byId.has(session.sessionId)) continue;
+        const existing = existingById.get(session.sessionId);
+        byId.set(session.sessionId, {
+          sessionId: session.sessionId,
+          provider: (session.provider || 'claude') as RecentConversationListItem['provider'],
+          projectId: project.projectId,
+          projectDisplayName: project.projectDisplayName,
+          sessionTitle: session.sessionSummary,
+          lastActivity: session.matches[0]?.timestamp ?? null,
+          flagged: existing?.flagged ?? false,
+          done: existing?.done ?? false,
+          serverScope,
+        });
       }
     }
-    if (movedIn.length === 0) {
-      return { sessions: own, sessionProjects };
-    }
-    const sessions = [...own, ...movedIn].sort(
-      (a, b) => getSessionDate(b).getTime() - getSessionDate(a).getTime(),
-    );
-    return { sessions, sessionProjects };
-  }, [flatDisplayProject, pickerProject, secondServerLabel, serverScope, projectListProps.projects, projectListProps.getProjectSessions]);
-  // Кнопка «все папки» переехала в полосу вкладок, на место убранной вкладки
-  // Conversations. Собирается здесь, а не в шапке: ей нужен список проектов и
-  // обработчик выбора, которые живут в этом компоненте.
-  const projectPicker = singleStarredProject ? (
-    <SidebarProjectPickerTrigger
-      projects={projectListProps.projects}
-      selectedProjectId={flatDisplayProject?.projectId ?? null}
-      isProjectStarred={projectListProps.isProjectStarred}
-      onProjectSelect={(project) => {
-        if (project.projectId === singleStarredProject.projectId) {
-          setPickerProject(null);
-        } else {
-          setPickerProject(project);
-          projectListProps.onProjectSelect(project);
-        }
-      }}
-      variant="tab"
-      t={t}
-    />
-  ) : null;
+    return [...byId.values()];
+  }, [recentConversations, searchFilter, conversationResults, serverScope]);
 
   return (
     <div
@@ -341,7 +330,6 @@ export default function SidebarContent({
             </button>
           </Tooltip>
         }
-        projectPickerSlot={projectPicker}
         searchMode={searchMode}
         onSearchModeChange={onSearchModeChange}
         onRefresh={onRefresh}
@@ -361,8 +349,35 @@ export default function SidebarContent({
 
       {/* Строки «название чата / папка» над списком больше нет: Егор 13.09.26
           обвёл её на снимке — «надо убрать совсем». Открытый чат и так
-          подсвечен в списке ниже. */}
-      <SidebarUsageLimits />
+          подсвечен в списке ниже. Блок «РАСХОД» убран 14.10.26 — Егор обвёл
+          его на снимке: места под чаты не остаётся. */}
+
+      {searchMode === 'projects' && promptsProject && (
+        <SidebarPromptsPinned
+          project={promptsProject}
+          expanded={promptsExpanded}
+          onToggle={togglePromptsExpanded}
+        />
+      )}
+
+      {/* Кнопка «Новый чат» прячется, пока открыта панель «Промптов»: там
+          своя «Новый сеанс», и две одинаковые кнопки подряд Егору неудобны
+          (15.10.26: «должно оставаться что-то одно»). */}
+      {searchMode === 'projects' && newChatProject && !promptsExpanded && (
+        <div className="flex-shrink-0 px-2 pb-1.5 pt-1.5 md:px-2.5">
+          <button
+            type="button"
+            onClick={() => {
+              projectListProps.onProjectSelect(newChatProject);
+              projectListProps.onNewSession(newChatProject);
+            }}
+            className="flex h-8 w-full items-center justify-center gap-2 rounded-md bg-primary text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90 active:scale-[0.98]"
+          >
+            <Plus className="h-3 w-3" />
+            {t('sidebar.newChat', 'Новый чат')}
+          </button>
+        </div>
+      )}
 
       <ScrollArea className="flex-1 overflow-y-auto overscroll-contain md:px-1.5 md:py-2">
         {/*
@@ -509,6 +524,8 @@ export default function SidebarContent({
                                       ? session.created_at
                                       : null,
                               isProjectArchived: true,
+                              flagged: Boolean(session.flagged),
+                              done: Boolean(session.done),
                             })}
                           >
                             <span className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md bg-background/70">
@@ -626,37 +643,57 @@ export default function SidebarContent({
               ))}
             </div>
           )
-        ) : flatDisplayProject ? (
-          // Flat mode: exactly one starred project — render its sessions directly,
-          // no project-name header needed for the primary (starred) project.
-          <div className="pb-safe-area-inset-bottom md:space-y-1">
-            {pickerProject && (
-              // Non-default project selected from picker — show its name so the
-              // user knows they're browsing a different project's sessions.
-              <div className="flex items-center gap-2 px-3 py-1.5 text-xs text-muted-foreground">
-                <Folder className="h-3 w-3 flex-shrink-0" />
-                <span className="min-w-0 flex-1 truncate">{pickerProject.displayName}</span>
-                <button
-                  type="button"
-                  aria-label={t('projects.backToMain', { defaultValue: 'Back to main project' })}
-                  title={t('projects.backToMain', { defaultValue: 'Back to main project' })}
-                  className="flex-shrink-0 rounded p-0.5 transition-colors hover:bg-accent/60 hover:text-foreground"
-                  onClick={() => setPickerProject(null)}
-                >
-                  <X className="h-3 w-3" />
-                </button>
+        ) : (
+          // Плоская лента всех чатов блока по свежести; сверху — раскрытые
+          // «Промпты», если секция развёрнута (её шапка закреплена над
+          // областью прокрутки, строкой выше).
+          <div className="pb-safe-area-inset-bottom">
+            {promptsExpanded && promptsProject && (
+              /* Раскрытая панель «Промптов» отделена янтарной рамкой в цвет
+                 звёздочки: чаты внутри такие же карточки, как общая лента,
+                 и без обводки панель сливалась с ней (Егор 15.10.26). */
+              <div className="mx-1 mb-1 rounded-lg border border-amber-500/30 bg-amber-500/[0.04]">
+                <SidebarProjectSessions
+                  flat
+                  project={promptsProject}
+                  isExpanded={true}
+                  sessions={projectListProps.getProjectSessions(promptsProject)}
+                  selectedSession={projectListProps.selectedSession}
+                  initialSessionsLoaded={projectListProps.initialSessionsLoaded.has(promptsProject.projectId)}
+                  hasMoreSessions={Boolean(promptsProject.sessionMeta?.hasMore)}
+                  isLoadingMoreSessions={projectListProps.loadingMoreProjects.has(promptsProject.projectId)}
+                  activeSessions={projectListProps.activeSessions}
+                  attentionSessionIds={projectListProps.attentionSessionIds}
+                  currentTime={projectListProps.currentTime}
+                  editingSession={projectListProps.editingSession}
+                  editingSessionName={projectListProps.editingSessionName}
+                  onEditingSessionNameChange={projectListProps.onEditingSessionNameChange}
+                  onStartEditingSession={projectListProps.onStartEditingSession}
+                  onCancelEditingSession={projectListProps.onCancelEditingSession}
+                  onSaveEditingSession={projectListProps.onSaveEditingSession}
+                  onProjectSelect={projectListProps.onProjectSelect}
+                  onSessionSelect={projectListProps.onSessionSelect}
+                  onDeleteSession={projectListProps.onDeleteSession}
+                  onLoadMoreSessions={projectListProps.onLoadMoreSessions}
+                  onNewSession={projectListProps.onNewSession}
+                  searchQuery={searchFilter}
+                  t={t}
+                />
               </div>
             )}
-            <SidebarProjectSessions
-              flat
-              project={flatDisplayProject}
-              isExpanded={true}
-              sessions={flatSessions.sessions}
-              sessionProjects={flatSessions.sessionProjects}
+            <SidebarRecentConversations
+              conversations={visibleConversations}
+              internalShown={showInternalChats}
+              onToggleInternal={searchFilter.trim() ? undefined : onToggleInternalChats}
+              searchQuery={searchFilter}
+              searching={isSearching}
+              projects={projectListProps.projects}
+              total={searchFilter.trim() ? visibleConversations.length : recentConversationsTotal}
+              hasMore={recentConversationsHasMore && !searchFilter.trim()}
+              isLoading={isRecentConversationsLoading}
+              isLoadingMore={isLoadingMoreRecentConversations}
+              hasError={recentConversationsError}
               selectedSession={projectListProps.selectedSession}
-              initialSessionsLoaded={projectListProps.initialSessionsLoaded.has(flatDisplayProject.projectId)}
-              hasMoreSessions={Boolean(flatDisplayProject.sessionMeta?.hasMore)}
-              isLoadingMoreSessions={projectListProps.loadingMoreProjects.has(flatDisplayProject.projectId)}
               activeSessions={projectListProps.activeSessions}
               attentionSessionIds={projectListProps.attentionSessionIds}
               currentTime={projectListProps.currentTime}
@@ -669,14 +706,11 @@ export default function SidebarContent({
               onProjectSelect={projectListProps.onProjectSelect}
               onSessionSelect={projectListProps.onSessionSelect}
               onDeleteSession={projectListProps.onDeleteSession}
-              onLoadMoreSessions={projectListProps.onLoadMoreSessions}
-              onNewSession={projectListProps.onNewSession}
-              searchQuery={searchFilter}
+              onLoadMore={onLoadMoreRecentConversations}
+              onRetry={onRetryRecentConversations}
               t={t}
             />
           </div>
-        ) : (
-          <SidebarProjectList {...projectListProps} />
         )}
       </ScrollArea>
 

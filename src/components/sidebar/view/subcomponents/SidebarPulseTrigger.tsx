@@ -9,6 +9,7 @@ import type { Project, ProjectSession } from '../../../../types/app';
 import type { SessionWithProvider } from '../../types/types';
 
 import SidebarPulseList from './SidebarPulseList';
+import { scrollMovesAnchor } from '../../../../shared/scrollMovesAnchor';
 
 type SidebarPulseTriggerProps = {
   pulseSessionsCount: number;
@@ -95,7 +96,11 @@ export default function SidebarPulseTrigger({
         setIsOpen(false);
       }
     };
-    const closeOnViewportChange = () => setIsOpen(false);
+    // Прокрутка ленты чата рядом кнопку не двигает — не закрывать (см. scrollMovesAnchor).
+    const closeOnViewportChange = (event: Event) => {
+      if (event.type === 'scroll' && !scrollMovesAnchor(event, triggerRef.current)) return;
+      setIsOpen(false);
+    };
 
     document.addEventListener('mousedown', closeOnOutsideClick);
     document.addEventListener('keydown', closeOnEscape);

@@ -53,3 +53,17 @@ test('notification payload uses the app session id for a provider session id', a
     assert.match(payload.data.tag, /app-session-1/);
   });
 });
+
+test('notification payload compacts long messages to one short line', async () => {
+  await withIsolatedDatabase(() => {
+    const payload = buildNotificationPayload({
+      provider: 'devin',
+      kind: 'error',
+      code: 'run.failed',
+      meta: { error: `first line\n${'x'.repeat(200)}` },
+    });
+
+    assert.equal(payload.body.includes('\n'), false);
+    assert.equal(payload.body.length, 'Assistant: '.length + 120);
+  });
+});

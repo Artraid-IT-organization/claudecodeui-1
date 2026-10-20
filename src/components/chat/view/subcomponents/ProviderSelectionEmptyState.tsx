@@ -10,7 +10,9 @@ import type {
   ProviderModelsDefinition,
 } from "../../../../types/app";
 import LLMProviderLogo from "../../../llm-provider-logo/LLMProviderLogo";
-import { NextTaskBanner } from "../../../task-master";
+// Прямой импорт, а не бочка `task-master`: index.ts рядом тащит TaskMasterPanel
+// → PRDEditor → CodeMirror в стартовую загрузку каждой страницы (14.10.26).
+import NextTaskBanner from "../../../task-master/view/NextTaskBanner";
 import {
   Dialog,
   DialogTrigger,
@@ -29,6 +31,7 @@ import {
 
 import ModelLibraryPanel from "./ModelLibraryPanel";
 import { useSelectedChatProvider } from "../../../../hooks/useCodexAccount";
+import { writeSelectedProvider } from '../../../../utils/selectedProvider';
 
 const PROVIDER_META: { id: LLMProvider; name: string }[] = [
   { id: "claude", name: "Anthropic" },
@@ -219,7 +222,7 @@ export default function ProviderSelectionEmptyState({
   const handleModelSelect = useCallback(
     (providerId: LLMProvider, modelValue: string) => {
       setProvider(providerId);
-      localStorage.setItem("selected-provider", providerId);
+      writeSelectedProvider(providerId);
       setModelForProvider(providerId, modelValue);
       setDialogOpen(false);
       setTimeout(() => textareaRef.current?.focus(), 100);

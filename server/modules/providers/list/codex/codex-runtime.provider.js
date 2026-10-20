@@ -288,6 +288,8 @@ export async function queryCodex(command, options = {}, ws, context) {
       effort: resolvedEffort,
       turnInput,
     });
+    // Отделённый worker уже владеет ходом и промптом — перезапуск сайта его не рвёт.
+    options.onPromptAnchored?.();
 
     if (sessionKey()) {
       registerSession(sessionKey());

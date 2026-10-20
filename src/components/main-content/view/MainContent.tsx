@@ -84,6 +84,7 @@ function MainContent({
   onSessionArchived,
   onSessionRestored,
   attentionSessionIds,
+  isMobileSidebarOpen,
 }: MainContentProps) {
   const { preferences } = useUiPreferences();
   const { showRawParameters, showThinking, sendByCtrlEnter } = preferences;
@@ -242,6 +243,7 @@ function MainContent({
                 newSessionTrigger={newSessionTrigger}
                 onStartNewChat={onStartNewChat}
                 onShowAllTasks={tasksEnabled ? () => setActiveTab('tasks') : null}
+                isMobileSidebarOpen={isMobileSidebarOpen}
               />
             </ErrorBoundary>
           </div>

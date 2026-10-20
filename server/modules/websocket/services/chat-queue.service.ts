@@ -27,19 +27,24 @@ import { normalizeAttachmentDescriptors } from '@/shared/image-attachments.js';
 /**
  * Что о строке очереди знает страница: текст, вложения и номер. Настройки
  * запуска (модель, права) наружу не отдаём — показывать их негде, а размер
- * рассылки они увеличивают.
+ * рассылки они увеличивают. `error` — у строки в состоянии `failed`: сервер
+ * сдался после всех попыток, причина показывается человеку под текстом.
  */
 export type QueuedChatMessageView = {
   id: string;
   content: string;
   attachments: unknown[];
   createdAt: string;
+  error?: string;
 };
 
 /**
- * Заводит запуск по снятой с очереди строке. Возвращает `false`, если запуск
- * завести не удалось (чат уже работает, исчерпан предел одновременных чатов) —
- * тогда строка возвращается в начало очереди и ждёт следующего освобождения.
+ * Заводит запуск по захваченной строке очереди. Возвращает `false`, если
+ * запуск завести не удалось (чат уже работает, исчерпан предел одновременных
+ * чатов, вход закрыт на перезапуск) — тогда захват просто снимается и строка
+ * ждёт следующего обхода. `true` — запуск завёлся и САМ доводит строку до
+ * конца: `markDelivered` на якоре, возврат захвата со счётчиком при падении,
+ * `markFailed` после всех попыток.
  */
 export type QueuedChatMessageRunner = (message: StoredQueuedChatMessage) => Promise<boolean>;
 
@@ -75,12 +80,20 @@ function toView(message: StoredQueuedChatMessage): QueuedChatMessageView {
     content: message.content,
     attachments: unique,
     createdAt: message.createdAt,
+    ...(message.state === 'failed' && message.lastError ? { error: message.lastError } : {}),
   };
 }
 
-/** Очередь чата в том виде, в каком её показывает страница. */
+/**
+ * Очередь чата в том виде, в каком её показывает страница. Захваченные строки
+ * скрываем: они уже «в пути» к агенту (раньше их и вовсе не было в таблице —
+ * снимались на запуск), вернутся видимыми сами, если ход до агента не доедет.
+ * Отказавшие (`failed`) видны всегда — это не «в пути», а честная ошибка.
+ */
 export function listChatQueue(sessionId: string): QueuedChatMessageView[] {
-  return chatMessageQueueDb.list(sessionId).map(toView);
+  return chatMessageQueueDb.list(sessionId)
+    .filter((message) => !message.claimedAt || message.state === 'failed')
+    .map(toView);
 }
 
 /**
@@ -99,11 +112,74 @@ export function broadcastChatQueue(sessionId: string): void {
 }
 
 /** Ставит сообщение в конец очереди и рассылает новый вид очереди. */
-export function queueChatMessage(message: Omit<StoredQueuedChatMessage, 'createdAt'>): QueuedChatMessageView[] {
+export function queueChatMessage(message: Omit<StoredQueuedChatMessage, 'createdAt' | 'claimedAt' | 'state' | 'lastError'>): QueuedChatMessageView[] {
   chatMessageQueueDb.append(message);
   const queue = listChatQueue(message.sessionId);
   broadcastChatQueue(message.sessionId);
   return queue;
+}
+
+/**
+ * Верх попыток одной строки: сторож обходит очереди раз в минуту, столько
+ * неудач доставки ≈ полчаса реальных попыток. Дальше — честный `failed`
+ * вместо бесконечного молчаливого перезапуска.
+ */
+const MAX_DELIVERY_ATTEMPTS = 30;
+
+/**
+ * Пауза между возвратом недошедшего сообщения и следующей попыткой — равна
+ * периоду сторожа (минута). Без неё конец упавшего хода сам тут же дёргал бы
+ * обход, и попытки сгорали бы подряд, не дожидаясь временной причины — замок
+ * выжившего агента живёт порядка минуты.
+ */
+const REDELIVERY_BACKOFF_MS = 60_000;
+
+/**
+ * Заведомо недоставимо: чат удалён, провайдер выключен, нет доступа — повтор
+ * не поможет. Строка остаётся в базе помеченной `failed` и видна человеку в
+ * доке с причиной — решение за ним (исправить, удалить, нажать «Сейчас»).
+ * Потребитель: chat-websocket.service — ветки отказа запуска.
+ */
+export function failQueuedMessageNow(
+  message: Pick<StoredQueuedChatMessage, 'id' | 'sessionId' | 'userId' | 'content' | 'options' | 'createdAt'>,
+  reason: string,
+): void {
+  if (!chatMessageQueueDb.has(message.id)) {
+    // Строки нет (write-ahead не записался) — сначала возвращаем её, иначе
+    // «ошибка» была бы невидима, а сообщение всё равно потеряно.
+    chatMessageQueueDb.insertFront(message);
+  }
+  chatMessageQueueDb.markFailed(message.id, reason);
+  broadcastChatQueue(message.sessionId);
+}
+
+/**
+ * Ход до агента не довёз захваченную строку (упал до передачи prompt):
+ * возвращаем её со счётчиком попыток в `options.__redispatch` — обход
+ * отправит снова. После потолка попыток помечаем `failed` с причиной —
+ * сообщение не исчезает, а показывает честную ошибку (потеря 14.10.26).
+ * Потребитель: chat-websocket.service — finally хода до якоря.
+ */
+export function returnClaimedToQueue(
+  message: Pick<StoredQueuedChatMessage, 'id' | 'sessionId' | 'userId' | 'content' | 'options' | 'createdAt'>,
+  reason: string,
+): 'requeued' | 'failed' {
+  const attempts = Number((message.options as Record<string, unknown> | undefined)?.__redispatch ?? 0) + 1;
+  if (attempts < MAX_DELIVERY_ATTEMPTS) {
+    const notBefore = Date.now() + REDELIVERY_BACKOFF_MS;
+    if (chatMessageQueueDb.has(message.id)) {
+      chatMessageQueueDb.releaseClaim(message.id, { bumpAttempts: true, notBefore });
+    } else {
+      chatMessageQueueDb.insertFront({
+        ...message,
+        options: { ...(message.options ?? {}), __redispatch: attempts, __notBefore: notBefore },
+      });
+    }
+    broadcastChatQueue(message.sessionId);
+    return 'requeued';
+  }
+  failQueuedMessageNow(message, `не дошло до агента за ${MAX_DELIVERY_ATTEMPTS} попыток: ${reason}`);
+  return 'failed';
 }
 
 export function removeChatQueueItem(sessionId: string, id: string): void {
@@ -132,8 +208,25 @@ async function dispatchSession(sessionId: string): Promise<void> {
     return;
   }
 
-  const next = chatMessageQueueDb.takeFirst(sessionId);
+  // Смотрим первую строку ДО захвата: вернувшееся из хода недошедшее
+  // сообщение несёт паузу `__notBefore`, и повторять её раньше отметки нельзя —
+  // иначе конец упавшего хода мгновенно дёргает обход, и попытки сгорают
+  // подряд, не дожидаясь временной причины (замок выжившего ~минуту).
+  const candidate = chatMessageQueueDb.peekFirst(sessionId);
+  if (!candidate) {
+    return;
+  }
+  const notBefore = Number((candidate.options as Record<string, unknown> | undefined)?.__notBefore ?? 0);
+  if (notBefore > Date.now()) {
+    return;
+  }
+
+  // Захватываем, не удаляя: строка покидает таблицу только после подтверждённой
+  // передачи prompt агенту (markDelivered на якоре). Пока она захвачена, обход
+  // её не видит — одной строкой две отправки не случится.
+  const next = chatMessageQueueDb.claim(candidate.id) ? candidate : null;
   if (!next) {
+    // Строку увёл параллельный проход/«Сейчас» — её повезёт он.
     return;
   }
   broadcastChatQueue(sessionId);
@@ -150,9 +243,9 @@ async function dispatchSession(sessionId: string): Promise<void> {
     return;
   }
 
-  // Запуск не завёлся — возвращаем строку на место и ждём следующего
-  // освобождения, иначе сообщение человека просто исчезло бы.
-  chatMessageQueueDb.pushFront(next);
+  // Запуск завести не вышло (место занято, вход закрыт) — возвращаем захват:
+  // это НЕ неудача доставки, счётчик попыток не растёт.
+  chatMessageQueueDb.releaseClaim(next.id);
   broadcastChatQueue(sessionId);
 }
 
@@ -174,6 +267,17 @@ export function dispatchChatQueues(): void {
     try {
       while (sweepRequested) {
         sweepRequested = false;
+        // Осиротевшие захваты: строку пометили, а ход, который её вёз, исчез
+        // нештатно — без finally. При живом ходе не трогаем: захват правомерен
+        // весь запуск (от прямой отправки до якоря бывают минуты).
+        for (const claimedSessionId of chatMessageQueueDb.sessionsWithClaims()) {
+          if (
+            !chatRunRegistry.isProcessing(claimedSessionId)
+            && chatMessageQueueDb.releaseStaleClaims(claimedSessionId, ORPHAN_CLAIM_MS) > 0
+          ) {
+            broadcastChatQueue(claimedSessionId);
+          }
+        }
         for (const sessionId of chatMessageQueueDb.sessionsWithQueue()) {
           await dispatchSession(sessionId);
         }
@@ -197,6 +301,12 @@ export function dispatchChatQueues(): void {
  * к маленькой таблице.
  */
 const QUEUE_SWEEP_INTERVAL_MS = 60_000;
+/**
+ * Захват без живого хода старше этого срока считается осиротевшим и
+ * снимается сторожем. Якорь (передача prompt) занимает секунды-минуты; 3
+ * минуты — запас против патологически медленной сборки хода.
+ */
+const ORPHAN_CLAIM_MS = 3 * 60_000;
 let sweepTimer: ReturnType<typeof setInterval> | null = null;
 
 export function startChatQueueHeartbeat(): void {
