@@ -11,6 +11,7 @@ import { usePaletteOps } from '../../../../contexts/PaletteOpsContext';
 import { effectiveScope, useSecondServerLabel } from '../../hooks/useServerScope';
 import type { SessionWithProvider } from '../../types/types';
 import { createSessionViewModel, formatCompactAge } from '../../utils/utils';
+import { formatChatReference } from '../../utils/chatReference';
 import LLMProviderLogo from '../../../llm-provider-logo/LLMProviderLogo';
 
 type SidebarSessionItemProps = {
@@ -190,7 +191,7 @@ export default function SidebarSessionItem({
     } catch {
       if (requestId !== providerIdRequestRef.current) return;
       setProviderSessionId(null);
-      setCopyState('error');
+      setCopyState('idle');
     }
   };
 
@@ -227,35 +228,30 @@ export default function SidebarSessionItem({
   };
 
   const copyProviderSessionId = async () => {
-    if (!providerSessionId) {
-      setCopyState('error');
-      return;
-    }
-
     setCopyState('copying');
-    const didCopy = await copyTextToClipboard(providerSessionId);
+    const didCopy = await copyTextToClipboard(formatChatReference({
+      origin: window.location.origin,
+      project,
+      sessionId: session.id,
+      provider: session.__provider,
+      providerSessionId,
+    }));
     setCopyState(didCopy ? 'copied' : 'error');
   };
 
   const handleCopyAction = () => {
-    if (copyState === 'error' && !providerSessionId) {
-      void loadProviderSessionId();
-    } else {
-      void copyProviderSessionId();
-    }
+    void copyProviderSessionId();
   };
 
   const isCopyPending = copyState === 'loading' || copyState === 'copying';
   const CopyStateIcon = copyState === 'copied' ? Check : Copy;
   const copyLabel = copyState === 'loading'
-    ? `Loading ${providerLabel} session ID…`
+    ? 'Загружаю ID чата…'
     : copyState === 'copied'
-      ? `${providerLabel} session ID copied`
+      ? 'Полный ID чата скопирован'
       : copyState === 'error'
-        ? providerSessionId
-          ? `Couldn't copy ${providerLabel} session ID`
-          : `${providerLabel} session ID unavailable`
-        : `Copy ${providerLabel} session ID`;
+        ? 'Не удалось скопировать ID чата'
+        : 'Копировать полный ID чата';
 
   // Метка встаёт на место значка Claude слева: квадратик тот же, поэтому
   // название чата не становится короче ни на пиксель.
