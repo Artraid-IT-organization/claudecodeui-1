@@ -11,7 +11,6 @@ import { usePaletteOps } from '../../../../contexts/PaletteOpsContext';
 import { effectiveScope, useSecondServerLabel } from '../../hooks/useServerScope';
 import type { SessionWithProvider } from '../../types/types';
 import { createSessionViewModel, formatCompactAge } from '../../utils/utils';
-import { formatChatReference } from '../../utils/chatReference';
 import LLMProviderLogo from '../../../llm-provider-logo/LLMProviderLogo';
 
 type SidebarSessionItemProps = {
@@ -46,7 +45,7 @@ const PROVIDER_LABELS: Record<LLMProvider, string> = {
   opencode: 'OpenCode',
 };
 
-type CopyState = 'loading' | 'idle' | 'copying' | 'copied' | 'error';
+type CopyState = 'idle' | 'copying' | 'copied' | 'error';
 type SessionMark = 'none' | 'flag' | 'done';
 
 function deriveSessionMark(session: SessionWithProvider): SessionMark {
@@ -83,8 +82,6 @@ export default function SidebarSessionItem({
   const editingContainerRef = useRef<HTMLDivElement>(null);
   const [isMobileOptionsOpen, setIsMobileOptionsOpen] = useState(false);
   const [copyState, setCopyState] = useState<CopyState>('idle');
-  const [providerSessionId, setProviderSessionId] = useState<string | null>(null);
-  const providerIdRequestRef = useRef(0);
   const showAttentionIndicator = needsAttention && !isSelected;
   const showRecentIndicator = !showAttentionIndicator && !isProcessing && sessionView.isActive;
   const providerLabel = PROVIDER_LABELS[session.__provider];
@@ -174,39 +171,9 @@ export default function SidebarSessionItem({
     onDeleteSession(project.projectId, session.id, sessionView.sessionName, session.__provider);
   };
 
-  const loadProviderSessionId = async () => {
-    const requestId = ++providerIdRequestRef.current;
-    setCopyState('loading');
-    try {
-      const response = await api.providerSessionId(session.id);
-      const payload = await response.json();
-      const loadedSessionId = payload?.data?.sessionId;
-      if (!response.ok || typeof loadedSessionId !== 'string' || !loadedSessionId) {
-        throw new Error('Provider session ID is unavailable');
-      }
-
-      if (requestId !== providerIdRequestRef.current) return;
-      setProviderSessionId(loadedSessionId);
-      setCopyState('idle');
-    } catch {
-      if (requestId !== providerIdRequestRef.current) return;
-      setProviderSessionId(null);
-      setCopyState('idle');
-    }
-  };
-
-  const resetCopyState = () => {
-    providerIdRequestRef.current += 1;
-    setCopyState('idle');
-    setProviderSessionId(null);
-  };
-
   const setOptionsOpen = (open: boolean) => {
-    if (open) {
-      setProviderSessionId(null);
-      void loadProviderSessionId();
-    } else {
-      resetCopyState();
+    if (!open) {
+      setCopyState('idle');
     }
   };
 
@@ -227,31 +194,23 @@ export default function SidebarSessionItem({
     setMobileOptionsOpen(false);
   };
 
-  const copyProviderSessionId = async () => {
+  const copyChatId = async () => {
     setCopyState('copying');
-    const didCopy = await copyTextToClipboard(formatChatReference({
-      origin: window.location.origin,
-      project,
-      sessionId: session.id,
-      provider: session.__provider,
-      providerSessionId,
-    }));
+    const didCopy = await copyTextToClipboard(session.id);
     setCopyState(didCopy ? 'copied' : 'error');
   };
 
   const handleCopyAction = () => {
-    void copyProviderSessionId();
+    void copyChatId();
   };
 
-  const isCopyPending = copyState === 'loading' || copyState === 'copying';
+  const isCopyPending = copyState === 'copying';
   const CopyStateIcon = copyState === 'copied' ? Check : Copy;
-  const copyLabel = copyState === 'loading'
-    ? 'Загружаю ID чата…'
-    : copyState === 'copied'
-      ? 'Полный ID чата скопирован'
-      : copyState === 'error'
-        ? 'Не удалось скопировать ID чата'
-        : 'Копировать полный ID чата';
+  const copyLabel = copyState === 'copied'
+    ? 'ID чата скопирован'
+    : copyState === 'error'
+      ? 'Не удалось скопировать ID чата'
+      : 'Копировать ID чата';
 
   // Метка встаёт на место значка Claude слева: квадратик тот же, поэтому
   // название чата не становится короче ни на пиксель.
