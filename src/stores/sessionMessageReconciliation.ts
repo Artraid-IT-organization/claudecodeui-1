@@ -475,6 +475,7 @@ function isThinkingEchoedInSameTurnOnServer(
 function isEchoedInTailTurnOnServer(
   message: NormalizedMessage,
   serverMessages: NormalizedMessage[],
+  realtimeMessages: NormalizedMessage[],
   claimedTailIds: Set<string>,
   allowFragment: boolean,
 ): boolean {
@@ -492,6 +493,16 @@ function isEchoedInTailTurnOnServer(
     }
   }
 
+  // Метки времени живых сообщений человека, которых ещё нет на диске
+  // (отправка в пути, эхо без совпадения). Если такая строка позже серверной
+  // копии — живая реплика относится к НОВОМУ ходу, а не к той копии: снять
+  // её значило бы скрыть настоящий ответ. Эхо уже сведённых отправок сюда не
+  // попадает — вызывающий передаёт realtime после removeOptimisticUserEchoes.
+  const pendingUserTimes = realtimeMessages
+    .filter((m) => m.kind === 'text' && m.role === 'user' && m.id !== message.id)
+    .map(readMessageTime)
+    .filter((t): t is number => t !== null);
+
   const matchesKind = (serverMessage: NormalizedMessage): boolean => {
     if (message.kind === 'thinking' || message.kind === 'thinking_delta') {
       return serverMessage.kind === 'thinking';
@@ -505,15 +516,24 @@ function isEchoedInTailTurnOnServer(
       continue;
     }
     const full = (serverMessage.content || '').trim();
+    if (!full) {
+      continue;
+    }
+    const serverTime = readMessageTime(serverMessage);
+    if (
+      serverTime !== null
+      && pendingUserTimes.some((userTime) => userTime > serverTime)
+    ) {
+      continue;
+    }
     // Метка живой строки — время ПЕРВОЙ дельты, запись на диске — конец
     // блока: у долго писавшегося текста между ними минуты, поэтому окно
     // времени применяется только к точному совпадению короткого текста.
-    // Вхождение куска и равенство размышления — достаточно строгие
-    // отпечатки сами по себе.
+    // Длинное точное совпадение (>= 40) случайным не бывает — окно не нужно.
+    // Вхождение куска и равенство размышления защищены границей хода выше.
     const isThinking = message.kind === 'thinking' || message.kind === 'thinking_delta';
     if (isThinking || full === content) {
-      if (!isThinking) {
-        const serverTime = readMessageTime(serverMessage);
+      if (!isThinking && content.length < 40) {
         if (serverTime === null || Math.abs(serverTime - messageTime) > SAME_ANSWER_TIME_WINDOW_MS) {
           continue;
         }
@@ -538,8 +558,16 @@ function isEchoedInTailTurnOnServer(
  * Those sit back-to-back in merged order and look like duplicate bubbles until
  * A persisted-tail refresh reconciles realtime. Collapse same-text assistant rows and
  * stream_placeholder → text when content matches.
+ *
+ * `realtimeIds` — номера живых строк. Слияние разрешено только когда хотя бы
+ * одна из пары живая: две одинаковые записи с диска (настоящий повтор ответа
+ * в том же ходе, например после повторного вызова команды) склеивать нельзя —
+ * обе обязаны остаться в ленте.
  */
-function dedupeAdjacentAssistantEchoes(merged: NormalizedMessage[]): NormalizedMessage[] {
+function dedupeAdjacentAssistantEchoes(
+  merged: NormalizedMessage[],
+  realtimeIds: ReadonlySet<string>,
+): NormalizedMessage[] {
   const out: NormalizedMessage[] = [];
   for (const m of merged) {
     const prev = out[out.length - 1];
@@ -597,6 +625,7 @@ function dedupeAdjacentAssistantEchoes(merged: NormalizedMessage[]): NormalizedM
             previousReply
             && previousReply.kind === 'text'
             && previousReply.role === 'assistant'
+            && (realtimeIds.has(m.id) || realtimeIds.has(previousReply.id))
             && ms === (previousReply.content || '').trim()
           ) {
             continue;
@@ -605,7 +634,11 @@ function dedupeAdjacentAssistantEchoes(merged: NormalizedMessage[]): NormalizedM
       }
       if (prev.kind === 'thinking' && m.kind === 'thinking') {
         const ms = (m.content || '').trim();
-        if (ms.length > 0 && ms === (prev.content || '').trim()) {
+        if (
+          ms.length > 0
+          && ms === (prev.content || '').trim()
+          && (realtimeIds.has(m.id) || realtimeIds.has(prev.id))
+        ) {
           continue;
         }
       }
@@ -651,7 +684,7 @@ export function pruneRealtimeSupersededByServer(
       if (isLiveFragmentOfServerReply(message, serverMessages, reconciledRealtimeMessages)) {
         return false;
       }
-      if (isEchoedInTailTurnOnServer(message, serverMessages, claimedTailIds, true)) {
+      if (isEchoedInTailTurnOnServer(message, serverMessages, reconciledRealtimeMessages, claimedTailIds, true)) {
         return false;
       }
       return true;
@@ -661,7 +694,7 @@ export function pruneRealtimeSupersededByServer(
       if (isThinkingEchoedInSameTurnOnServer(message, serverMessages, reconciledRealtimeMessages)) {
         return false;
       }
-      if (isEchoedInTailTurnOnServer(message, serverMessages, claimedTailIds, false)) {
+      if (isEchoedInTailTurnOnServer(message, serverMessages, reconciledRealtimeMessages, claimedTailIds, false)) {
         return false;
       }
       return true;
@@ -679,10 +712,12 @@ export function pruneRealtimeSupersededByServer(
       if (isLiveFragmentOfServerReply(message, serverMessages, reconciledRealtimeMessages)) {
         return false;
       }
-      if (isLongReplyAlreadyOnServer(message, serverMessages)) {
-        return false;
-      }
-      if (isEchoedInTailTurnOnServer(message, serverMessages, claimedTailIds, true)) {
+      // Длинная точная копия — тот же случай хвостовой сверки, только без
+      // окна времени (живая строка могла висеть минуты до обновления с диска):
+      // isEchoedInTailTurnOnServer сам отпускает окно для текстов >= 40
+      // знаков и не даёт снять настоящий ответ нового хода — границу хода
+      // держат не сведённые на диск сообщения человека из realtime.
+      if (isEchoedInTailTurnOnServer(message, serverMessages, reconciledRealtimeMessages, claimedTailIds, true)) {
         return false;
       }
       return true;
@@ -692,7 +727,7 @@ export function pruneRealtimeSupersededByServer(
       if (isThinkingEchoedInSameTurnOnServer(message, serverMessages, reconciledRealtimeMessages)) {
         return false;
       }
-      if (isEchoedInTailTurnOnServer(message, serverMessages, claimedTailIds, false)) {
+      if (isEchoedInTailTurnOnServer(message, serverMessages, reconciledRealtimeMessages, claimedTailIds, false)) {
         return false;
       }
       return true;
@@ -717,11 +752,14 @@ export function pruneRealtimeSupersededByServer(
 // оборванный кусок фразы) и 08.10.26 (короткие реплики повторялись из-за
 // эхо-счётчика ходов) прогоняются через неё напрямую, без браузера.
 export function computeMerged(server: NormalizedMessage[], realtime: NormalizedMessage[]): NormalizedMessage[] {
+  const realtimeIds = new Set(realtime.map((message) => message.id));
   if (realtime.length === 0) {
-    return dedupeAdjacentAssistantEchoes(server);
+    // Чистая история с диска: две одинаковые записанные реплики — две
+    // настоящие реплики, склеивать нечего.
+    return dedupeAdjacentAssistantEchoes(server, realtimeIds);
   }
   if (server.length === 0) {
-    return dedupeAdjacentAssistantEchoes(realtime);
+    return dedupeAdjacentAssistantEchoes(realtime, realtimeIds);
   }
 
   // Сверка ровно одна, общая с обновлением ленты.
@@ -740,12 +778,13 @@ export function computeMerged(server: NormalizedMessage[], realtime: NormalizedM
   const extra = pruneRealtimeSupersededByServer(server, realtime);
 
   if (extra.length === 0) {
-    return dedupeAdjacentAssistantEchoes(server);
+    return dedupeAdjacentAssistantEchoes(server, realtimeIds);
   }
 
   // Interleave by timestamp so live rows stay with their turn instead of
   // piling up at the bottom after every refresh.
   return dedupeAdjacentAssistantEchoes(
     [...server, ...extra].sort(compareMessagesChronologically),
+    realtimeIds,
   );
 }
