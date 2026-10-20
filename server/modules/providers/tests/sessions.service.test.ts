@@ -151,6 +151,7 @@ test('recent sessions map project metadata and preserve database pagination', { 
         lastActivity: '2026-08-01T11:00:00.000Z',
         flagged: true,
         done: false,
+        promptLaunched: false,
         serverScope: 'main',
       }],
       total: 2,
