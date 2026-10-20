@@ -109,3 +109,80 @@ test('отдельная короткая реплика, похожая на н
   assert.equal(texts.length, 3, 'live-y — новая реплика, её снимать нельзя');
   assert.ok(texts.some((m) => m.id === 'live-y'));
 });
+
+test('короткий ответ снимается копией с диска, когда ход выше границы страницы', () => {
+  // В окне истории последнего хода нет сообщения человека (оно выше границы
+  // загруженной страницы): ordinal-ход не находится, «длинный ответ на диске»
+  // строки короче 40 знаков не ловит — живая строка оставалась дублём.
+  // Запасная сверка узнаёт копию в хвостовом ходе по близкому времени записи.
+  const server = [
+    msg('u1', { role: 'user', content: 'Проверь всё', timestamp: '2026-10-20T02:00:00.000Z' }),
+    msg('a1', { content: 'Смотрю.', timestamp: '2026-10-20T02:00:05.000Z' }),
+    msg('t1', { kind: 'tool_use', toolName: 'Bash', toolId: 'tool-1', timestamp: '2026-10-20T02:00:06.000Z' }),
+    // u2 вырезано границей страницы — его пузырь сидит в realtime как local_.
+    msg('a2', { content: 'Готово, отчёт в чате.', timestamp: '2026-10-20T02:05:00.000Z' }),
+  ];
+  const realtime = [
+    msg('local_u2', { role: 'user', content: 'А теперь отчёт', timestamp: '2026-10-20T02:04:55.000Z' }),
+    msg('live_a2', { content: 'Готово, отчёт в чате.', timestamp: '2026-10-20T02:04:58.000Z' }),
+    // Служебная строка между копиями (фоновое уведомление/заметка о месте в
+    // очереди): вплотную-склейка через неё не смотрит, ходовой сверки ход нет.
+    msg('notice1', { kind: 'task_notification', content: 'Место освободилось — сообщение отправлено.', timestamp: '2026-10-20T02:04:59.000Z' }),
+  ];
+  const merged = computeMerged(server, realtime);
+  const texts = merged.filter((m) => m.kind === 'text' && m.role === 'assistant');
+  assert.equal(texts.length, 2, `дубль живой строки не снялся: ${texts.map((m) => m.id).join(', ')}`);
+  assert.ok(texts.some((m) => m.id === 'a2'));
+  // Пузырь отправки остаётся — записи человека на диске пока нет.
+  assert.ok(merged.some((m) => m.id === 'local_u2'));
+});
+
+test('запасная сверка не снимает настоящий повтор текста из другого хода', () => {
+  // Человек дважды спросил одно и то же — ответ повторился осознанно. Разница
+  // во времени больше окна копии (2 минуты): обе строки должны остаться.
+  const server = [
+    msg('u1', { role: 'user', content: 'Собери?', timestamp: '2026-10-20T02:00:00.000Z' }),
+    msg('a1', { content: 'Да, собрано.', timestamp: '2026-10-20T02:00:05.000Z' }),
+  ];
+  const realtime = [
+    msg('local_u2', { role: 'user', content: 'Собери?', timestamp: '2026-10-20T02:10:00.000Z' }),
+    msg('live_a2', { content: 'Да, собрано.', timestamp: '2026-10-20T02:10:05.000Z' }),
+  ];
+  const merged = computeMerged(server, realtime);
+  const texts = merged.filter((m) => m.kind === 'text' && m.role === 'assistant');
+  assert.equal(texts.length, 2, 'настоящий повтор ответа снят нельзя');
+});
+
+test('две живые одинаковые реплики расходуют две серверные копии один-к-одному', () => {
+  // Модель написала «Готово.» дважды в одном ходе; при границе страницы обе
+  // живые строки должны сняться — но не об одну серверную запись.
+  const server = [
+    msg('a1', { content: 'Готово.', timestamp: '2026-10-20T02:00:05.000Z' }),
+    msg('t1', { kind: 'tool_use', toolName: 'Bash', toolId: 'tool-1', timestamp: '2026-10-20T02:00:06.000Z' }),
+    msg('a2', { content: 'Готово.', timestamp: '2026-10-20T02:00:20.000Z' }),
+  ];
+  const realtime = [
+    msg('live1', { content: 'Готово.', timestamp: '2026-10-20T02:00:06.000Z' }),
+    msg('live2', { content: 'Готово.', timestamp: '2026-10-20T02:00:21.000Z' }),
+  ];
+  const merged = computeMerged(server, realtime);
+  const texts = merged.filter((m) => m.kind === 'text' && m.role === 'assistant');
+  assert.equal(texts.length, 2, 'две настоящие копии на диске закрывают две живые строки');
+});
+
+test('оборванная живая строка снимается длинным ответом хвостового хода без окна', () => {
+  // Долгий ответ оборвался разрывом сокета: живой кусок датирован началом
+  // блока, запись кончилась минутами позже — окно копии здесь не действует,
+  // работает вхождение куска в полный ответ.
+  const full = 'Результат проверки: все три сервиса поднялись, лог чистый, отчёт прикладываю ниже по пунктам.';
+  const server = [
+    msg('a1', { content: full, timestamp: '2026-10-20T02:06:00.000Z' }),
+  ];
+  const realtime = [
+    msg('live_obryv', { content: 'Результат проверки: все три сервиса поднялись', timestamp: '2026-10-20T02:00:10.000Z' }),
+  ];
+  const merged = computeMerged(server, realtime);
+  const texts = merged.filter((m) => m.kind === 'text' && m.role === 'assistant');
+  assert.equal(texts.length, 1);
+  assert.equal(texts[0].id, 'a1');
+});

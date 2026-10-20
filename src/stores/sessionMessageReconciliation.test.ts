@@ -192,3 +192,31 @@ test('a redrawn pending-send bubble with the same clientMessageId stays one row'
   const realtime = appendRealtimeWithQueuedEcho([first], redraw);
   assert.deepEqual(realtime.map((message) => message.id), ['local_1']);
 });
+
+test('steer echo persisted with a shifted-later queued_command time is removed', () => {
+  // «Сейчас» посреди хода: вставке queued_command провайдер ставит время
+  // записи перед ней — момент, когда Claude прочёл сообщение, а не нажатие.
+  // Долгий вызов инструмента между ними сдвигает серверную строку вперёд за
+  // пять минут — пузырь оставался навсегда второй копией.
+  const local = createUserMessage('local_steer', '2026-10-20T12:00:00.000Z', {
+    content: 'и ускорься пожалуйста',
+  });
+  const persisted = createUserMessage('claude_qc', '2026-10-20T12:09:00.000Z', {
+    content: 'и ускорься пожалуйста',
+  });
+
+  assert.deepEqual(removeOptimisticUserEchoes([persisted], [local]), []);
+});
+
+test('a server row earlier than the press time still does not merge', () => {
+  // Назад окно остаётся узким: серверная строка старше нажатия — это ЧУЖОЙ
+  // ход с тем же текстом, снимать пузырь по ней нельзя.
+  const local = createUserMessage('local_late', '2026-10-20T12:20:00.000Z', {
+    content: 'да',
+  });
+  const persisted = createUserMessage('claude_early', '2026-10-20T12:00:00.000Z', {
+    content: 'да',
+  });
+
+  assert.deepEqual(removeOptimisticUserEchoes([persisted], [local]), [local]);
+});

@@ -1,8 +1,26 @@
 import type { NormalizedMessage } from './useSessionStore';
 
-const LOCAL_USER_DEDUPE_WINDOW_MS = 5 * 60 * 1000;
 const LOCAL_USER_DEDUPE_CLOCK_SKEW_MS = 10_000;
 const LOCAL_ATTACHMENT_ONLY_DEDUPE_WINDOW_MS = 30_000;
+/**
+ * Сообщение «Сейчас» (steer) ложится на диск вставкой `queued_command`,
+ * которой провайдер ставит время записи ПЕРЕД ней — момент, когда Claude её
+ * прочёл, а не когда человек нажал. Долгий вызов инструмента между нажатием и
+ * чтением сдвигает серверную строку вперёд за пределы обычного окна — и
+ * пузырь оставался рядом с дисковой копией навсегда. Направление важно:
+ * серверная строка позже нажатия безопасна (у настоящего повтора свой пузырь
+ * и своя запись, а сверка один-к-одному), раньше — нет (окно по времени
+ * склеило бы две разные отправки), поэтому назад остаётся узкий skew.
+ */
+const LOCAL_USER_DEDUPE_FORWARD_MS = 15 * 60 * 1000;
+/**
+ * Запасная сверка ответа, когда ход по сообщениям человека не считается
+ * (сообщение-родитель выше границы загруженной страницы истории, эхо
+ * отправки не совпало). Копия одного ответа пишется на диск через секунды
+ * после живой строки; настоящий повтор такого же текста — в другом ходе и
+ * минуты спустя. Окно — в обе стороны от времени живой строки.
+ */
+const SAME_ANSWER_TIME_WINDOW_MS = 120_000;
 
 type UserTurnFingerprint = {
   text: string;
@@ -48,8 +66,11 @@ function findServerEchoForLocalUser(
     return null;
   }
 
+  // Текст несёт отпечаток содержимого — окно вперёд широкое (сдвиг
+  // queued_command). У «только вложений» отпечаток слабый (счётчик файлов) —
+  // держим прежние 30 секунд, чтобы не склеить два настоящих снимка подряд.
   const dedupeWindow = localFingerprint.text
-    ? LOCAL_USER_DEDUPE_WINDOW_MS
+    ? LOCAL_USER_DEDUPE_FORWARD_MS
     : LOCAL_ATTACHMENT_ONLY_DEDUPE_WINDOW_MS;
   let closestMatch: NormalizedMessage | null = null;
   let closestTimeDifference = Number.POSITIVE_INFINITY;
@@ -436,6 +457,82 @@ function isThinkingEchoedInSameTurnOnServer(
 }
 
 /**
+ * Запасная сверка, когда ход по сообщениям человека не находится:
+ * сообщение-родитель осталось выше границы загруженной страницы истории,
+ * либо эхо отправки не совпало — тогда `findServerTurnRangeByOrdinal`
+ * отвечает «хода нет», и все сверки по ходу молча отключаются. Живой ответ
+ * оставался рядом со своей же записью с диска — «ответ дважды» раз в
+ * несколько чатов.
+ *
+ * Ограничение вместо хода: копия ищется только среди серверных строк
+ * ПОСЛЕ последнего сообщения человека в загруженном окне (хвостовой ход —
+ * единственный, к которому ещё приходят живые строки) и только в пределах
+ * окна времени вокруг метки живой строки — копия одного ответа пишется
+ * секундами позже, настоящий повтор текста минутами. Совпадения
+ * расходуются один-к-одному через `claimedTailIds`, иначе две живые
+ * одинаковые реплики («Готово.» дважды подряд) снялись бы об одну запись.
+ */
+function isEchoedInTailTurnOnServer(
+  message: NormalizedMessage,
+  serverMessages: NormalizedMessage[],
+  claimedTailIds: Set<string>,
+  allowFragment: boolean,
+): boolean {
+  const content = (message.content || '').trim();
+  const messageTime = readMessageTime(message);
+  if (!content || messageTime === null) {
+    return false;
+  }
+
+  let lastUserIndex = -1;
+  for (let i = serverMessages.length - 1; i >= 0; i--) {
+    if (serverMessages[i].kind === 'text' && serverMessages[i].role === 'user') {
+      lastUserIndex = i;
+      break;
+    }
+  }
+
+  const matchesKind = (serverMessage: NormalizedMessage): boolean => {
+    if (message.kind === 'thinking' || message.kind === 'thinking_delta') {
+      return serverMessage.kind === 'thinking';
+    }
+    return serverMessage.kind === 'text' && serverMessage.role === 'assistant';
+  };
+
+  for (let i = lastUserIndex + 1; i < serverMessages.length; i++) {
+    const serverMessage = serverMessages[i];
+    if (claimedTailIds.has(serverMessage.id) || !matchesKind(serverMessage)) {
+      continue;
+    }
+    const full = (serverMessage.content || '').trim();
+    // Метка живой строки — время ПЕРВОЙ дельты, запись на диске — конец
+    // блока: у долго писавшегося текста между ними минуты, поэтому окно
+    // времени применяется только к точному совпадению короткого текста.
+    // Вхождение куска и равенство размышления — достаточно строгие
+    // отпечатки сами по себе.
+    const isThinking = message.kind === 'thinking' || message.kind === 'thinking_delta';
+    if (isThinking || full === content) {
+      if (!isThinking) {
+        const serverTime = readMessageTime(serverMessage);
+        if (serverTime === null || Math.abs(serverTime - messageTime) > SAME_ANSWER_TIME_WINDOW_MS) {
+          continue;
+        }
+      }
+      if (full === content) {
+        claimedTailIds.add(serverMessage.id);
+        return true;
+      }
+      continue;
+    }
+    if (allowFragment && content.length >= 8 && full.includes(content)) {
+      claimedTailIds.add(serverMessage.id);
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * After `finalizeStreaming`, the client holds a synthetic assistant `text` row
  * while the sessions API soon returns the same reply with a different id.
  * Those sit back-to-back in merged order and look like duplicate bubbles until
@@ -534,6 +631,9 @@ export function pruneRealtimeSupersededByServer(
 
   const serverIds = new Set(serverMessages.map((message) => message.id));
   const reconciledRealtimeMessages = removeOptimisticUserEchoes(serverMessages, realtimeMessages);
+  // Серверные строки, уже «израсходованные» запасной сверкой хвостового хода
+  // (isEchoedInTailTurnOnServer) — один-к-одному, как у отпечатков человека.
+  const claimedTailIds = new Set<string>();
 
   return reconciledRealtimeMessages.filter((message) => {
     if (serverIds.has(message.id)) {
@@ -551,11 +651,17 @@ export function pruneRealtimeSupersededByServer(
       if (isLiveFragmentOfServerReply(message, serverMessages, reconciledRealtimeMessages)) {
         return false;
       }
+      if (isEchoedInTailTurnOnServer(message, serverMessages, claimedTailIds, true)) {
+        return false;
+      }
       return true;
     }
 
     if (message.kind === 'thinking_delta' || message.id === `__thinking_${message.sessionId}`) {
       if (isThinkingEchoedInSameTurnOnServer(message, serverMessages, reconciledRealtimeMessages)) {
+        return false;
+      }
+      if (isEchoedInTailTurnOnServer(message, serverMessages, claimedTailIds, false)) {
         return false;
       }
       return true;
@@ -576,11 +682,17 @@ export function pruneRealtimeSupersededByServer(
       if (isLongReplyAlreadyOnServer(message, serverMessages)) {
         return false;
       }
+      if (isEchoedInTailTurnOnServer(message, serverMessages, claimedTailIds, true)) {
+        return false;
+      }
       return true;
     }
 
     if (message.kind === 'thinking') {
       if (isThinkingEchoedInSameTurnOnServer(message, serverMessages, reconciledRealtimeMessages)) {
+        return false;
+      }
+      if (isEchoedInTailTurnOnServer(message, serverMessages, claimedTailIds, false)) {
         return false;
       }
       return true;
