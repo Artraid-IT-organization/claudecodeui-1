@@ -8,13 +8,15 @@ import { useServerUpdates, type ServerUpdateApply, type ServerUpdatePending } fr
 import { authenticatedFetch } from '../../utils/api';
 
 /**
- * Плашка «Обновить» — пул изменений с другого сервера ждёт решения.
+ * Плашка «Обновить» — ждёт решения пул изменений.
  *
- * Живёт внизу панели слева, над «Настройками»: место привычное по плашке
- * «Доступно обновление» сборки и заметное всегда, но не на пути. Нажатие
- * открывает окно со списком изменений и тремя решениями: применить, разобрать
- * в чате или отложить (пул остаётся в памяти сервера — его можно принять
- * позже просьбой в любом чате).
+ * Живёт внизу панели слева, над «Настройками». Два режима по источнику пула:
+ * - Своя сборка (`remote === 'local-build'`): нажатие на плашку сразу ставит
+ *   обновление, одна кнопка без окна — разбирать нечего, коммиты свои.
+ * - Обновление с другого сервера (любой другой `remote`): нажатие открывает
+ *   окно со списком изменений и решениями — применить, разобрать в чате
+ *   (чужие наработки могут не совпасть с нашими) или отложить. Окно же
+ *   показывается при конфликте пересечений с вашими правками.
  *
  * Пока идёт установка, плашка превращается в индикатор: перезапуск службы
  * закончится перезагрузкой страницы сам (lib/appUpdate подхватит новую
@@ -249,6 +251,10 @@ export default function ServerUpdateSection() {
 
   const pending = status.pending;
   const applying = status.applying;
+  // Своя сборка ставится одной кнопкой; окно нужно только чужим пулам
+  // (другой сервер — там могут быть свои наработки и конфликты) и любому
+  // конфликту пересечений.
+  const directApply = pending?.remote === 'local-build' && !pending.conflict;
 
   return (
     <>
@@ -263,16 +269,28 @@ export default function ServerUpdateSection() {
           <div className="nav-divider" />
           <div className="px-2 py-1.5 md:px-2 md:py-1.5">
             <button
-              className="group flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-emerald-50/80 dark:hover:bg-emerald-900/15"
-              onClick={() => { setError(null); setOpen(true); }}
+              className="group flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-emerald-50/80 disabled:opacity-60 dark:hover:bg-emerald-900/15"
+              disabled={action !== 'idle'}
+              onClick={() => {
+                setError(null);
+                if (directApply) {
+                  void onApply(false);
+                } else {
+                  setOpen(true);
+                }
+              }}
             >
               <div className="relative flex-shrink-0">
-                <RefreshCw className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+                {action === 'applying'
+                  ? <Loader2 className="h-4 w-4 animate-spin text-emerald-600 dark:text-emerald-400" />
+                  : <RefreshCw className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />}
                 <span className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
               </div>
               <div className="min-w-0 flex-1">
                 <span className="block truncate text-sm font-normal text-emerald-700 dark:text-emerald-300">
-                  {t('serverUpdate.plaque', 'Обновление · {{count}} изм.', { count: pending.commits.length })}
+                  {directApply
+                    ? t('serverUpdate.apply', 'Обновить')
+                    : t('serverUpdate.plaque', 'Обновление · {{count}} изм.', { count: pending.commits.length })}
                 </span>
                 <span className="truncate text-[10px] text-emerald-600/70 dark:text-emerald-400/60">
                   {pending.conflict
@@ -281,6 +299,9 @@ export default function ServerUpdateSection() {
                 </span>
               </div>
             </button>
+            {error && !open && (
+              <p className="mt-1 px-2.5 text-[10px] text-red-600 dark:text-red-400">{error}</p>
+            )}
           </div>
         </>
       )}
