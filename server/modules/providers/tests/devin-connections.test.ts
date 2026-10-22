@@ -153,19 +153,20 @@ test('recordOutcome: rate limit cools the subscription down until the reset time
   });
 });
 
-test('recordOutcome: weekly quota without a named reset cools down for hours, repeated failures double it', async () => {
+test('recordOutcome: usage quota of paid models does not pause the subscription; plain limits do, repeats double it', async () => {
   await withIsolatedDatabase(() => {
     const conn = devinConnectionsDb.create({ name: 'weekly', xdgDataHome: '/tmp/xdg-weekly' });
     const minutes = (id: number) => {
       const row = devinConnectionsDb.getById(id)!;
       return (Date.parse(`${row.cooldown_until!.replace(' ', 'T')}Z`) - Date.now()) / 60_000;
     };
-    devinConnectionsService.recordOutcome(conn.id, 'failed', 'Your weekly usage quota has been exhausted. Visit https://app.devin.ai/settings/usage');
-    assert.ok(minutes(conn.id) > 350 && minutes(conn.id) <= 361, `weekly ≈ 360 min, got ${minutes(conn.id)}`);
-    // Повторный rate limit после отстоявшего cooldown удваивает отдых.
-    getConnection().prepare("UPDATE devin_connections SET cooldown_until = datetime('now', '-1 minute') WHERE id = ?").run(conn.id);
-    devinConnectionsService.recordOutcome(conn.id, 'failed', 'Your weekly usage quota has been exhausted.');
-    assert.ok(minutes(conn.id) > 700 && minutes(conn.id) <= 721, `repeated weekly ≈ 720 min, got ${minutes(conn.id)}`);
+    // 22.10.26: квота платных моделей не ставит паузу — бесплатные SWE-2 на этой подписке работают.
+    devinConnectionsService.recordOutcome(conn.id, 'failed', 'Your weekly usage quota has been exhausted. Visit https://app.devin.ai/settings/usage (trace ID: abc)');
+    devinConnectionsService.recordOutcome(conn.id, 'failed', 'Your daily usage quota has been exhausted.');
+    const quotaRow = devinConnectionsDb.getById(conn.id)!;
+    assert.equal(quotaRow.cooldown_until, null);
+    assert.notEqual(quotaRow.health_status, 'rate_limited');
+    assert.equal(devinConnectionsDb.isEligible(conn.id), true);
     // Обычный лимит без срока — короткий отдых, повтор — удвоенный.
     const daily = devinConnectionsDb.create({ name: 'daily', xdgDataHome: '/tmp/xdg-daily' });
     devinConnectionsService.recordOutcome(daily.id, 'failed', 'Reached free model rate limit.');

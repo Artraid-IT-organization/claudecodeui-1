@@ -592,6 +592,13 @@ export const devinConnectionsService = {
     if (cls === 'session_locked' || cls === 'model') {
       return; // подписка здорова — занят чат или модель не приняла запрос, а не она
     }
+    // 22.10.26: «weekly/daily usage quota has been exhausted» — квота только ПЛАТНЫХ моделей,
+    // бесплатные SWE-2 отвечают. Пауза на всю подписку блокировала и SWE-чаты (69 отказов за
+    // час, пока платные чаты сами возвращали ход в очередь и снова ставили паузу). Платный ход
+    // получает свою ошибку в ленте, подписка остаётся годной.
+    if (cls === 'rate_limit' && /usage quota/i.test(errorMessage ?? '')) {
+      return;
+    }
     if (cls === 'auth') {
       devinConnectionsDb.markHealth(id, 'auth_failed', { lastError: clipped });
     } else if (cls === 'rate_limit') {
