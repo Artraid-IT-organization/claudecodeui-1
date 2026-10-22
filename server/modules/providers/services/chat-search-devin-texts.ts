@@ -70,21 +70,24 @@ export function extractDevinBody(openDb: (dbPath: string) => DevinDb | null, dbP
   }
 }
 
-// Один разбор не дольше минуты; больше — поток перезапускается, чат
-// индексируется пустым и догоняется при следующем изменении.
+// Один разбор не дольше минуты; больше — поток перезапускается, а чат
+// остаётся «грязным» (null → без записи в индекс) и пробуется следующей сверкой.
 const WORKER_TIMEOUT_MS = 60_000;
 // Куча потока отдельно от сервера: гигантская переписка роняет поток, не сайт.
 const WORKER_HEAP_MB = 384;
 const WORKER_URL = new URL('./chat-search-devin.worker.js', import.meta.url);
 
-type Pending = { resolve: (text: string) => void; timer: NodeJS.Timeout };
+type Pending = { resolve: (text: string | null) => void; timer: NodeJS.Timeout };
 
 let worker: Worker | null = null;
 let nextRequestId = 0;
 const pending = new Map<number, Pending>();
+// Поток разбирает по одному, поэтому и запросы отдаём по одному: таймаут
+// тогда меряет разбор именно этого чата, а не ожидание в очереди.
+let queue: Promise<unknown> = Promise.resolve();
 let inlineOpenDb: ((dbPath: string) => DevinDb | null) | null = null;
 
-function settleAll(text: string): void {
+function settleAll(text: string | null): void {
   for (const [id, entry] of pending) {
     clearTimeout(entry.timer);
     entry.resolve(text);
@@ -95,7 +98,7 @@ function settleAll(text: string): void {
 function dropWorker(): void {
   const current = worker;
   worker = null;
-  settleAll('');
+  settleAll(null);
   void current?.terminate().catch(() => undefined);
 }
 
@@ -127,15 +130,24 @@ function getWorker(): Worker | null {
   }
 }
 
-/** Текст чата Devin, не блокируя основной поток сервера (если поток доступен). */
-export function extractDevinBodyOffThread(dbPath: string, providerSessionId: string): Promise<string> {
+/**
+ * Текст чата Devin, не блокируя основной поток сервера (если поток доступен).
+ * null — разбор не удался (таймаут, падение потока): чат в индекс не пишется.
+ */
+export function extractDevinBodyOffThread(dbPath: string, providerSessionId: string): Promise<string | null> {
+  const run = queue.then(() => runInWorker(dbPath, providerSessionId));
+  queue = run.catch(() => undefined);
+  return run;
+}
+
+function runInWorker(dbPath: string, providerSessionId: string): Promise<string | null> {
   const target = getWorker();
   if (!target) {
     inlineOpenDb ??= createDevinDbCache();
     return Promise.resolve(extractDevinBody(inlineOpenDb, dbPath, providerSessionId));
   }
   const id = ++nextRequestId;
-  return new Promise<string>((resolve) => {
+  return new Promise<string | null>((resolve) => {
     const timer = setTimeout(() => {
       console.warn(`[chat-search] разбор Devin ${providerSessionId} дольше ${WORKER_TIMEOUT_MS / 1000} с — перезапуск потока`);
       if (worker === target) dropWorker();

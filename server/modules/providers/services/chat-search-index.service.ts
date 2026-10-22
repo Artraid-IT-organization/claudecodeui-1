@@ -231,7 +231,7 @@ async function buildSessionBody(
   session: SessionRowLike,
   extractorFor: (provider: 'claude' | 'codex') => RecordExtractor,
   devinConnectionsDb: DevinConnectionsDbLike | null,
-): Promise<string> {
+): Promise<string | null> {
   if (session.provider === 'devin') {
     const providerSessionId = session.provider_session_id ?? session.session_id;
     const connId = session.devin_connection_id ?? null;
@@ -384,8 +384,12 @@ export async function reconcileChatSearchIndex(
     const body = extractorFor
       ? await buildSessionBody(session, extractorFor, options.devinConnectionsDb ?? null)
       : '';
-    upsertSessionDoc(db, session, body);
-    indexed += 1;
+    // null — разбор Devin не удался: не записываем пустой текст с «чистым»
+    // отпечатком, чат остаётся в очереди до следующей сверки.
+    if (body !== null) {
+      upsertSessionDoc(db, session, body);
+      indexed += 1;
+    }
     await yieldToEventLoop();
   }
 
