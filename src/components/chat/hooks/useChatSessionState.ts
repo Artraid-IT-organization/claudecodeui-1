@@ -17,6 +17,7 @@ import { DEFAULT_PROVIDER } from '../../../utils/defaultProvider';
 import { useScrollAnchor } from './useScrollAnchor';
 import { useRowPrewarm } from './useRowPrewarm';
 import { useRowHeightRecorder } from './useRowHeightRecorder';
+import { getIntrinsicMessageKey } from '../utils/messageKeys';
 import { knownRunStartedAt } from '../utils/liveRunCursor';
 import { readSelectedProviderRaw } from '../../../utils/selectedProvider';
 
@@ -217,6 +218,14 @@ export function useChatSessionState({
   const emptyChainRoundsRef = useRef(0);
   const loadOlderMessagesRef = useRef<((container: HTMLDivElement) => Promise<boolean>) | null>(null);
   const pendingInitialScrollRef = useRef(true);
+  // Когда человек последний раз сам тронул ленту (колесо, палец, клавиша,
+  // полоса прокрутки). Начальная установка в низ после этого не пишет scrollTop.
+  const lastUserGestureAtRef = useRef(0);
+  // Когда взведена начальная установка в низ (открытие чата).
+  const initialScrollArmedAtRef = useRef(0);
+  // Последнее сообщение ленты на прошлой проверке: догон в низ — только когда
+  // сообщение дописалось в конец, а не когда сверху пришла порция ранних.
+  const lastTailKeyRef = useRef<string | null>(null);
   const messagesOffsetRef = useRef(0);
   const scrollPositionRef = useRef({ height: 0, top: 0 });
   const loadAllFinishedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -278,6 +287,7 @@ export function useChatSessionState({
     topLoadLockRef.current = false;
     growthCheckRef.current = null;
     pendingInitialScrollRef.current = true;
+    initialScrollArmedAtRef.current = performance.now();
     lastLoadedSessionKeyRef.current = null;
 
     if (loadAllOverlayTimerRef.current) {
@@ -773,6 +783,7 @@ export function useChatSessionState({
   // a programmatic write or a passive reflow, only for the user's own hand
   // on the wheel or the glass.
   const handleUserScrollGesture = useCallback(() => {
+    lastUserGestureAtRef.current = performance.now();
     if (!isActive) return;
     const container = scrollContainerRef.current;
     if (!container) return;
@@ -834,10 +845,26 @@ export function useChatSessionState({
       }
     }
 
-    // `isUserScrolledUp` is intentionally NOT updated here — see
-    // `updateIsUserScrolledUpFromGesture` above. This still runs for every
-    // native 'scroll' (scrollbar drag included) for position bookkeeping
-    // and the "load older messages near the top" pagination behavior.
+    // `isUserScrolledUp` is NOT reset to false here — see
+    // `handleUserScrollGesture` above. Only the safe direction is taken from
+    // a native scroll: the list moved UP (not our write) and is away from the
+    // bottom. A passive reflow never lowers scrollTop away from the bottom
+    // (the browser clamp keeps you AT the bottom), so this is always the
+    // user — a fling's inertia on iPhone, where touchmove has stopped and
+    // `scrollend` is absent before iOS 26.2. Without it the flag stayed
+    // «at bottom» for the whole fling and the next prepended portion yanked
+    // the list several screens down.
+    if (container.scrollTop < scrollPositionRef.current.top - 1 && !isNearBottom()) {
+      lastUserGestureAtRef.current = performance.now();
+      if (!isUserScrolledUpRef.current) setIsUserScrolledUp(true);
+    } else if (container.scrollTop > scrollPositionRef.current.top + 1 && isNearBottom()) {
+      // Симметрично: лента поехала ВНИЗ не нашей записью и пришла к низу —
+      // человек вернулся (клавиша End, полоса прокрутки, поиск). Пассивная
+      // перестройка scrollTop не повышает; без этого на iOS < 26.2 (нет
+      // scrollend) флаг залипал в «листает вверх», и догон новых сообщений
+      // не работал до конца сессии.
+      if (isUserScrolledUpRef.current) setIsUserScrolledUp(false);
+    }
     scrollPositionRef.current = {
       height: container.scrollHeight,
       top: container.scrollTop,
@@ -874,7 +901,7 @@ export function useChatSessionState({
       && emptyChainRoundsRef.current < EMPTY_CHAIN_MAX_ROUNDS) {
       void loadOlderMessages(container);
     }
-  }, [hasMoreMessages, isActive, loadOlderMessages]);
+  }, [hasMoreMessages, isActive, isNearBottom, loadOlderMessages]);
 
   const wasChatActiveRef = useRef(isActive);
   useLayoutEffect(() => {
@@ -912,6 +939,7 @@ export function useChatSessionState({
   useEffect(() => {
     if (!searchScrollActiveRef.current) {
       pendingInitialScrollRef.current = true;
+      initialScrollArmedAtRef.current = performance.now();
       setVisibleMessageCount(INITIAL_VISIBLE_MESSAGES);
     }
     topLoadLockRef.current = false;
@@ -945,9 +973,18 @@ export function useChatSessionState({
     let lastHeight = 0;
     let stableCount = 0;
     let rafId = 0;
+    const startedAt = initialScrollArmedAtRef.current;
 
     const tick = () => {
       if (!pendingInitialScrollRef.current || !scrollContainerRef.current) return;
+      // Человек уже листает — установка в низ закончена: каждый кадр она
+      // возвращала ленту в низ до секунды (на медленном телефоне дольше),
+      // и первый бросок вверх после открытия отбрасывало обратно. Дальше
+      // место держит useScrollAnchor (он ждёт снятия этого признака).
+      if (lastUserGestureAtRef.current > startedAt) {
+        pendingInitialScrollRef.current = false;
+        return;
+      }
       const target = container.scrollHeight;
       markProgrammaticScroll(target);
       container.scrollTop = target;
@@ -1166,8 +1203,13 @@ export function useChatSessionState({
           const shouldStickToBottom = isActiveRef.current && isNearBottom();
           await requestLatestMessages(selectedSession.id);
 
+          // Перепроверка в момент срабатывания: за время запроса (секунды на
+          // медленной сети) человек мог уйти листать — не утаскивать его.
           if (shouldStickToBottom) {
-            setTimeout(() => scrollToBottom(), 200);
+            setTimeout(() => {
+              if (isUserScrolledUpRef.current || !isActiveRef.current) return;
+              scrollToBottom();
+            }, 200);
           }
         }
       } catch (error) {
@@ -1341,9 +1383,19 @@ export function useChatSessionState({
   });
 
   useEffect(() => {
+    // Догон в низ — только когда сменился ПОСЛЕДНИЙ элемент ленты (дописалось
+    // сообщение). Порция ранних сообщений тоже меняет длину списка, а признак
+    // `growthCheckRef` к этому эффекту уже снят эффектом выше (порядок
+    // объявления) — и каждая порция сверху уводила ленту в самый низ, если
+    // флаг «листает вверх» ещё не успел встать (бросок без touchmove).
+    const tail = chatMessages[chatMessages.length - 1];
+    const tailKey = tail ? (getIntrinsicMessageKey(tail) ?? `${chatMessages.length}`) : null;
+    const tailChanged = tailKey !== lastTailKeyRef.current;
+    lastTailKeyRef.current = tailKey;
+    if (!tailChanged) return;
     if (!isActive) return;
     if (!scrollContainerRef.current || chatMessages.length === 0) return;
-    if (isLoadingMoreRef.current || isLoadingMoreMessages || growthCheckRef.current !== null) return;
+    if (isLoadingMoreRef.current || isLoadingMoreMessages) return;
     if (searchScrollActiveRef.current) return;
 
     if (isUserScrolledUp) {

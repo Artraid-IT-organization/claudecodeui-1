@@ -1,5 +1,5 @@
 import { useTranslation } from 'react-i18next';
-import { memo, useCallback, useMemo } from 'react';
+import { memo, useCallback, useLayoutEffect, useMemo } from 'react';
 import type { Dispatch, RefObject, SetStateAction } from 'react';
 
 import type { ChatMessage } from '../../types/types';
@@ -187,6 +187,22 @@ function ChatMessagesPane({
     [messageKeyMap],
   );
 
+  // Строку, которую браузер сейчас пропускает (content-visibility), помечаем —
+  // CSS рисует на её месте заглушку, а не пустоту (index.css, `data-cv-skipped`).
+  // Событие не всплывает — слушаем на перехвате. До отрисовки (layout), чтобы
+  // не пропустить первое состояние строк, пришедших вместе с панелью.
+  useLayoutEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return undefined;
+    const onState = (event: Event) => {
+      const target = event.target as HTMLElement | null;
+      if (!target?.classList?.contains('chat-message')) return;
+      target.toggleAttribute('data-cv-skipped', Boolean((event as Event & { skipped?: boolean }).skipped));
+    };
+    container.addEventListener('contentvisibilityautostatechange', onState, true);
+    return () => container.removeEventListener('contentvisibilityautostatechange', onState, true);
+  }, [scrollContainerRef]);
+
   return (
     <div
       ref={scrollContainerRef}
@@ -302,6 +318,15 @@ function ChatMessagesPane({
                 </span>
               )}
             </button>
+          )}
+
+          {/* Место под ещё не догруженные ранние сообщения: листая вверх во
+              время подгрузки, человек видит заглушку, а не пустоту. Высотой
+              в экран — короткая первая порция не стоит прижатой к верху и не
+              переезжает вниз, когда сверху приходит следующая. Не .chat-row:
+              опорой useScrollAnchor она не бывает. */}
+          {hasMoreMessages && !allMessagesLoaded && (
+            <div className="chat-skeleton" aria-hidden="true" />
           )}
 
           {(() => {

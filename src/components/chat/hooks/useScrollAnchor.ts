@@ -38,10 +38,17 @@ const MOTION_IDLE_MS = 140;
  */
 const TOUCH_STALE_MS = 1000;
 
-interface Anchor {
+interface AnchorRow {
   row: HTMLElement;
   /** Положение строки внутри ленты без временного отступа. */
   top: number;
+}
+
+interface Anchor {
+  /** Опора и запасная (следующая строка): первую React может пересоздать —
+   * мысль влилась в «Ход работы», эхо заменено серверной копией, — и без
+   * запасной сдвиг не возвращался бы, лента прыгала. */
+  rows: AnchorRow[];
   /** Прокрутка в момент, когда опора запомнена. */
   scrollTop: number;
 }
@@ -59,26 +66,34 @@ interface UseScrollAnchorArgs {
 // Инвариант: `offsetTop` строк отсчитывается от самой панели прокрутки
 // (`.chat-messages-pane` — `relative`). Если сделать `.chat-rows` или
 // `.chat-row` позиционированными, опора молча начнёт врать.
+//
+// Опора — первая строка, НАЧИНАЮЩАЯСЯ на экране, а не та, что пересекает его
+// верх. Строка у верхней кромки часто только что приехала порцией или была
+// пропущена content-visibility и стоит с оценочной высотой; на следующем кадре
+// она получает настоящую — и если опорой была она сама, её верх стоял, а всё
+// видимое ниже съезжало (замер 22.10.26: −147 px после порции). Строка выше
+// опоры меняет высоту вверх — видимая её часть (низ) остаётся на месте.
+// Если экран целиком внутри одной длинной строки — опорой она.
 function pickAnchorRow(container: HTMLDivElement): HTMLElement | null {
   const rows = Array.from(container.querySelectorAll<HTMLElement>(ROW_SELECTOR));
   if (rows.length === 0) return null;
   const viewTop = container.scrollTop;
   let lo = 0;
   let hi = rows.length - 1;
-  let found = rows.length - 1;
+  let found = -1;
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
-    const row = rows[mid];
-    if (row.offsetTop + row.offsetHeight > viewTop) {
+    if (rows[mid].offsetTop >= viewTop) {
       found = mid;
       hi = mid - 1;
     } else {
       lo = mid + 1;
     }
   }
-  // Самую верхнюю строку опорой не берём: в неё вливаются ранние действия, и
-  // React пересоздаёт её под новым ключом — опора пропала бы из документа.
-  if (found === 0 && rows.length > 1) return rows[1];
+  if (found === -1) return rows[rows.length - 1];
+  if (found > 0 && rows[found].offsetTop >= viewTop + container.clientHeight) return rows[found - 1];
+  // Самая верхняя строка может пересоздаться (в неё вливаются ранние
+  // действия) — тогда сработает запасная опора (следующая строка, см. record).
   return rows[found];
 }
 
@@ -114,9 +129,15 @@ export function useScrollAnchor({
 
   const record = useCallback((container: HTMLDivElement) => {
     const row = pickAnchorRow(container);
-    anchorRef.current = row
-      ? { row, top: row.offsetTop + deferredRef.current, scrollTop: container.scrollTop }
-      : null;
+    const rows: AnchorRow[] = [];
+    if (row) {
+      rows.push({ row, top: row.offsetTop + deferredRef.current });
+      const next = row.nextElementSibling;
+      if (next instanceof HTMLElement && next.matches(ROW_SELECTOR)) {
+        rows.push({ row: next, top: next.offsetTop + deferredRef.current });
+      }
+    }
+    anchorRef.current = rows.length > 0 ? { rows, scrollTop: container.scrollTop } : null;
     wasAtBottomRef.current = deferredRef.current === 0
       && container.scrollHeight - container.scrollTop - container.clientHeight <= 2;
   }, []);
@@ -197,14 +218,16 @@ export function useScrollAnchor({
       return;
     }
     const anchor = anchorRef.current;
+    const live = anchor?.rows.find((entry) => entry.row.isConnected);
     if (
       enabledRef.current
       && !suspendedRef.current
-      && anchor?.row.isConnected
+      && anchor
+      && live
       && lastHeightRef.current >= 0
       && height !== lastHeightRef.current
     ) {
-      const delta = anchor.row.offsetTop + deferredRef.current - anchor.top;
+      const delta = live.row.offsetTop + deferredRef.current - live.top;
       if (Math.abs(delta) >= 1) {
         if (wrapper && inMotion(container)) {
           deferredRef.current += delta;
