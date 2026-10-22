@@ -321,9 +321,12 @@ export const devinConnectionsService = {
     if (preferredId != null && !excludedIds.includes(preferredId) && devinConnectionsDb.isEligible(preferredId)) {
       return devinConnectionsDb.getById(preferredId)!;
     }
-    const row = excludedIds.length === 0
+    // Годные без паузы — первыми; если все на паузе, берём ту, что вернётся раньше:
+    // SWE-модели бесплатны и квотой не ограничены, блокировать их паузой нельзя (Егор 22.10.26).
+    const row = (excludedIds.length === 0
       ? devinConnectionsDb.pickAvailable()
-      : devinConnectionsDb.pickAvailableExcluding(excludedIds);
+      : devinConnectionsDb.pickAvailableExcluding(excludedIds))
+      ?? devinConnectionsDb.pickIgnoringCooldownExcluding(excludedIds);
     if (!row) {
       throw new AppError(
         'No enabled Devin connection is currently available (all are disabled, in cooldown, or unauthenticated).',

@@ -127,6 +127,35 @@ test('pickConnection: chosen channel in cooldown or already tried falls back to 
   });
 });
 
+test('pickConnection: all channels cooling down — still picks the one that recovers first, never blocks SWE', async () => {
+  await withIsolatedDatabase(() => {
+    const first = devinConnectionsDb.create({ name: 'first', priority: 0, xdgDataHome: '/tmp/xdg-c1' });
+    const second = devinConnectionsDb.create({ name: 'second', priority: 1, xdgDataHome: '/tmp/xdg-c2' });
+    devinConnectionsDb.markHealth(first.id, 'rate_limited', { cooldownMinutes: 720 });
+    devinConnectionsDb.markHealth(second.id, 'rate_limited', { cooldownMinutes: 360 });
+    // 22.10.26: обе на паузе → берётся та, что вернётся раньше (second), а не отказ 503.
+    assert.equal(devinConnectionsService.pickConnection().id, second.id);
+    // Уже перепробованная в этом ходе исключается, как и раньше.
+    assert.equal(devinConnectionsService.pickConnection([second.id]).id, first.id);
+    // Все перепробованы — отказ остаётся (повторять некуда).
+    assert.throws(
+      () => devinConnectionsService.pickConnection([first.id, second.id]),
+      (error: unknown) => (error as { code?: string }).code === 'DEVIN_CONNECTION_UNAVAILABLE',
+    );
+    // Годная подписка без паузы по-прежнему идёт раньше любой на паузе.
+    const ready = devinConnectionsDb.create({ name: 'ready', priority: 5, xdgDataHome: '/tmp/xdg-c3' });
+    assert.equal(devinConnectionsService.pickConnection().id, ready.id);
+    // Отозванная креда и админское выключение — настоящие запреты, их пауза-обход не касается.
+    devinConnectionsDb.markHealth(ready.id, 'auth_failed', { lastError: 'x' });
+    assert.equal(devinConnectionsService.pickConnection().id, second.id);
+    getConnection().prepare('UPDATE devin_connections SET enabled = 0 WHERE id IN (?, ?)').run(first.id, second.id);
+    assert.throws(
+      () => devinConnectionsService.pickConnection(),
+      (error: unknown) => (error as { code?: string }).code === 'DEVIN_CONNECTION_UNAVAILABLE',
+    );
+  });
+});
+
 test('classifyDevinFailure: hex trace ID with "403" inside is still a rate limit, not auth', () => {
   const live = 'Reached free model rate limit. Your limit will reset in 34 minutes (at 21:01 UTC). (trace ID: afd89c403f6c84cbe2c1)';
   assert.equal(classifyDevinFailure(live), 'rate_limit');
