@@ -97,6 +97,60 @@ function pickAnchorRow(container: HTMLDivElement): HTMLElement | null {
   return rows[found];
 }
 
+const WARM_CLASS = 'chat-message--warm';
+/** Строки, уже побывавшие в зоне экрана (см. warmRowsInView). */
+const zoneSeen = new WeakSet<HTMLElement>();
+
+/**
+ * Строки в зоне экрана, которые браузер ещё пропускает (content-visibility),
+ * размечаются СЕЙЧАС, до отрисовки. Иначе после прыжка прокрутки (порция
+ * сверху, встали в низ) они первый кадр стоят с оценочной высотой и получают
+ * настоящую уже на глазах — видимое съезжало на 60–130 px (замер 22.10.26).
+ * Класс прогрева держится до следующего кадра — браузер запоминает настоящую
+ * высоту (`contain-intrinsic-size: auto`), — как в useRowPrewarm.
+ * Возвращает true, если что-то разметили (высоты могли смениться).
+ */
+function warmRowsInView(container: HTMLDivElement): boolean {
+  const probe = container.querySelector<HTMLElement>('.chat-message');
+  if (!probe || typeof probe.checkVisibility !== 'function') return false;
+  const rows = Array.from(container.querySelectorAll<HTMLElement>(ROW_SELECTOR));
+  if (rows.length === 0) return false;
+  const from = container.scrollTop - container.clientHeight / 2;
+  const to = container.scrollTop + container.clientHeight * 1.5;
+  let lo = 0;
+  let hi = rows.length - 1;
+  let first = rows.length;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (rows[mid].offsetTop + rows[mid].offsetHeight > from) {
+      first = mid;
+      hi = mid - 1;
+    } else {
+      lo = mid + 1;
+    }
+  }
+  const warmed: HTMLElement[] = [];
+  for (let i = first; i < rows.length && rows[i].offsetTop < to; i += 1) {
+    rows[i].querySelectorAll<HTMLElement>('.chat-message').forEach((message) => {
+      // Только что вставленную строку браузер ещё не успел признать
+      // пропущенной (checkVisibility отвечает «видна»), а в следующем кадре
+      // она встаёт с оценкой и потом растёт (замер: +68 px). Поэтому каждая
+      // строка, впервые попавшая в зону, греется один раз без спроса.
+      if (message.classList.contains(WARM_CLASS)) return;
+      if (zoneSeen.has(message) && message.checkVisibility({ contentVisibilityAuto: true })) return;
+      zoneSeen.add(message);
+      message.classList.add(WARM_CLASS);
+      warmed.push(message);
+    });
+  }
+  if (warmed.length === 0) return false;
+  void container.scrollHeight;
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    warmed.forEach((message) => message.classList.remove(WARM_CLASS));
+  }));
+  return true;
+}
+
 export function useScrollAnchor({
   scrollContainerRef,
   enabled,
@@ -178,7 +232,7 @@ export function useScrollAnchor({
   }, [flush]);
 
   /** Сверить опору: высота ленты поменялась — вернуть место, затем запомнить новую опору. */
-  const reconcile = useCallback(() => {
+  const reconcileOnce = useCallback(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
     // Вкладка чата скрыта (display: none) — все размеры нулевые, опора бессмысленна.
@@ -250,6 +304,16 @@ export function useScrollAnchor({
     lastHeightRef.current = height;
     record(container);
   }, [inMotion, record, scheduleFlush, scrollContainerRef, suspendedRef, writeScrollTop]);
+
+  // После сверки строки, оказавшиеся у экрана ещё неразмеченными, размечаем
+  // сразу и сверяемся второй раз — в том же кадре, до отрисовки: их настоящая
+  // высота гасится опорой, а не съезжает на глазах (warmRowsInView).
+  const reconcile = useCallback(() => {
+    reconcileOnce();
+    const container = scrollContainerRef.current;
+    if (!container || container.clientHeight === 0 || !enabledRef.current || suspendedRef.current) return;
+    if (warmRowsInView(container)) reconcileOnce();
+  }, [reconcileOnce, scrollContainerRef, suspendedRef]);
 
   /** Сбросить отложенный сдвиг без записи прокрутки — перед прыжком в низ. */
   const clearDeferredShift = useCallback(() => {
