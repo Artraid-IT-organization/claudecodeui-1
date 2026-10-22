@@ -702,7 +702,12 @@ async function startServer() {
             // FTS-индекс чатов: фоновая сверка закрывает хвосты, которые не
             // вошли в бюджет reconcile на поисковом запросе. Первая — сразу за
             // прогревом выжимок (индекс читает их же), дальше раз в минуту.
+            // Сверка отдаёт ход между чатами и может идти дольше минуты —
+            // следующая не стартует, пока не закончилась предыдущая.
+            let chatIndexRunning = false;
             const reconcileChatIndex = async (): Promise<void> => {
+                if (chatIndexRunning) return;
+                chatIndexRunning = true;
                 try {
                     const { reconcileChatSearchIndex } = await import('@/modules/providers/services/chat-search-index.service.js');
                     const { extractorFor } = await import('@/modules/providers/services/session-conversations-search.service.js');
@@ -717,6 +722,8 @@ async function startServer() {
                     }
                 } catch (error) {
                     console.warn('[chat-search] фоновая сверка не удалась:', error instanceof Error ? error.message : error);
+                } finally {
+                    chatIndexRunning = false;
                 }
             };
             setTimeout(() => {

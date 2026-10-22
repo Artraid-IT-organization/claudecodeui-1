@@ -13,9 +13,9 @@ const snowballFactory = createRequire(import.meta.url)('snowball-stemmers') as {
 };
 
 import { projectsDb } from '@/modules/database/index.js';
-import { fullDevinConversation } from '@/modules/providers/list/devin/devin-chain.js';
+import { extractDevinBodyOffThread } from '@/modules/providers/services/chat-search-devin-texts.js';
 import { ensureSearchIndex, type IndexedMessage, type RecordExtractor } from '@/modules/providers/services/session-search-index.service.js';
-import { getDevinDatabasePath, isDevinAutoContinueText, readJsonRecord, readOptionalString } from '@/shared/utils.js';
+import { getDevinDatabasePath } from '@/shared/utils.js';
 
 /**
  * Полнотекстовый индекс чатов на SQLite FTS5 (та же связка, что у Joplin
@@ -34,8 +34,6 @@ import { getDevinDatabasePath, isDevinAutoContinueText, readJsonRecord, readOpti
  * изменившиеся строки. База отдельным файлом рядом с базой экземпляра —
  * у изолированной копии свой индекс автоматически.
  */
-
-type AnyRecord = Record<string, any>;
 
 const CYRILLIC_RE = /[а-яё]/i;
 const WORD_RE = /[\p{L}\p{N}]+/gu;
@@ -227,61 +225,18 @@ function readDigestTextsForSession(
   return texts;
 }
 
-function extractDevinTexts(
-  db: ChatSearchDb,
-  providerSessionId: string,
-): string[] {
-  const texts: string[] = [];
-  for (const row of fullDevinConversation(db, providerSessionId)) {
-    const message = readJsonRecord(row.chatMessage);
-    if (!message) continue;
-    const role = readOptionalString(message.role);
-    const metadata = message.metadata as AnyRecord | undefined;
-    if (role === 'user') {
-      if (metadata?.is_user_input !== true) continue;
-      const content = readOptionalString(message.content);
-      if (content && !isDevinAutoContinueText(content)) {
-        texts.push(content);
-      }
-    } else if (role === 'assistant') {
-      const content = readOptionalString(message.content);
-      if (content && content.trim()) {
-        texts.push(content);
-      }
-    }
-  }
-  return texts;
-}
-
 type DevinConnectionsDbLike = { getById: (id: number) => { xdg_data_home: string | null } | null | undefined };
 
 async function buildSessionBody(
   session: SessionRowLike,
   extractorFor: (provider: 'claude' | 'codex') => RecordExtractor,
   devinConnectionsDb: DevinConnectionsDbLike | null,
-  devinDbCache: Map<string, ChatSearchDb | null>,
 ): Promise<string> {
   if (session.provider === 'devin') {
     const providerSessionId = session.provider_session_id ?? session.session_id;
     const connId = session.devin_connection_id ?? null;
     const xdg = connId != null ? devinConnectionsDb?.getById(connId)?.xdg_data_home ?? null : null;
-    const dbPath = getDevinDatabasePath(xdg);
-    if (!devinDbCache.has(dbPath)) {
-      let opened: ChatSearchDb | null = null;
-      try {
-        opened = new Database(dbPath, { readonly: true, fileMustExist: true });
-      } catch {
-        opened = null;
-      }
-      devinDbCache.set(dbPath, opened);
-    }
-    const db = devinDbCache.get(dbPath) ?? null;
-    if (!db) return '';
-    try {
-      return extractDevinTexts(db, providerSessionId).join('\n');
-    } catch {
-      return '';
-    }
+    return extractDevinBodyOffThread(getDevinDatabasePath(xdg), providerSessionId);
   }
 
   if (!session.jsonl_path) {
@@ -350,6 +305,13 @@ const defaultArchivedCheck = (projectPath: string): boolean => {
   return Boolean(projectsDb.getProjectPath(projectPath)?.isArchived);
 };
 
+// Вся работа сверки синхронная (better-sqlite3, разбор базы Devin в 4+ ГБ),
+// и без пауз пачка держала сервер целиком по 10–15 с раз в минуту: WebSocket
+// и запросы всех людей ждали, сайт «терял связь» (замер 22.10.26). Отдаём ход
+// после каждого чата и каждые SCAN_YIELD_EVERY строк подготовки.
+const SCAN_YIELD_EVERY = 200;
+const yieldToEventLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
 /**
  * Сверка индекса со списком чатов. Грязные — по отпечатку (название + время
  * активности + mtime переписки); удалённые из базы чаты убираются из индекса.
@@ -365,7 +327,6 @@ export async function reconcileChatSearchIndex(
   const startedAt = Date.now();
   const isArchived = options.projectIsArchived ?? defaultArchivedCheck;
   const extractorFor = options.extractorFor;
-  const devinDbCache = new Map<string, ChatSearchDb | null>();
 
   const stateRows = db.prepare('SELECT provider, session_id, fingerprint FROM index_state').all() as Array<{
     provider: string;
@@ -380,7 +341,12 @@ export async function reconcileChatSearchIndex(
   }
 
   let deleted = 0;
+  let scannedSinceYield = 0;
   for (const row of stateRows) {
+    if (++scannedSinceYield >= SCAN_YIELD_EVERY) {
+      scannedSinceYield = 0;
+      await yieldToEventLoop();
+    }
     const key = `${row.provider}:${row.session_id}`;
     if (!desired.has(key)) {
       deleteSessionDoc(db, row.provider, row.session_id);
@@ -390,6 +356,10 @@ export async function reconcileChatSearchIndex(
 
   const dirty: SessionRowLike[] = [];
   for (const session of sessions) {
+    if (++scannedSinceYield >= SCAN_YIELD_EVERY) {
+      scannedSinceYield = 0;
+      await yieldToEventLoop();
+    }
     const key = `${session.provider}:${session.session_id}`;
     if (isArchived((session.project_path ?? '').trim())) {
       if (stateByKey.has(key)) {
@@ -407,25 +377,16 @@ export async function reconcileChatSearchIndex(
   dirty.sort((left, right) => sessionTime(right) - sessionTime(left));
 
   let indexed = 0;
-  try {
-    for (const session of dirty.slice(0, maxSessions)) {
-      if (Date.now() - startedAt > budgetMs) {
-        break;
-      }
-      const body = extractorFor
-        ? await buildSessionBody(session, extractorFor, options.devinConnectionsDb ?? null, devinDbCache)
-        : '';
-      upsertSessionDoc(db, session, body);
-      indexed += 1;
+  for (const session of dirty.slice(0, maxSessions)) {
+    if (Date.now() - startedAt > budgetMs) {
+      break;
     }
-  } finally {
-    for (const dbHandle of devinDbCache.values()) {
-      try {
-        dbHandle?.close();
-      } catch {
-        // ignore
-      }
-    }
+    const body = extractorFor
+      ? await buildSessionBody(session, extractorFor, options.devinConnectionsDb ?? null)
+      : '';
+    upsertSessionDoc(db, session, body);
+    indexed += 1;
+    await yieldToEventLoop();
   }
 
   return { scanned: sessions.length, indexed, deleted, remaining: dirty.length - indexed };
