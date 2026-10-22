@@ -572,6 +572,9 @@ export default function SidebarSessionItem({
               <div className="mt-0.5 flex items-center">
                 {sessionView.messageCount > 0 && <Badge variant="secondary" className="px-1 py-0 text-xs">{sessionView.messageCount}</Badge>}
               </div>
+              {searchSnippet ? (
+                <div className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">{searchSnippet}</div>
+              ) : null}
             </div>
           </div>
         </a>

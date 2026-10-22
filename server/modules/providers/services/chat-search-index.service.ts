@@ -623,13 +623,28 @@ export function searchChatDocs(input: ChatSearchInput): RankedSessionHit[] {
          ORDER BY bm ASC LIMIT ?`,
       )
       .all(matchQuery, Math.max(input.limit * 4, 200)) as Array<ContentRow & { rowid: number }>;
-    const snipStmt = db.prepare(
-      `SELECT snippet(chat_docs, 1, '${SNIPPET_OPEN}', '${SNIPPET_CLOSE}', '…', 18) AS snip
-       FROM chat_docs WHERE rowid = ?`,
-    );
+    // snippet() работает только в запросе с MATCH: без него FTS5 отдаёт
+    // начало колонки без маркеров, а `MATCH ? AND rowid = ?` возвращает
+    // сниппет первой подошедшей строки. Поэтому сниппеты считаем одним
+    // запросом по списку rowid — и только для верхних строк, которые реально
+    // уйдут на экран (выдача режется limit, берём с запасом под дедуп).
+    const SNIPPET_BUDGET = 160;
+    const snippetRowids = topRows.slice(0, SNIPPET_BUDGET).map((row) => row.rowid);
+    const snipByRowid = new Map<number, string | null>();
+    if (snippetRowids.length > 0) {
+      const snipRows = db
+        .prepare(
+          `SELECT rowid, snippet(chat_docs, 1, '${SNIPPET_OPEN}', '${SNIPPET_CLOSE}', '…', 18) AS snip
+           FROM chat_docs WHERE chat_docs MATCH ? AND rowid IN (${snippetRowids.join(',')})`,
+        )
+        .all(matchQuery) as Array<{ rowid: number; snip: string | null }>;
+      for (const snipRow of snipRows) {
+        snipByRowid.set(snipRow.rowid, snipRow.snip);
+      }
+    }
     contentRows = topRows.map((row) => ({
       ...row,
-      snip: (snipStmt.get(row.rowid) as { snip: string | null } | undefined)?.snip ?? null,
+      snip: snipByRowid.get(row.rowid) ?? null,
     }));
   } catch {
     contentRows = [];
