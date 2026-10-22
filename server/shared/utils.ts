@@ -1329,6 +1329,51 @@ function hasResultStructure(text: string): boolean {
 }
 
 /**
+ * Хвост, в котором модель передаёт работу человеку или внешнему процессу —
+ * легальное завершение, снимает сигнал недоделанности.
+ */
+const DEVIN_DELEGATION_TAIL =
+  /(нужно от вас|нужен ваш|нужна ваша|ваше решение|пришлите|подтвердите|вашего (?:решения|подтверждения|ответа|действия)|со стороны вас|на вашей стороне|жд[уе] (?:ваш|тво)|только вам|решать вам|как решите|сторож|крон|по расписанию|уведомлени)/iu;
+
+/**
+ * Объявленный в хвосте следующий СВОЙ шаг — только формы 1-го лица и инфинитив,
+ * чтобы «сторож проверяет» (чужой процесс, 3-е лицо) не давало ложный сигнал.
+ */
+const DEVIN_SELF_WORK_STEP = new RegExp(
+  '(?:дальше|следующ(?:ий|ая|ее)\\s+(?:шаг|пункт|действие)|осталось|остался|теперь|далее|затем)[\\s:—–-]{0,40}' +
+    '(?:дожму|дожмём|дожать|закоммичу|закоммитим|закоммитить|перепрогоню|перепрогоним|перепрогнать|' +
+    'перепроверю|перепроверим|перепроверить|доделаю|доделаем|доделать|доработаю|доработаем|доработать|' +
+    'разберу|разберём|разобрать|внедрю|внедрим|внедрить|проверю|проверим|проверить|прогоню|прогоним|прогнать|' +
+    'запущу|запустим|запустить|обновлю|обновим|обновить|поправлю|поправим|поправить|исправлю|исправим|исправить|' +
+    'напишу|напишем|написать|соберу|соберём|собрать|выкачу|выкатим|выкатить|пересоберу|пересоберём|пересобрать|' +
+    'зафиксирую|зафиксируем|зафиксировать|продолжу|продолжим|продолжить|сделаю|сделаем|сделать)',
+  'iu',
+);
+
+/**
+ * Ответ, законченный вопросом-разрешением («продолжаю?», «делать дальше?»,
+ * «внедряю?») — ранняя остановка. Намеренно только просьбы-разрешения:
+ * информационный вопрос человеку («какой вариант выбираете?») сюда не попадает.
+ */
+// NB: \w в JS не включает кириллицу — продолжения слов пишем [а-яё]*.
+const DEVIN_PERMISSION_TAIL =
+  /(?:продолж[а-яё]*|делаю|делать|двига[а-яё]*|ид[её]м дальше|идти дальше|внедря[а-яё]*|выкатыва[а-яё]*|запуска[а-яё]*|начина[а-яё]*|приступ[а-яё]*)[?.!\s]*\?\s*$/iu;
+
+/**
+ * True if the tail owes the agent's own next steps or asks for permission —
+ * a premature stop even when the text carries result structure (a status
+ * recap ending «Дальше: дожму и закоммичу…» or «Продолжаю?» is still a stall).
+ * Delegation to the human or an external async process is a legal ending.
+ * 22.10.26, twilight-ursinia: реплика «Дальше: дожму и закоммичу правку…»
+ * прошла эвристику как «полная» из-за списка — чат простоял ~19 часов.
+ */
+export function hasPendingWorkTail(text: string): boolean {
+  const tail = text.slice(-600);
+  if (DEVIN_DELEGATION_TAIL.test(tail)) return false;
+  return DEVIN_SELF_WORK_STEP.test(tail) || DEVIN_PERMISSION_TAIL.test(tail);
+}
+
+/**
  * True if the text looks like the assistant stopped at the understanding
  * preamble without producing any result structure.
  */
@@ -1351,6 +1396,8 @@ function looksLikeUnderstandingOnly(text: string): boolean {
  * - the text is missing or empty;
  * - there were tool calls but no text after the last tool call;
  * - the tail is an explicit promise to continue working;
+ * - the tail declares the agent's own next steps or asks for permission
+ *   (hasPendingWorkTail), even inside a structured recap;
  * - the response is only the "Как я понял задачу" preamble with no result.
  *
  * A turn is considered complete when it contains a recognized result heading,
@@ -1370,6 +1417,9 @@ export function isIncompleteDevinResponse(
 
   const content = hasToolCalls ? afterTool : fullText;
 
+  // Объявленная своя работа и вопрос-разрешение сильнее «результатной»
+  // структуры: статус-рекап со списком всё равно может обрывать задачу.
+  if (hasPendingWorkTail(content)) return true;
   if (hasResultStructure(content)) return false;
   if (hasContinuationTail(content)) return true;
   if (looksLikeUnderstandingOnly(content)) return true;

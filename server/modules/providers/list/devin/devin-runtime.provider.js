@@ -1253,6 +1253,17 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
           run.turnHasToolCalls,
           run.turnTextAfterLastTool,
         );
+        // Модель повторила тот же вопрос человеку после автопродолжения — это её
+        // осознанный ответ, а не обрыв: завершаем штатно, без второго пинка и без
+        // ошибки. Повторное обещание работы (без «?») — не осознанный ответ:
+        // продолжает крутиться до лимита и видимо фейлится, как раньше.
+        const incompleteTail = incomplete
+          ? String(run.turnTextAfterLastTool || run.turnAssistantText || '').trim().slice(-200)
+          : '';
+        if (incomplete && incompleteTail && incompleteTail === run.lastIncompleteTail && /\?\s*$/.test(incompleteTail)) {
+          break;
+        }
+        run.lastIncompleteTail = incompleteTail;
         // Восстановимые обрывы: статусный финал и усечение по лимиту. Отказ,
         // отмену и неизвестные причины продолжать нельзя — сразу видимый сбой.
         const recoverable = incomplete || stopReason === 'max_tokens';
