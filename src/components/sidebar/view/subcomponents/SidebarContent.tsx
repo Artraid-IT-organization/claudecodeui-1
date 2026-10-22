@@ -269,6 +269,7 @@ export default function SidebarContent({
         flagged: existing?.flagged ?? false,
         done: existing?.done ?? false,
         serverScope,
+        searchSnippet: null,
       });
     }
     for (const project of conversationResults.results) {
@@ -285,6 +286,7 @@ export default function SidebarContent({
           flagged: existing?.flagged ?? false,
           done: existing?.done ?? false,
           serverScope,
+          searchSnippet: session.matches[0]?.snippet ?? null,
         });
       }
     }

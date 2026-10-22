@@ -171,6 +171,7 @@ export default function SidebarRecentConversations({
   // не всегда» точны). startedAt — серверное время начала текущей обработки
   // из useSessionProtection (см. AppContent.refreshRunningSessions) — есть
   // только у активных сессий, поэтому это надёжный источник для этой группы.
+  const isSearching = searchQuery.trim().length > 0;
   const running = conversations
     .filter((item) => activeSessions.has(item.sessionId))
     .sort((a, b) => {
@@ -179,12 +180,17 @@ export default function SidebarRecentConversations({
       return bStarted - aStarted;
     });
   const idle = conversations.filter((item) => !activeSessions.has(item.sessionId));
-  const groups = [
-    ...(running.length > 0
-      ? [{ key: 'running' as const, title: 'Сейчас работает', items: running }]
-      : []),
-    ...groupByRecency(idle, currentTime, (item) => item.lastActivity),
-  ];
+  // В поиске порядок отдаёт серверная выдача (название → содержимое → похожие):
+  // раскладка по дням перетасовала бы её по свежести групп. Дат-группы — только
+  // обычной ленте без запроса.
+  const groups = isSearching
+    ? [{ key: 'search' as const, title: t('recent.group.search', 'Результаты'), items: conversations }]
+    : [
+        ...(running.length > 0
+          ? [{ key: 'running' as const, title: 'Сейчас работает', items: running }]
+          : []),
+        ...groupByRecency(idle, currentTime, (item) => item.lastActivity),
+      ];
 
   const renderConversation = (conversation: RecentConversationListItem) => {
     const session = sessionOf(conversation);
@@ -207,6 +213,7 @@ export default function SidebarRecentConversations({
         onProjectSelect={onProjectSelect}
         onSessionSelect={onSessionSelect}
         onDeleteSession={onDeleteSession}
+        searchSnippet={conversation.searchSnippet}
         t={t}
       />
     );

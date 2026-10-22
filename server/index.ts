@@ -26,7 +26,7 @@ import {
     startSessionActivitySync,
     stopSessionActivitySync,
 } from '@/modules/providers/index.js';
-import { userDb, initializeDatabase, sessionsDb, chatRunsDb  } from '@/modules/database/index.js';
+import { userDb, initializeDatabase, sessionsDb, chatRunsDb, devinConnectionsDb  } from '@/modules/database/index.js';
 import { chatRunRegistry, createWebSocketServer, dispatchChatQueues, reconcilePersistedRuns, startRunWatchdog } from '@/modules/websocket/index.js';
 
 import { getConnectableHost } from '../shared/networkHosts.js';
@@ -698,6 +698,32 @@ async function startServer() {
                     .then(({ files, ms }) => console.log(`[search-index] выжимки готовы: ${files} файлов за ${ms} мс`))
                     .catch((error) => console.warn('[search-index] прогрев не удался:', error?.message ?? error));
             }, 30_000).unref();
+
+            // FTS-индекс чатов: фоновая сверка закрывает хвосты, которые не
+            // вошли в бюджет reconcile на поисковом запросе. Первая — сразу за
+            // прогревом выжимок (индекс читает их же), дальше раз в минуту.
+            const reconcileChatIndex = async (): Promise<void> => {
+                try {
+                    const { reconcileChatSearchIndex } = await import('@/modules/providers/services/chat-search-index.service.js');
+                    const { extractorFor } = await import('@/modules/providers/services/session-conversations-search.service.js');
+                    const result = await reconcileChatSearchIndex(sessionsDb.getAllSessions(), {
+                        maxSessions: 400,
+                        budgetMs: 10_000,
+                        extractorFor,
+                        devinConnectionsDb,
+                    });
+                    if (result.indexed > 0 || result.deleted > 0 || result.remaining > 0) {
+                        console.log(`[chat-search] индекс: +${result.indexed} −${result.deleted}, осталось ${result.remaining}`);
+                    }
+                } catch (error) {
+                    console.warn('[chat-search] фоновая сверка не удалась:', error instanceof Error ? error.message : error);
+                }
+            };
+            setTimeout(() => {
+                void reconcileChatIndex().finally(() => {
+                    setInterval(() => void reconcileChatIndex(), 60_000).unref();
+                });
+            }, 45_000).unref();
 
             // Start server-side plugin processes for enabled plugins
             startEnabledPluginServers().catch(err => {

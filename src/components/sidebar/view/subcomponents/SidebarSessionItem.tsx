@@ -34,6 +34,8 @@ type SidebarSessionItemProps = {
     sessionTitle: string,
     provider: LLMProvider,
   ) => void;
+  /** Фрагмент переписки с совпадением — только в выдаче поиска. */
+  searchSnippet?: string | null;
   t: TFunction;
 };
 
@@ -70,6 +72,7 @@ export default function SidebarSessionItem({
   onProjectSelect,
   onSessionSelect,
   onDeleteSession,
+  searchSnippet = null,
   t,
 }: SidebarSessionItemProps) {
   const paletteOps = usePaletteOps();
@@ -314,6 +317,9 @@ export default function SidebarSessionItem({
                   </Badge>
                 )}
               </div>
+              {searchSnippet ? (
+                <div className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">{searchSnippet}</div>
+              ) : null}
             </div>
 
             <button

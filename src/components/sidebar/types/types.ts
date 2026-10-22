@@ -36,6 +36,8 @@ export type RecentConversationListItem = Pick<
 > & {
   /** Блок верхней панели, в котором виден чат. */
   serverScope?: ServerScope;
+  /** Фрагмент переписки с совпадением — только при поиске по содержимому. */
+  searchSnippet?: string | null;
 };
 
 export type DeleteProjectConfirmation = {
