@@ -321,9 +321,12 @@ export const devinConnectionsService = {
     if (preferredId != null && !excludedIds.includes(preferredId) && devinConnectionsDb.isEligible(preferredId)) {
       return devinConnectionsDb.getById(preferredId)!;
     }
-    const row = excludedIds.length === 0
+    // Годные без паузы — первыми; если все на паузе, берём ту, что вернётся раньше:
+    // SWE-модели бесплатны и квотой не ограничены, блокировать их паузой нельзя (Егор 22.10.26).
+    const row = (excludedIds.length === 0
       ? devinConnectionsDb.pickAvailable()
-      : devinConnectionsDb.pickAvailableExcluding(excludedIds);
+      : devinConnectionsDb.pickAvailableExcluding(excludedIds))
+      ?? devinConnectionsDb.pickIgnoringCooldownExcluding(excludedIds);
     if (!row) {
       throw new AppError(
         'No enabled Devin connection is currently available (all are disabled, in cooldown, or unauthenticated).',
@@ -591,6 +594,13 @@ export const devinConnectionsService = {
     const clipped = (errorMessage ?? '').slice(0, 500);
     if (cls === 'session_locked' || cls === 'model') {
       return; // подписка здорова — занят чат или модель не приняла запрос, а не она
+    }
+    // 22.10.26: «weekly/daily usage quota has been exhausted» — квота только ПЛАТНЫХ моделей,
+    // бесплатные SWE-2 отвечают. Пауза на всю подписку блокировала и SWE-чаты (69 отказов за
+    // час, пока платные чаты сами возвращали ход в очередь и снова ставили паузу). Платный ход
+    // получает свою ошибку в ленте, подписка остаётся годной.
+    if (cls === 'rate_limit' && /usage quota/i.test(errorMessage ?? '')) {
+      return;
     }
     if (cls === 'auth') {
       devinConnectionsDb.markHealth(id, 'auth_failed', { lastError: clipped });
