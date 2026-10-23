@@ -13,8 +13,8 @@
  * ccui-agents.slice пользовательского менеджера systemd (так же JupyterHub
  * запускает серверы пользователей — jupyterhub/systemdspawner). У среза свой
  * потолок и меньший вес процессора (~/.config/systemd/user/ccui-agents.slice,
- * копия — deploy/ccui-agents.slice), у каждого агента — свой потолок
- * MemoryHigh. Переполнился чат — тормозит он сам, сервер сайта остаётся в
+ * копия — deploy/ccui-agents.slice), у каждого агента — свой жёсткий потолок
+ * MemoryMax (см. ниже). Переполнился чат — ядро снимает его самый большой процесс, сервер сайта остаётся в
  * своей группе один. Заодно агенты не входят в группу службы, поэтому
  * переживают её перезапуск и без KillMode=process.
  *
@@ -39,7 +39,16 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 
 const SLICE = process.env.CLOUDCLI_AGENT_SLICE || 'ccui-agents.slice';
-const AGENT_MEMORY_HIGH = process.env.CLOUDCLI_AGENT_MEMORY_HIGH || '2G';
+// Потолок комнаты — жёсткий (MemoryMax), не мягкий (24.10.26). Только MemoryHigh
+// ядро не убивает никогда — тормозит (docs.kernel.org cgroup-v2: «going over
+// the high limit never invokes the OOM killer»). Разовые команды мёртвых чатов
+// (python по sessions.db 2,3 ГБ, 24 ч) висели над High в состоянии D, гоняли
+// подкачку, забили общий потолок ccui-agents.slice — встали ВСЕ чаты.
+// С MemoryMax ядро снимает самый большой процесс комнаты (разовую команду),
+// OOMPolicy=continue — комната и сам чат живут дальше (по умолчанию stop гасит
+// всю комнату). Проба 24.10: виновник снят за 1 с (rc 137), сосед жив.
+const AGENT_MEMORY_MAX = process.env.CLOUDCLI_AGENT_MEMORY_MAX || '2560M';
+const AGENT_SWAP_MAX = process.env.CLOUDCLI_AGENT_SWAP_MAX || '512M';
 const PROBE_OK_MS = 10 * 60 * 1000;
 const PROBE_FAIL_MS = 60 * 1000;
 const PROBE_TIMEOUT_MS = 15 * 1000;
@@ -174,7 +183,9 @@ export function wrapInAgentRoom(
             '--user', '--scope', '--quiet', '--collect',
             `--slice=${SLICE}`,
             `--unit=${unit}`,
-            '-p', `MemoryHigh=${AGENT_MEMORY_HIGH}`,
+            '-p', `MemoryMax=${AGENT_MEMORY_MAX}`,
+            '-p', `MemorySwapMax=${AGENT_SWAP_MAX}`,
+            '-p', 'OOMPolicy=continue',
             '--', command, ...args,
         ],
         env: managerEnv(env || process.env),
