@@ -20,11 +20,14 @@ import type { MutableRefObject, RefObject } from 'react';
  * Встроенное удержание Chrome выключено (`overflow-anchor: none` в index.css),
  * иначе сдвиг возвращался бы дважды.
  *
- * Палец на стекле или лента едет по инерции — запись `scrollTop` на iPhone
- * обрывает бросок. Тогда сдвиг держится отрицательным отступом ленты
- * (`margin-top`), а в прокрутку переносится, когда движение остановилось:
- * отступ снимается и прокрутка прибавляется в одном кадре, на экране ничего не
- * шевелится. Приём из TanStack Virtual (PR #1189, issue #1287).
+ * Сдвиг ВСЕГДА держится отрицательным отступом ленты (`margin-top`), а в
+ * прокрутку переносится, когда высота перестала меняться: высота порции
+ * устанавливается за несколько кадров (строки получают настоящую высоту
+ * партиями), и каждая немедленная запись `scrollTop` показывалась отдельным
+ * кадром — лента видимо ехала ступенями на суммарные 1500+ px (замер на бою
+ * 23.10.26: 4 записи за 80 мс). Отступ снимается и прокрутка прибавляется в
+ * одном кадре — на экране ни разу не шевелится. На iPhone это ещё и не
+ * обрывает бросок пальца. Приём из TanStack Virtual (PR #1189, issue #1287).
  */
 
 const ROW_SELECTOR = '.chat-row';
@@ -283,7 +286,7 @@ export function useScrollAnchor({
     ) {
       const delta = live.row.offsetTop + deferredRef.current - live.top;
       if (Math.abs(delta) >= 1) {
-        if (wrapper && inMotion(container)) {
+        if (wrapper) {
           deferredRef.current += delta;
           wrapper.style.marginTop = `${-deferredRef.current}px`;
           scheduleFlush();
