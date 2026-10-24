@@ -722,6 +722,84 @@
     background-repeat: repeat-y;
   }
 
+  /*
+   * Переливание — признак «идёт загрузка» (Егор 24.10.26: «как в других
+   * приложениях и нейронках»). Блик ползёт слева направо по серым полосам.
+   * Только на двух заглушках загрузки: экран открытия чата и место под ранние
+   * сообщения, пока грузится порция. На пропущенных строках не делаем: их в
+   * больших чатах сотни, анимация на каждой грузила бы телефон.
+   */
+  @keyframes chat-shimmer-sweep {
+    from { background-position: 100% 0; }
+    to { background-position: 0 0; }
+  }
+
+  .chat-shimmer {
+    display: block;
+    height: 0.75rem;
+    border-radius: 0.375rem;
+    background-image: linear-gradient(100deg,
+      rgb(128 128 128 / 0.12) 30%, rgb(128 128 128 / 0.26) 50%, rgb(128 128 128 / 0.12) 70%);
+    background-size: 250% 100%;
+    background-position: 100% 0;
+    animation: chat-shimmer-sweep 1.6s linear infinite;
+  }
+
+  /* Экран открытия чата: блоки в форме сообщений у низа, как встанет лента. */
+  .chat-loading-skeleton {
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    gap: 1.5rem;
+    min-height: calc(100vh - 13rem);
+    min-height: calc(100svh - 13rem);
+    padding: 1rem 0 0.5rem;
+  }
+
+  .chat-loading-skeleton__item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+
+  .chat-loading-skeleton__item--user {
+    align-self: flex-end;
+    width: min(78%, 28rem);
+    padding: 0.9rem 1rem;
+    border-radius: 1rem;
+    background-color: rgb(128 128 128 / 0.08);
+  }
+
+  /* Место под ранние сообщения, пока грузится порция: те же полосы, но блик
+     идёт только по ним (маска), а не по просветам между ними. */
+  .chat-skeleton.chat-skeleton--loading {
+    background-image: linear-gradient(100deg,
+      rgb(128 128 128 / 0.12) 30%, rgb(128 128 128 / 0.26) 50%, rgb(128 128 128 / 0.12) 70%);
+    background-size: 250% 100%;
+    background-position: 100% 0;
+    background-repeat: no-repeat;
+    -webkit-mask-image:
+      linear-gradient(to bottom, #000 0 0.75rem, transparent 0.75rem),
+      linear-gradient(to bottom, #000 0 0.75rem, transparent 0.75rem);
+    mask-image:
+      linear-gradient(to bottom, #000 0 0.75rem, transparent 0.75rem),
+      linear-gradient(to bottom, #000 0 0.75rem, transparent 0.75rem);
+    -webkit-mask-size: min(72%, 36rem) 2.5rem, min(48%, 24rem) 2.5rem;
+    mask-size: min(72%, 36rem) 2.5rem, min(48%, 24rem) 2.5rem;
+    -webkit-mask-position: 1rem 0.5rem, 1rem 1.75rem;
+    mask-position: 1rem 0.5rem, 1rem 1.75rem;
+    -webkit-mask-repeat: repeat-y;
+    mask-repeat: repeat-y;
+    animation: chat-shimmer-sweep 1.6s linear infinite;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .chat-shimmer,
+    .chat-skeleton.chat-skeleton--loading {
+      animation: none;
+    }
+  }
+
   /* Живой хвост и прогрев строки не пропущены, но пока строка в режиме
      `visible`, событие contentvisibilityautostatechange не приходит и метка
      пропуска, поставленная раньше, остаётся: полосы-заглушки рисовались под

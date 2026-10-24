@@ -89,6 +89,16 @@ interface ChatMessagesPaneProps {
  */
 const LIVE_TAIL_SIZE = 3;
 
+// Форма экрана загрузки чата сверху вниз: человек справа, ответ слева; числа —
+// ширина строк в процентах. Настоящих сообщений ещё нет — рисуем типичный ритм.
+const LOADING_SKELETON_BLOCKS: Array<{ side: 'user' | 'assistant'; lines: number[] }> = [
+  { side: 'assistant', lines: [92, 78, 55] },
+  { side: 'user', lines: [88, 46] },
+  { side: 'assistant', lines: [95, 90, 84, 40] },
+  { side: 'user', lines: [64] },
+  { side: 'assistant', lines: [90, 72] },
+];
+
 function ChatMessagesPane({
   scrollContainerRef,
   onWheel,
@@ -247,7 +257,25 @@ function ChatMessagesPane({
             {isLoadingSessionMessages ? t('session.loading.retrying') : t('session.loading.retry')}
           </button>
         </div>
-      ) : (isLoadingSessionMessages || isProcessing) && chatMessages.length === 0 ? (
+      ) : isLoadingSessionMessages && chatMessages.length === 0 ? (
+        // Открытие чата: на месте будущей переписки — переливающиеся блоки в
+        // форме сообщений (Егор 24.10.26: «понимаешь, что идёт загрузка»).
+        // Стоят у низа, как встанет настоящая лента, — ничего не «выстреливает».
+        <div className="chat-loading-skeleton" role="status" aria-live="polite">
+          <span className="sr-only">{t('session.loading.sessionMessages')}</span>
+          {LOADING_SKELETON_BLOCKS.map((block, index) => (
+            <div
+              key={index}
+              aria-hidden="true"
+              className={`chat-loading-skeleton__item chat-loading-skeleton__item--${block.side}`}
+            >
+              {block.lines.map((width, lineIndex) => (
+                <span key={lineIndex} className="chat-shimmer" style={{ width: `${width}%` }} />
+              ))}
+            </div>
+          ))}
+        </div>
+      ) : isProcessing && chatMessages.length === 0 ? (
         <div className="mt-8 text-center text-gray-500 dark:text-gray-400">
           <div className="flex items-center justify-center space-x-2">
             <div className="h-4 w-4 animate-spin rounded-full border-b-2 border-gray-400" />
@@ -292,16 +320,6 @@ function ChatMessagesPane({
             <div ref={topSentinelRef} aria-hidden="true" className="h-px w-full" />
           )}
 
-          {/* Loading indicator for older messages (hide when load-all is active) */}
-          {isLoadingMoreMessages && !isLoadingAllMessages && !allMessagesLoaded && (
-            <div className="py-3 text-center text-gray-500 dark:text-gray-400">
-              <div className="flex items-center justify-center space-x-2">
-                <div className="h-4 w-4 animate-spin rounded-full border-b-2 border-gray-400" />
-                <p className="text-sm">{t('session.loading.olderMessages')}</p>
-              </div>
-            </div>
-          )}
-
           {/* Indicator showing there are more messages to load (hide when all loaded) */}
           {hasMoreMessages && !isLoadingMoreMessages && !allMessagesLoaded && (
             // Строка нажимается: запасной путь, если прокрутить вверх нечем
@@ -326,7 +344,10 @@ function ChatMessagesPane({
               переезжает вниз, когда сверху приходит следующая. Не .chat-row:
               опорой useScrollAnchor она не бывает. */}
           {hasMoreMessages && !allMessagesLoaded && (
-            <div className="chat-skeleton" aria-hidden="true" />
+            <div
+              className={isLoadingMoreMessages || isLoadingAllMessages ? 'chat-skeleton chat-skeleton--loading' : 'chat-skeleton'}
+              aria-hidden="true"
+            />
           )}
 
           {(() => {
