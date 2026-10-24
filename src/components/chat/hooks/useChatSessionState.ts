@@ -150,6 +150,10 @@ export function useChatSessionState({
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(selectedSession?.id || null);
   const [isLoadingSessionMessages, setIsLoadingSessionMessages] = useState(false);
   const [isLoadingMoreMessages, setIsLoadingMoreMessages] = useState(false);
+  // Только для показа (заглушка над историей переливается, пока идёт порция).
+  // Отдельно от isLoadingMoreMessages: тот в проверках и зависимостях ниже,
+  // менять его значение посреди загрузки нельзя — пересоздаст обработчики.
+  const [isOlderPageLoading, setIsOlderPageLoading] = useState(false);
   const [hasMoreMessages, setHasMoreMessages] = useState(false);
   const [totalMessages, setTotalMessages] = useState(0);
   const [isUserScrolledUp, setIsUserScrolledUp] = useState(false);
@@ -653,6 +657,7 @@ export function useChatSessionState({
       if (!hasMoreMessages || !selectedSession || !selectedProject) return false;
 
       isLoadingMoreRef.current = true;
+      setIsOlderPageLoading(true);
       const heightBefore = container.scrollHeight + getDeferredShift();
 
       try {
@@ -711,6 +716,7 @@ export function useChatSessionState({
         return true;
       } finally {
         isLoadingMoreRef.current = false;
+        setIsOlderPageLoading(false);
       }
     },
     [getDeferredShift, hasMoreMessages, isActive, isLoadingMoreMessages, isTopSentinelNear, selectedProject, selectedSession, sessionStore],
@@ -1499,7 +1505,7 @@ export function useChatSessionState({
     currentSessionId,
     setCurrentSessionId,
     isLoadingSessionMessages,
-    isLoadingMoreMessages,
+    isLoadingMoreMessages: isLoadingMoreMessages || isOlderPageLoading,
     hasMoreMessages,
     totalMessages,
     isUserScrolledUp,
