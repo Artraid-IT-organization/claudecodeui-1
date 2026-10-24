@@ -267,7 +267,11 @@ function ChatMessagesPane({
             <div
               key={index}
               aria-hidden="true"
-              className={`chat-loading-skeleton__item chat-loading-skeleton__item--${block.side}`}
+              // Имена целиком, не шаблоном: Tailwind вырезает из @layer правила
+              // с классами, которых не нашёл в исходниках буквально.
+              className={block.side === 'user'
+                ? 'chat-loading-skeleton__item chat-loading-skeleton__item--user'
+                : 'chat-loading-skeleton__item'}
             >
               {block.lines.map((width, lineIndex) => (
                 <span key={lineIndex} className="chat-shimmer" style={{ width: `${width}%` }} />
