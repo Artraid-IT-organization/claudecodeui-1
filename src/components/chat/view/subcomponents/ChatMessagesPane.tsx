@@ -210,7 +210,51 @@ function ChatMessagesPane({
       target.toggleAttribute('data-cv-skipped', Boolean((event as Event & { skipped?: boolean }).skipped));
     };
     container.addEventListener('contentvisibilityautostatechange', onState, true);
-    return () => container.removeEventListener('contentvisibilityautostatechange', onState, true);
+
+    // Сторож «либо заглушка, либо текст» (Егор 24.10.26). Метка ставится по
+    // событию браузера, а событие может запоздать или не прийти (в Chromium
+    // задержки до 250 мс, на iPhone проверить нечем) — тогда полосы остаются
+    // под настоящим текстом. Строка в окне просмотра пропущенной быть не
+    // может, поэтому метка на ней дольше HOLD_MS — устаревшая, и мы её снимаем.
+    // Не трогаем: строки вне экрана (их метка законна) и строки в режиме
+    // `visible` (живой хвост, прогрев) — у них метку держит прежнее состояние,
+    // а полосы скрыты правилом CSS; снятая там метка потом оставила бы
+    // перепропущенную строку пустой (браузер новое событие не шлёт).
+    const HOLD_MS = 250;
+    const visibleSince = new Map<HTMLElement, number>();
+    const sweepStaleMarks = () => {
+      if (document.hidden) return;
+      const marked = container.querySelectorAll<HTMLElement>('.chat-message[data-cv-skipped]');
+      if (marked.length === 0) {
+        if (visibleSince.size > 0) visibleSince.clear();
+        return;
+      }
+      const pane = container.getBoundingClientRect();
+      const now = performance.now();
+      const stillVisible = new Set<HTMLElement>();
+      marked.forEach((message) => {
+        const rect = message.getBoundingClientRect();
+        if (rect.bottom <= pane.top || rect.top >= pane.bottom) return;
+        if (getComputedStyle(message).contentVisibility !== 'auto') return;
+        stillVisible.add(message);
+        const since = visibleSince.get(message);
+        if (since === undefined) {
+          visibleSince.set(message, now);
+        } else if (now - since >= HOLD_MS) {
+          message.removeAttribute('data-cv-skipped');
+          visibleSince.delete(message);
+          stillVisible.delete(message);
+        }
+      });
+      visibleSince.forEach((_, message) => {
+        if (!stillVisible.has(message)) visibleSince.delete(message);
+      });
+    };
+    const sweepTimer = window.setInterval(sweepStaleMarks, 120);
+    return () => {
+      container.removeEventListener('contentvisibilityautostatechange', onState, true);
+      window.clearInterval(sweepTimer);
+    };
   }, [scrollContainerRef]);
 
   return (
