@@ -318,6 +318,14 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
     // falls back to the process default and would file another account's
     // transcript - and its history.jsonl lookup - under the wrong account.
     const accountDir = accountDirFromTranscriptPath(filePath) ?? getClaudeConfigDir();
+
+    // Каталоги `*--cc2` — стенограммы чатов, рождённых на общем инстансе
+    // (cc2): файловый наблюдатель привносит их за секунды в обход полного
+    // скана, поэтому тот же пропуск стоит и здесь (Егор 25.10.26).
+    if (isCc2BornTranscriptPath(filePath, accountDir)) {
+      return null;
+    }
+
     const nameMap = await buildLookupMap(path.join(accountDir, 'history.jsonl'), 'sessionId', 'display');
     const parsed = await this.processSessionFile(filePath, nameMap);
     if (!parsed) {
