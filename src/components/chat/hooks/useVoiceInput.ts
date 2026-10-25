@@ -132,6 +132,8 @@ export function useVoiceInput(
   // Тап «стоп», пока getUserMedia ещё в полёте: рекордера нет — запоминаем и
   // гасим запись сразу после его создания.
   const stopRequestedRef = useRef(false);
+  // Сколько миллисекунд запись живёт после отпускания кнопки — хвост фразы.
+  const TAIL_MS = 450;
   // Счётчик авто-перезапусков захвата (мертвый трек iOS): сбрасывается на
   // каждое действие человека — тап старт/стоп.
   const micRestartRef = useRef(0);
@@ -492,7 +494,12 @@ export function useVoiceInput(
     const rec = recorderRef.current;
     if (rec && rec.state !== 'inactive') {
       sendRef.current = opts?.send ?? false;
-      rec.stop();
+      // Хвостовой буфер: запись держится ещё TAIL_MS после отпускания кнопки —
+      // без этого конец фразы обрезается вместе с окончаниями слов
+      // (замер архива 25.10: ~половина записей рвётся на живой речи).
+      window.setTimeout(() => {
+        if (rec.state !== 'inactive') rec.stop();
+      }, TAIL_MS);
     } else if (startingRef.current) {
       // Рекордера ещё нет (getUserMedia в полёте) — тап не должен теряться.
       sendRef.current = opts?.send ?? false;
