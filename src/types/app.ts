@@ -57,6 +57,8 @@ export interface ProjectSession {
   lastActivity?: string;
   messageCount?: number;
   provider?: LLMProvider;
+  /** Путь папки чата — нужен гарду автопереключения помощника у закреплённой вкладки. */
+  projectPath?: string | null;
   // Topic group this session was placed in (manual or "Organize by topic"
   // auto-grouping). Absent/null means ungrouped.
   groupId?: string | null;

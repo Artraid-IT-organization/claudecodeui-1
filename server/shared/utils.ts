@@ -1844,3 +1844,28 @@ export function pinnedProjectPathSql(tableAlias = 'sessions'): string {
   const paths = [...PINNED_PROJECT_PROVIDERS.keys()].map((p) => `'${p}'`).join(', ');
   return `${tableAlias}.project_path IN (${paths})`;
 }
+
+/**
+ * Метка каталога стенограмм чатов, рождённых на общем инстансе (cc2)
+ * (Егор 25.10.26): `projects/<slug>--cc2`. Стенограмма пишется в общий
+ * ~/.claude, и основной Claude (cc1) импортировал бы чат себе в список —
+ * «переброс в другой аккаунт». Синхронизатор пропускает каталоги с этой
+ * меткой, поэтому такие чаты в cc1 не появляются вообще: ни в списке,
+ * ни в базе, ни в архиве.
+ */
+export const CC2_BORN_PROJECT_DIR_SUFFIX = '--cc2';
+
+/** Имя каталога `projects/`, которое CLI строит из пути проекта: не-буквы и не-цифры → '-'. */
+export function defaultProjectDirName(projectPath: string): string {
+  return projectPath.replace(/[^a-zA-Z0-9]/g, '-');
+}
+
+/** Помеченное имя каталога `projects/` для чата, рождённого на общем инстансе. */
+export function cc2BornProjectDirName(projectPath: string): string {
+  return `${defaultProjectDirName(projectPath)}${CC2_BORN_PROJECT_DIR_SUFFIX}`;
+}
+
+/** Каталог `projects/` помечен как принадлежащий чату общего инстанса. */
+export function isCc2BornProjectDir(dirName: string): boolean {
+  return dirName.endsWith(CC2_BORN_PROJECT_DIR_SUFFIX);
+}

@@ -760,9 +760,21 @@ export function useSidebarController({
   // второго сервера всплывали бы среди архива обычных «Проектов» — ровно то
   // перемешивание, ради которого блоки и разделяли.
   const scopedArchivedSessions = useMemo(
-    () => archivedSessions.filter((session) => (session.serverScope ?? 'main') === serverScope
-      && providerSpaceOf(session.provider) === providerSpace),
-    [archivedSessions, serverScope, providerSpace],
+    () => archivedSessions.filter((session) => {
+      if ((session.serverScope ?? 'main') !== serverScope) {
+        return false;
+      }
+      // Архивный чат закреплённого проекта («Промпты») остаётся в пространстве
+      // Devin при любом провайдере — то же правило, что у живых списков.
+      const sessionProject = archivedProjects.find(
+        (project) => project.projectId === session.projectId,
+      );
+      if (sessionProject && isPromptsProject(sessionProject)) {
+        return providerSpace === 'devin';
+      }
+      return providerSpaceOf(session.provider) === providerSpace;
+    }),
+    [archivedSessions, archivedProjects, serverScope, providerSpace],
   );
 
   const scopedArchivedProjects = useMemo(

@@ -9,6 +9,7 @@ import { getActiveAccountDir } from '@/shared/session-scope.js';
 import type { RealtimeClientConnection, ServerScope } from '@/shared/types.js';
 import {
   AppError,
+  PINNED_PROJECT_PROVIDERS,
   isCodexAllowedForWebUser,
   isPlatformOwnerWebUser,
   normalizeProjectPath,
@@ -18,6 +19,8 @@ import {
 type SessionSummary = {
   id: string;
   provider: string;
+  /** Путь папки чата — клиенту для гарда закреплённой вкладки («Промпты»). */
+  projectPath: string | null;
   summary: string;
   messageCount: number;
   lastActivity: string;
@@ -36,6 +39,7 @@ type SessionSummary = {
 type SessionRepositoryRow = {
   provider: string;
   session_id: string;
+  project_path?: string | null;
   custom_name?: string | null;
   updated_at?: string | null;
   created_at?: string | null;
@@ -162,6 +166,9 @@ function mapSessionRowToSummary(row: SessionRepositoryRow): SessionSummary {
   return {
     id: row.session_id,
     provider: row.provider,
+    // Путь папки нужен клиенту: чат закреплённой вкладки («Промпты») не
+    // переключает выбранного внизу помощника при открытии (Егор 25.10.26).
+    projectPath: row.project_path ?? null,
     summary: row.custom_name || '',
     messageCount: 0,
     lastActivity: row.updated_at ?? row.created_at ?? new Date().toISOString(),
@@ -237,10 +244,14 @@ function readProjectSessionScopeTotals(projectPath: string): Record<string, numb
     || isCodexAllowedForWebUser(requestContext.userId);
   const accountVisibility = canUseCodex ? 'shared-codex' : 'hide-codex';
   const rows = sessionsDb.countSessionsByProjectPathGrouped(projectPath, accountVisibility);
+  // Закреплённый проект («Промпты») целиком живёт в пространстве Devin —
+  // счётчики кладём в его корзину при любом провайдере сессии, иначе
+  // «Показать ещё» в списке Devin недосчитывал бы claude-чаты вкладки.
+  const pinnedDevin = PINNED_PROJECT_PROVIDERS.has(projectPath);
 
   const totals: Record<string, number> = {};
   for (const row of rows) {
-    const key = `${providerBucket(row.provider)}:${row.serverScope}`;
+    const key = `${pinnedDevin ? 'devin' : providerBucket(row.provider)}:${row.serverScope}`;
     totals[key] = (totals[key] ?? 0) + row.count;
   }
   return totals;
@@ -248,11 +259,13 @@ function readProjectSessionScopeTotals(projectPath: string): Record<string, numb
 
 /** Тот же формат scopeTotals, но из заранее собранной пачки — без SQL на папку. */
 function scopeTotalsForProject(
+  projectPath: string,
   grouped: Array<{ provider: string; serverScope: ServerScope; count: number }>,
 ): Record<string, number> {
+  const pinnedDevin = PINNED_PROJECT_PROVIDERS.has(projectPath);
   const totals: Record<string, number> = {};
   for (const row of grouped) {
-    const key = `${providerBucket(row.provider)}:${row.serverScope}`;
+    const key = `${pinnedDevin ? 'devin' : providerBucket(row.provider)}:${row.serverScope}`;
     totals[key] = (totals[key] ?? 0) + row.count;
   }
   return totals;
@@ -403,6 +416,7 @@ export async function getProjectsWithSessions(
       hasMore: (sessionCounts.get(normalizeProjectPath(projectPath)) ?? 0) > pagination.offset + sessRows.length,
       total: sessionCounts.get(normalizeProjectPath(projectPath)) ?? 0,
       scopeTotals: scopeTotalsForProject(
+        projectPath,
         sessionScopeTotals.get(normalizeProjectPath(projectPath)) ?? [],
       ),
     };

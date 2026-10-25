@@ -32,7 +32,8 @@ import {
   notifyRunStopped,
   notifyUserIfEnabled
 } from '@/modules/notifications/index.js';
-import { createCompleteMessage, createNormalizedMessage, getClaudeConfigDir, getClaudeJsonPath } from '@/shared/utils.js';
+import { createCompleteMessage, createNormalizedMessage, getClaudeConfigDir, getClaudeJsonPath, OPEN_REGISTRATION, PINNED_PROJECT_PROVIDERS } from '@/shared/utils.js';
+import { resolveBornTranscriptDirName } from '@/modules/providers/list/claude/transcript-presence.js';
 import { getRequestRuntimeContext } from '@/shared/request-context.js';
 import { INHERITED_CLAUDE_AUTH_ENV_KEYS } from '@/shared/claude-login.js';
 import { noteSurvivorProviderSession, spawnSurvivableClaude } from '@/modules/providers/list/claude/survivor-runs.js';
@@ -1051,6 +1052,21 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       console.warn(`[Claude SDK] переписки ${sdkOptions.resume} нет на диске — начинаю разговор под тем же номером`);
       sdkOptions.sessionId = sdkOptions.resume;
       delete sdkOptions.resume;
+    }
+
+    // Чаты закреплённой вкладки («Промпты»), рождённые на общем инстансе
+    // (cc2), пишут стенограмму в помеченный каталог `projects/<slug>--cc2`:
+    // основной Claude (cc1) такие каталоги не импортирует, и чат не
+    // всплывает в его списке/архиве (Егор 25.10.26). При продолжении пишем
+    // туда, где файл уже лежит: старые чаты — обычный каталог, новые —
+    // помеченный. Папка конфигурации общая — вход, токен и лимит те же.
+    const bornConfigDir = sdkOptions.env?.CLAUDE_CONFIG_DIR || getClaudeConfigDir();
+    if (OPEN_REGISTRATION && PINNED_PROJECT_PROVIDERS.has(sdkOptions.cwd || '') && bornConfigDir) {
+      sdkOptions.env.CLAUDE_CODE_PROJECT_DIR_NAME = await resolveBornTranscriptDirName(
+        bornConfigDir,
+        sdkOptions.cwd,
+        sdkOptions.resume,
+      );
     }
 
     const mcpServers = await loadMcpConfig(options.cwd, options.claudeConfigDir);

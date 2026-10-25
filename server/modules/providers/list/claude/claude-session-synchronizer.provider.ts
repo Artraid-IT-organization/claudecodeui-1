@@ -18,6 +18,7 @@ import {
 import type { IProviderSessionSynchronizer } from '@/shared/interfaces.js';
 import type { SessionTitleSource } from '@/shared/types.js';
 import { readLastMessageTimestamp } from '@/modules/providers/services/session-activity-sync.service.js';
+import { isCc2BornTranscriptPath } from '@/modules/providers/list/claude/transcript-presence.js';
 
 type ParsedSession = {
   sessionId: string;
@@ -259,6 +260,13 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
     let processed = 0;
     for (const filePath of files) {
       if (this.isSubagentTranscript(filePath)) {
+        continue;
+      }
+      // Каталоги `*--cc2` — стенограммы чатов, рождённых на общем инстансе
+      // (cc2). Пометку ставит рантайм при создании; этот экземпляр их не
+      // импортирует — чужой чат не появляется в списке ни на секунду
+      // (Егор 25.10.26).
+      if (isCc2BornTranscriptPath(filePath, claudeHome)) {
         continue;
       }
       if (this.isMigratedTranscript(filePath)) {

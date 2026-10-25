@@ -1,6 +1,7 @@
 import { useCallback, useSyncExternalStore } from 'react';
 
 import type { Project } from '../../../types/app';
+import { isPromptsProject } from '../utils/utils';
 
 /*
  * Какой блок верхней панели открыт: «Проекты» (этот сервер) или второй
@@ -138,8 +139,14 @@ export function scopeProjectsToProvider(
 ): Project[] {
   return projects.map((project) => {
     const allSessions = project.sessions ?? [];
+    // Чаты закреплённого проекта («Промпты») живут в пространстве Devin при
+    // любом провайдере — мозг хода claude не выносит их из списка владельца
+    // (зеркало pinnedProjectPathSql в sessions.db, Егор 25.10.26).
+    const pinnedToDevin = isPromptsProject(project);
     const sessions = allSessions.filter(
-      (session) => providerSpaceOf(session.__provider ?? session.provider) === space,
+      (session) => pinnedToDevin
+        ? space === 'devin'
+        : providerSpaceOf(session.__provider ?? session.provider) === space,
     );
 
     // «Есть ли ещё» внутри среза решается по его полному числу из базы
