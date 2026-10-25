@@ -122,6 +122,8 @@ interface UseChatComposerStateArgs {
   selectedSession: ProjectSession | null;
   currentSessionId: string | null;
   provider: LLMProvider;
+  /** Мозг хода в чате привязанной вкладки («Промпты»); у остальных — null. */
+  pinnedBrainProvider?: LLMProvider | null;
   permissionMode: PermissionMode | string;
   cyclePermissionMode: () => void;
   resolvePermissionModeForProvider: (provider: LLMProvider, requestedMode: PermissionMode | string) => PermissionMode;
@@ -393,6 +395,7 @@ export function useChatComposerState({
   selectedSession,
   currentSessionId,
   provider,
+  pinnedBrainProvider = null,
   permissionMode,
   cyclePermissionMode,
   resolvePermissionModeForProvider,
@@ -938,8 +941,11 @@ export function useChatComposerState({
     const toolsSettings = getToolsSettings();
 
     return {
+      // Мозг хода в чате привязанной вкладки («Промпты»): приходит из
+      // объединённого меню моделей, сервер переключает сессию по нему.
+      ...(pinnedBrainProvider ? { provider: pinnedBrainProvider } : {}),
       // Подписка Devin из пикера аккаунтов: платит за этот ход (новый или открытый чат), если годна.
-      ...(provider === 'devin' ? { devinConnectionId: readSelectedDevinConnectionId() } : {}),
+      ...((pinnedBrainProvider ?? provider) === 'devin' ? { devinConnectionId: readSelectedDevinConnectionId() } : {}),
       model: currentProviderModel,
       effort: currentProviderEffort,
       permissionMode: resolvePermissionModeForProvider(provider, permissionMode),
@@ -956,6 +962,7 @@ export function useChatComposerState({
     currentProviderEffort,
     currentProviderModel,
     permissionMode,
+    pinnedBrainProvider,
     provider,
     resolvePermissionModeForProvider,
     selectedSession,

@@ -39,6 +39,13 @@ const isValidModelForProvider = (provider: LLMProvider | string, model: string):
 };
 
 /**
+ * Помощники, между которыми в привязанном проекте разрешено переключаться
+ * через меню моделей чата (Егор 25.10.26: во вкладке «Промпты» общий список —
+ * и Claude, и Devin).
+ */
+const PINNED_SWITCHABLE_PROVIDERS: ReadonlySet<string> = new Set(['claude', 'devin']);
+
+/**
  * Провайдер, под которым должна создаваться сессия в этом проекте:
  * привязанный, либо запрошенный клиентом, если привязки нет.
  */
@@ -46,6 +53,27 @@ export const resolveProjectProvider = (
   projectPath: string,
   provider: LLMProvider,
 ): LLMProvider => (PINNED_PROJECT_PROVIDERS.get(projectPath) as LLMProvider | undefined) ?? provider;
+
+/**
+ * Явный выбор помощника внутри чата привязанного проекта: клиент присылает
+ * options.provider из объединённого меню моделей. Возвращает цель
+ * переключения, если проект привязан, значение из разрешённой пары
+ * claude|devin и отличается от текущего; иначе null — случайное или чужое
+ * значение composer'а сессию не двигает.
+ */
+export const resolvePinnedSessionProvider = (
+  projectPath: string | null,
+  currentProvider: string,
+  requestedProvider: string | null | undefined,
+): LLMProvider | null => {
+  if (!projectPath || !PINNED_PROJECT_PROVIDERS.has(projectPath) || !requestedProvider) {
+    return null;
+  }
+  const target = requestedProvider.trim();
+  return target !== currentProvider && PINNED_SWITCHABLE_PROVIDERS.has(target)
+    ? (target as LLMProvider)
+    : null;
+};
 
 /**
  * Приводит модель к допустимой для привязанного провайдера: значение чужого

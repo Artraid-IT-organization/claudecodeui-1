@@ -1412,3 +1412,15 @@ workspace и `/home/claude/prompts` там не возникает.
 (`shared/utils.ts`) и применено в `sessionListScopeSql` и
 `getRecentSessionsPage` — оба места держать синхронными при добавлении новых
 привязок. Карта путей — `PINNED_PROJECT_PROVIDERS` там же в shared.
+
+Выбор модели в чате вкладки (25.10.26): у привязанного проекта меню моделей
+объединённое — группы Claude и Devin, у опций поле `provider` в
+`ProviderModelOption`. Клиент (`useChatProviderState`: `isPinnedProject`,
+`brainProvider`, `pendingBrainProvider`, `selectComposerModel`) шлёт мозг
+ходит в `options.provider`; сервер (`resolvePinnedSessionProvider` +
+переключение в `handleChatSend` до runProviderTurn) принимает только пару
+claude|devin, ретаргетит сессию (`retargetSessionProvider` обнуляет
+provider_session_id) и сбрасывает effort — модель сохраняется, это свежий
+выбор. Открытие claude-чата вкладки не двигает глобальный выбор помощника
+composer'а (пропуск sync-эффекта по PINNED_PROMPTS_PROJECT_PATH — зеркало
+серверной карты путей, держать синхронной).

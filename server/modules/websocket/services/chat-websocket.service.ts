@@ -12,6 +12,7 @@ import {
   stopSurvivor,
   clampDevinModelForUser,
   clampProjectProviderModel,
+  resolvePinnedSessionProvider,
   describeDevinFailureForUser,
 } from '@/modules/providers/index.js';
 import { chatRunRegistry, onChatRunCompleted } from '@/modules/websocket/services/chat-run-registry.service.js';
@@ -270,6 +271,30 @@ async function handleChatSend(
   }
 
   let provider = session.provider as LLMProvider;
+
+  // Чат привязанного проекта («Промпты»): человек выбрал другого помощника
+  // в меню моделей — options.provider. Сессия переключается с этого
+  // сообщения: новый мозг, честный значок, чат остаётся в списке вкладки
+  // (Егор 25.10.26). Только явный разрешённый выбор — случайное значение
+  // composer'а сессию не двигает.
+  const requestedProvider =
+    typeof (data.options as AnyRecord | undefined)?.provider === 'string'
+      ? (data.options as AnyRecord).provider.trim()
+      : null;
+  const pinnedSwitchTarget = resolvePinnedSessionProvider(
+    session.project_path,
+    provider,
+    requestedProvider,
+  );
+  const providerSwitched = Boolean(
+    pinnedSwitchTarget && dependencies.runtime.hasRuntime(pinnedSwitchTarget),
+  );
+  if (providerSwitched && pinnedSwitchTarget) {
+    sessionsDb.retargetSessionProvider(sessionId, pinnedSwitchTarget);
+    provider = pinnedSwitchTarget;
+    session.provider_session_id = null;
+  }
+
   if (!dependencies.runtime.hasRuntime(provider)) {
     sendProtocolError(ws, 'UNSUPPORTED_PROVIDER', `Provider "${provider}" is not available.`, sessionId, clientMessageId);
     return;
@@ -324,10 +349,19 @@ async function handleChatSend(
   }
 
   const clientOptions = (data.options ?? {}) as AnyRecord;
+  // options.provider — служебное поле выбора помощника в привязанном проекте,
+  // съедено выше; провайдер-рантайму оно не нужно.
+  delete clientOptions.provider;
   if (providerMigrated) {
     // Клиент прислал выбор для старого провайдера (модель/усилие Claude) —
     // Devin такие имена не знает, и ход упал бы на `--model claude-…`.
     delete clientOptions.model;
+    delete clientOptions.effort;
+  }
+  if (providerSwitched) {
+    // Явная смена помощника: модель сохраняется (это свежий выбор из меню
+    // нового провайдера), усилие сбрасывается — значения Claude чужому
+    // провайдеру не подходят.
     delete clientOptions.effort;
   }
   const command = typeof data.content === 'string' ? data.content : '';

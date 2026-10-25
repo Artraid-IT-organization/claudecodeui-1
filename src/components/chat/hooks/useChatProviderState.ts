@@ -31,6 +31,9 @@ const FALLBACK_DEFAULT_MODEL: Record<LLMProvider, string> = {
 
 const PROVIDERS: LLMProvider[] = ['claude', 'cursor', 'codex', 'opencode', 'devin'];
 
+/** Привязанный проект «Промпты» (зеркало серверного PINNED_PROJECT_PROVIDERS). */
+const PINNED_PROMPTS_PROJECT_PATH = '/home/claude/prompts';
+
 const readStoredProvider = (): LLMProvider => {
   const storedProvider = readSelectedProviderRaw();
   return PROVIDERS.includes(storedProvider as LLMProvider)
@@ -512,7 +515,7 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     const pinnedPath = (selectedSession as { projectPath?: string }).projectPath
       ?? (_selectedProject as { path?: string; projectPath?: string } | null)?.path
       ?? (_selectedProject as { path?: string; projectPath?: string } | null)?.projectPath;
-    if (pinnedPath === '/home/claude/prompts') {
+    if (pinnedPath === PINNED_PROMPTS_PROJECT_PATH) {
       return;
     }
 
@@ -580,6 +583,32 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
   const [sessionSelection, setSessionSelection] = useState<SessionProviderSelection | null>(null);
   const selectedSessionId = selectedSession?.id?.trim() || null;
   const selectedSessionProvider = selectedSession?.__provider ?? provider;
+
+  // Вкладка «Промпты» — привязанный проект: чаты живут в списке Devin, а
+  // мозг хода выбирается в чате из объединённого меню Claude|Devin
+  // (Егор 25.10.26). Путь — из открытой сессии, запасной — из проекта.
+  const sessionProjectPath =
+    (selectedSession as { projectPath?: string } | null | undefined)?.projectPath
+    ?? (_selectedProject as { fullPath?: string; path?: string; projectPath?: string } | null | undefined)?.fullPath
+    ?? (_selectedProject as { path?: string; projectPath?: string } | null | undefined)?.path
+    ?? (_selectedProject as { path?: string; projectPath?: string } | null | undefined)?.projectPath
+    ?? null;
+  const isPinnedProject = sessionProjectPath === PINNED_PROMPTS_PROJECT_PATH;
+
+  // Выбранный в меню мозг, который сессия ещё не записала: отправка с ним
+  // переключит сессию (сервер принимает только claude|devin у привязанного
+  // проекта). null — меню отражает записанного помощника сессии.
+  const [pendingBrainProvider, setPendingBrainProvider] = useState<LLMProvider | null>(null);
+  useEffect(() => {
+    setPendingBrainProvider(null);
+  }, [selectedSessionId, selectedSessionProvider]);
+
+  // Мозг, для которого строятся модель/усилие/список моделей: у привязанной
+  // вкладки — записанный сессией (или отложенный выбор), у остальных чатов —
+  // выбранный помощник как раньше.
+  const brainProvider: LLMProvider = isPinnedProject
+    ? (pendingBrainProvider ?? selectedSessionProvider)
+    : provider;
   const selectedSessionKey = selectedSessionId
     ? getSessionSelectionKey(selectedSessionProvider, selectedSessionId)
     : null;
@@ -788,24 +817,58 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
   }, [sessionSelection, setStoredProviderEffort]);
 
   // The open session's model wins over the per-provider default, so switching
-  // sessions shows (and sends) what each session actually runs with.
-  const currentProviderModel = sessionModel ?? providerModels[provider];
+  // sessions shows (and sends) what each session actually runs with. У
+  // привязанной вкладки «Промпты» модель/усилие — мозга сессии, а не общего
+  // выбора composer'а: без записанной модели умолчание чата — Opus.
+  const currentProviderModel = sessionModel
+    ?? (isPinnedProject && brainProvider === 'claude'
+      ? 'opus'
+      : providerModels[brainProvider]);
   const currentProviderEffortOptions = useMemo(() => {
-    return getEffortOptionsForModel(provider, currentProviderModel);
-  }, [currentProviderModel, getEffortOptionsForModel, provider]);
+    return getEffortOptionsForModel(brainProvider, currentProviderModel);
+  }, [currentProviderModel, getEffortOptionsForModel, brainProvider]);
   const currentProviderEffort = useMemo(() => {
     return reconcileStoredEffort(
-      provider,
+      brainProvider,
       currentProviderModel,
       activeSessionSelection?.effort
-        ?? providerEfforts[provider]
+        ?? providerEfforts[brainProvider]
         ?? DEFAULT_EFFORT_VALUE,
     );
-  }, [activeSessionSelection?.effort, currentProviderModel, provider, providerEfforts, reconcileStoredEffort]);
-  const currentProviderModelOptions = useMemo(
-    () => providerModelCatalog[provider]?.OPTIONS ?? [],
-    [provider, providerModelCatalog],
-  );
+  }, [activeSessionSelection?.effort, currentProviderModel, brainProvider, providerEfforts, reconcileStoredEffort]);
+  const currentProviderModelOptions = useMemo(() => {
+    if (!isPinnedProject) {
+      return providerModelCatalog[provider]?.OPTIONS ?? [];
+    }
+    // Объединённое меню привязанной вкладки: обе группы с пометкой мозга —
+    // выбор опции другой группы переключает сессию при отправке.
+    const tagOptions = (target: LLMProvider): ProviderModelOption[] =>
+      (providerModelCatalog[target]?.OPTIONS ?? []).map((option) => ({ ...option, provider: target }));
+    return [...tagOptions('claude'), ...tagOptions('devin')];
+  }, [isPinnedProject, provider, providerModelCatalog]);
+
+  /**
+   * Выбор модели в меню композера. У привязанной вкладки опции помечены
+   * мозгом: модель другой группы откладывает переключение сессии — сервер
+   * применит его на ближайшей отправке (options.provider).
+   */
+  const selectComposerModel = useCallback(async (
+    model: string,
+    sessionId?: string | null,
+  ) => {
+    const option = currentProviderModelOptions.find((candidate) => candidate.value === model);
+    const targetProvider = option?.provider ?? brainProvider;
+    await selectProviderModel(targetProvider, model, sessionId);
+    if (isPinnedProject) {
+      setPendingBrainProvider(targetProvider === selectedSessionProvider ? null : targetProvider);
+    }
+  }, [
+    brainProvider,
+    currentProviderModelOptions,
+    isPinnedProject,
+    selectProviderModel,
+    selectedSessionProvider,
+  ]);
 
   const applyProviderCatalog = useCallback((
     targetProvider: LLMProvider,
@@ -948,6 +1011,9 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     providerModelActions,
     selectProviderModel,
     selectProviderEffort,
+    selectComposerModel,
     resolvePermissionModeForProvider,
+    isPinnedProject,
+    brainProvider,
   };
 }

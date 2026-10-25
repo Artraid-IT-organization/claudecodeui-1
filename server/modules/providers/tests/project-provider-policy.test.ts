@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 
 import {
   clampProjectProviderModel,
+  resolvePinnedSessionProvider,
   resolveProjectProvider,
 } from '../services/project-provider-policy.js';
 
@@ -38,5 +39,21 @@ describe('clampProjectProviderModel', () => {
     assert.equal(clampProjectProviderModel('claude', OTHER_PATH, 'swe-2-high'), 'swe-2-high');
     assert.equal(clampProjectProviderModel('devin', PINNED_PATH, 'swe-2-high'), 'swe-2-high');
     assert.equal(clampProjectProviderModel('claude', null, 'swe-2-high'), 'swe-2-high');
+  });
+});
+
+describe('resolvePinnedSessionProvider', () => {
+  it('переключает привязанный чат на явно выбранного помощника из пары claude|devin', () => {
+    assert.equal(resolvePinnedSessionProvider(PINNED_PATH, 'claude', 'devin'), 'devin');
+    assert.equal(resolvePinnedSessionProvider(PINNED_PATH, 'devin', 'claude'), 'claude');
+  });
+
+  it('отклоняет того же провайдера, чужие значения и непривязанный проект', () => {
+    assert.equal(resolvePinnedSessionProvider(PINNED_PATH, 'claude', 'claude'), null);
+    assert.equal(resolvePinnedSessionProvider(PINNED_PATH, 'claude', 'codex'), null);
+    assert.equal(resolvePinnedSessionProvider(PINNED_PATH, 'claude', 'bogus'), null);
+    assert.equal(resolvePinnedSessionProvider(PINNED_PATH, 'claude', null), null);
+    assert.equal(resolvePinnedSessionProvider(OTHER_PATH, 'claude', 'devin'), null);
+    assert.equal(resolvePinnedSessionProvider(null, 'claude', 'devin'), null);
   });
 });

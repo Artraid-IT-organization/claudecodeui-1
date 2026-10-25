@@ -26,7 +26,11 @@ export { providerModelsService } from './services/provider-models.service.js';
 export { clampDevinModelForUser } from './services/devin-model-policy.js';
 // resolveProjectProvider/clampProjectProviderModel: модуль websocket приводит
 // модель привязанной вкладки («Промпты» → claude) к допустимой при отправке.
-export { resolveProjectProvider, clampProjectProviderModel } from './services/project-provider-policy.js';
+export {
+  resolveProjectProvider,
+  clampProjectProviderModel,
+  resolvePinnedSessionProvider,
+} from './services/project-provider-policy.js';
 // describeDevinFailureForUser: причина сбоя хода Devin словами человека —
 // журнал chat_runs и плашка в ленте (chat-websocket.service).
 export { describeDevinFailureForUser } from './services/devin-connections.service.js';

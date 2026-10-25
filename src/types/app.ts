@@ -10,6 +10,9 @@ export type ProviderModelOption = {
   value: string;
   label: string;
   description?: string;
+  /** Мозг опции в объединённом меню (чаты привязанной вкладки «Промпты»);
+   * у обычного списка провайдера поле не ставится — провайдер один. */
+  provider?: LLMProvider;
   recordId?: number;
   isCustom?: boolean;
   effort?: {

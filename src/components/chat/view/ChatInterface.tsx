@@ -113,6 +113,9 @@ function ChatInterface({
     providerModelActions,
     selectProviderModel,
     selectProviderEffort,
+    selectComposerModel,
+    isPinnedProject,
+    brainProvider,
     resolvePermissionModeForProvider,
   } = useChatProviderState({
     selectedSession,
@@ -261,6 +264,7 @@ function ChatInterface({
     selectedSession,
     currentSessionId,
     provider,
+    pinnedBrainProvider: isPinnedProject ? brainProvider : null,
     permissionMode,
     cyclePermissionMode,
     currentProviderModel,
@@ -597,11 +601,11 @@ function ChatInterface({
 
   const handleSelectComposerModel = useCallback(async (model: string) => {
     try {
-      await selectProviderModel(provider, model, currentSessionId || selectedSession?.id || null);
+      await selectComposerModel(model, currentSessionId || selectedSession?.id || null);
     } catch (error) {
       console.error('Error changing the active session model:', error);
     }
-  }, [currentSessionId, provider, selectProviderModel, selectedSession?.id]);
+  }, [currentSessionId, selectComposerModel, selectedSession?.id]);
 
   const handleSelectComposerEffort = useCallback(async (effort: string) => {
     try {
