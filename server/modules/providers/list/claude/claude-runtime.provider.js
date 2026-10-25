@@ -33,11 +33,10 @@ import {
   notifyUserIfEnabled
 } from '@/modules/notifications/index.js';
 import { createCompleteMessage, createNormalizedMessage, getClaudeConfigDir, getClaudeJsonPath, OPEN_REGISTRATION, PINNED_PROJECT_PROVIDERS } from '@/shared/utils.js';
-import { resolveBornTranscriptDirName } from '@/modules/providers/list/claude/transcript-presence.js';
 import { getRequestRuntimeContext } from '@/shared/request-context.js';
 import { INHERITED_CLAUDE_AUTH_ENV_KEYS } from '@/shared/claude-login.js';
 import { noteSurvivorProviderSession, spawnSurvivableClaude } from '@/modules/providers/list/claude/survivor-runs.js';
-import { hasTranscriptOnDisk } from '@/modules/providers/list/claude/transcript-presence.js';
+import { hasTranscriptOnDisk, resolveBornTranscriptDirName } from '@/modules/providers/list/claude/transcript-presence.js';
 
 const activeSessions = new Map();
 const pendingToolApprovals = new Map();
