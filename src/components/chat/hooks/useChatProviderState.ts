@@ -820,10 +820,15 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
   // sessions shows (and sends) what each session actually runs with. У
   // привязанной вкладки «Промпты» модель/усилие — мозга сессии, а не общего
   // выбора composer'а: без записанной модели умолчание чата — Opus.
-  const currentProviderModel = sessionModel
-    ?? (isPinnedProject && brainProvider === 'claude'
-      ? 'opus'
-      : providerModels[brainProvider]);
+  const currentProviderModel = pendingBrainProvider
+    // Отложенный выбор мозга (вкладка «Промпты»): чип и отправка показывают
+    // модель ВЫБРАННОГО помощника — записанная у сессии модель относится к
+    // текущему мозгу и показывала бы чужое значение до ближайшего сообщения.
+    ? providerModels[pendingBrainProvider]
+    : sessionModel
+      ?? (isPinnedProject && brainProvider === 'claude'
+        ? 'opus'
+        : providerModels[brainProvider]);
   const currentProviderEffortOptions = useMemo(() => {
     return getEffortOptionsForModel(brainProvider, currentProviderModel);
   }, [currentProviderModel, getEffortOptionsForModel, brainProvider]);
