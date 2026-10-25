@@ -820,12 +820,18 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
   // sessions shows (and sends) what each session actually runs with. У
   // привязанной вкладки «Промпты» модель/усилие — мозга сессии, а не общего
   // выбора composer'а: без записанной модели умолчание чата — Opus.
+  // Записанная у сессии модель учитывается, только если она есть в каталоге
+  // текущего мозга: после смены провайдера в строке могла остаться чужая
+  // модель («sonnet» у devin-чата) — чип и отправка показывали бы не то.
+  const sessionModelFitsBrain = sessionModel
+    && (!providerModelCatalog[brainProvider]
+      || providerModelCatalog[brainProvider].OPTIONS.some((option) => option.value === sessionModel));
   const currentProviderModel = pendingBrainProvider
     // Отложенный выбор мозга (вкладка «Промпты»): чип и отправка показывают
     // модель ВЫБРАННОГО помощника — записанная у сессии модель относится к
     // текущему мозгу и показывала бы чужое значение до ближайшего сообщения.
     ? providerModels[pendingBrainProvider]
-    : sessionModel
+    : (sessionModelFitsBrain ? sessionModel : null)
       ?? (isPinnedProject && brainProvider === 'claude'
         ? 'opus'
         : providerModels[brainProvider]);
