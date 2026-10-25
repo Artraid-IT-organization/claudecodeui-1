@@ -11,6 +11,7 @@ import {
   resolveEffectiveProvider,
   stopSurvivor,
   clampDevinModelForUser,
+  clampProjectProviderModel,
   describeDevinFailureForUser,
 } from '@/modules/providers/index.js';
 import { chatRunRegistry, onChatRunCompleted } from '@/modules/websocket/services/chat-run-registry.service.js';
@@ -539,6 +540,10 @@ async function runProviderTurn(input: {
   // аккаунта модель приводится к разрешённой до записи на сессию и до
   // передачи ходу провайдера — устаревший выбор или прямой вызов не сработают.
   clientOptions.model = clampDevinModelForUser(provider, userId, clientOptions.model);
+  // Привязка проекта (project-provider-policy): у сессии вкладки «Промпты»
+  // провайдер уже claude, но composer мог прислать модель прошлого выбора
+  // ('swe-2-high') — она заменяется запасной моделью привязки.
+  clientOptions.model = clampProjectProviderModel(provider, projectPath, clientOptions.model);
   // Record what this turn runs with so reopening the session later restores the
   // same model and reasoning effort, and so the resume path has a
   // session-scoped model answer to use.

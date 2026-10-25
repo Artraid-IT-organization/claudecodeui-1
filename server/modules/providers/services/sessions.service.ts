@@ -26,6 +26,8 @@ import {
 import { getWebUserWorkspaceRoot } from '@/shared/web-user-paths.js';
 import { hasOwnClaudeAccess, resolveWebUserRuntimeContext } from '@/shared/web-user-runtime.js';
 
+import { resolveProjectProvider } from './project-provider-policy.js';
+
 /**
  * Любой чат читает владелец площадки и человек, которому чат принадлежит
  * (`initiated_by_user_id` или каталог аккаунта — то же правило, что у
@@ -395,13 +397,22 @@ export const sessionsService = {
       });
     }
 
+    // Привязка проекта к провайдеру (project-provider-policy): вкладка
+    // «Промпты» владельца всегда создаёт чаты под Claude — глобальный выбор
+    // composer'а (devin) здесь не применяется. Только для владельца: у
+    // остальных пользователей своя зона и свой провайдер — scopeRoot !== null
+    // означает не-владельца, и его выбор остаётся нетронутым.
+    const pinnedProvider = scopeRoot === null
+      ? resolveProjectProvider(normalizedProjectPath, effectiveProvider)
+      : effectiveProvider;
+
     const sessionId = randomUUID();
     const sessionName = buildCloudCliSessionName(initialMessage);
-    sessionsDb.createAppSession(sessionId, effectiveProvider, normalizedProjectPath, sessionName);
+    sessionsDb.createAppSession(sessionId, pinnedProvider, normalizedProjectPath, sessionName);
 
     return {
       sessionId,
-      provider: effectiveProvider,
+      provider: pinnedProvider,
       projectPath: normalizedProjectPath,
       sessionName,
     };
