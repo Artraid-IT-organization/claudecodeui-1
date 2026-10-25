@@ -506,6 +506,15 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     if (!selectedSession?.__provider || selectedSession.__provider === provider) {
       return;
     }
+    // Чаты закреплённой папки («Промпты») живут в пространстве Devin-списка —
+    // открытие такого чата не должно перебрасывать человека на другого
+    // помощника, хотя мозги у хода claude (Егор 25.10.26).
+    const pinnedPath = (selectedSession as { projectPath?: string }).projectPath
+      ?? (_selectedProject as { path?: string; projectPath?: string } | null)?.path
+      ?? (_selectedProject as { path?: string; projectPath?: string } | null)?.projectPath;
+    if (pinnedPath === '/home/claude/prompts') {
+      return;
+    }
 
     reportProviderProbe('prov-sync-session', { to: selectedSession.__provider, was: provider, session: String(selectedSession.id).slice(0, 8) });
     setProvider(selectedSession.__provider);
