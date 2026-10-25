@@ -1825,3 +1825,22 @@ export function stripInjectedContext(text: string): string {
     .replace(/<user-prompt-submit-hook>[\s\S]*?<\/user-prompt-submit-hook>/g, '')
     .trim();
 }
+
+//----------------- PINNED PROJECT PROVIDERS ------------
+
+/**
+ * Проекты, закреплённые за провайдером и пространством списка (Егор 25.10.26):
+ * вкладка «Промпты» владельца живёт в пространстве списка Devin, но её чаты
+ * работают на Claude. Читают project-provider-policy (создание сессии и
+ * приведение модели) и sessions.db (срез списка по пространству помощника —
+ * такие чаты остаются видны в пространстве devin у владельца).
+ */
+export const PINNED_PROJECT_PROVIDERS: ReadonlyMap<string, string> = new Map([
+  ['/home/claude/prompts', 'claude'],
+]);
+
+/** SQL-условие «проект из закреплённых» для срезов списка чатов. */
+export function pinnedProjectPathSql(tableAlias = 'sessions'): string {
+  const paths = [...PINNED_PROJECT_PROVIDERS.keys()].map((p) => `'${p}'`).join(', ');
+  return `${tableAlias}.project_path IN (${paths})`;
+}

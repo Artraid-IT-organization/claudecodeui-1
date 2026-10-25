@@ -13,29 +13,25 @@
  * до синхронизации с провайдером свежесозданной сессии).
  */
 import type { LLMProvider } from '@/shared/types.js';
+import { PINNED_PROJECT_PROVIDERS } from '@/shared/utils.js';
 
 import { CLAUDE_PREDEFINED_MODELS } from '../list/claude/claude-models.provider.js';
 
-type PinnedProject = {
-  provider: LLMProvider;
-  /**
-   * Модель, которой заменяется значение, недопустимое для привязанного
-   * провайдера (например 'swe-2-high', присланное composer'ом до того, как он
-   * переключился на свежую claude-сессию). Осознанный выбор допустимой модели
-   * проходит как есть — привязка задаёт провайдера, а не модель.
-   */
-  fallbackModel: string;
-};
-
-const PINNED_PROJECTS: ReadonlyMap<string, PinnedProject> = new Map([
-  ['/home/claude/prompts', { provider: 'claude', fallbackModel: 'opus' }],
+/**
+ * Запасная модель привязки: ей заменяется значение, недопустимое для
+ * привязанного провайдера (например 'swe-2-high', присланное composer'ом до
+ * синхронизации со свежей claude-сессией). Осознанный выбор допустимой модели
+ * проходит как есть — привязка задаёт провайдера, а не модель.
+ */
+const PINNED_FALLBACK_MODELS: ReadonlyMap<string, string> = new Map([
+  ['/home/claude/prompts', 'opus'],
 ]);
 
 const CLAUDE_MODEL_VALUES: ReadonlySet<string> = new Set(
   CLAUDE_PREDEFINED_MODELS.OPTIONS.map((option) => option.value),
 );
 
-const isValidModelForProvider = (provider: LLMProvider, model: string): boolean => {
+const isValidModelForProvider = (provider: LLMProvider | string, model: string): boolean => {
   if (provider === 'claude') {
     return CLAUDE_MODEL_VALUES.has(model);
   }
@@ -49,7 +45,7 @@ const isValidModelForProvider = (provider: LLMProvider, model: string): boolean 
 export const resolveProjectProvider = (
   projectPath: string,
   provider: LLMProvider,
-): LLMProvider => PINNED_PROJECTS.get(projectPath)?.provider ?? provider;
+): LLMProvider => (PINNED_PROJECT_PROVIDERS.get(projectPath) as LLMProvider | undefined) ?? provider;
 
 /**
  * Приводит модель к допустимой для привязанного провайдера: значение чужого
@@ -61,11 +57,11 @@ export const clampProjectProviderModel = (
   projectPath: string | null,
   model?: string | null,
 ): string | null | undefined => {
-  const pin = projectPath ? PINNED_PROJECTS.get(projectPath) : undefined;
-  if (!pin || provider !== pin.provider) {
+  const pin = projectPath ? PINNED_PROJECT_PROVIDERS.get(projectPath) : undefined;
+  if (!pin || provider !== pin) {
     return model;
   }
   return typeof model === 'string' && model.trim() && isValidModelForProvider(provider, model.trim())
     ? model
-    : pin.fallbackModel;
+    : PINNED_FALLBACK_MODELS.get(projectPath!);
 };
