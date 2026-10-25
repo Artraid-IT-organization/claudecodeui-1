@@ -1371,3 +1371,24 @@ HTML-тегов; сообщения разделяются `---`. HTML/PDF — �
 - UI: `MessageFeedbackControl` рядом с MessageCopyControl в строке под
   ответом; диалог причин — портал по образцу RewindConfirmDialog (не
   position-absolute от сообщения, скролл не рвётся).
+
+## Привязка проекта к провайдеру (`project-provider-policy`, 25.10.26)
+
+Карта `PINNED_PROJECTS` (`server/modules/providers/services/project-provider-policy.ts`)
+закрепляет провайдера за путём проекта. Сейчас одна запись: `/home/claude/prompts` →
+`claude` (вкладка «Промпты» всегда работает на Claude — промпты генерирует умная
+модель, а значок Devin вводил в заблуждение; Егор 25.10.26).
+
+Две точки входа:
+
+- `sessions.service.createAppSession` — после нормализации пути подменяет
+  провайдер через `resolveProjectProvider`, поэтому сессия вкладки сразу
+  создаётся под Claude независимо от выбора composer'а.
+- `runProviderTurn` (chat-websocket) — `clampProjectProviderModel` приводит
+  модель к допустимой для привязанного провайдера: значение чужого провайдера
+  (composer прислал 'swe-2-high' до синхронизации со свежей claude-сессией)
+  заменяется `fallbackModel` привязки ('opus'). Осознанный выбор допустимой
+  модели ('sonnet', 'default', 'opus[1m]') проходит как есть.
+
+Граница: привязка задаёт провайдера и запасную модель, а не принудительную —
+выбор допустимой модели в чате вкладки остаётся за человеком.
