@@ -341,6 +341,7 @@ function ChatMessagesPane({
         <ProviderSelectionEmptyState
           selectedSession={selectedSession}
           currentSessionId={currentSessionId}
+          selectedProject={selectedProject}
           provider={provider}
           setProvider={setProvider}
           textareaRef={textareaRef}

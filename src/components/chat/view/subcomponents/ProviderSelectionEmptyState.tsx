@@ -58,6 +58,7 @@ function modelSearchFilter(value: string, search: string): number {
 type ProviderSelectionEmptyStateProps = {
   selectedSession: ProjectSession | null;
   currentSessionId: string | null;
+  selectedProject?: { fullPath?: string; displayName?: string } | null;
   provider: LLMProvider;
   setProvider: (next: LLMProvider) => void;
   textareaRef: React.RefObject<HTMLTextAreaElement>;
@@ -121,6 +122,7 @@ function getProviderDisplayName(p: LLMProvider) {
 export default function ProviderSelectionEmptyState({
   selectedSession,
   currentSessionId,
+  selectedProject,
   provider,
   setProvider,
   textareaRef,
@@ -163,7 +165,13 @@ export default function ProviderSelectionEmptyState({
   // rejects their /devin/models request with 403).
   // В режиме «Devin» (выбор в меню аккаунтов) работает только он: других вкладок нет,
   // чтобы случайно не потратить токены Claude или Codex (Егор 03.10.26).
-  const devinOnly = useSelectedChatProvider() === "devin";
+  // В папке «Промпты» выбор мозга разрешён даже в режиме Devin — там живут
+  // обе группы моделей (Егор 26.10.26). В остальных чатах режим Devin
+  // по-прежнему показывает только Devin, чтобы не тратить Claude случайно.
+  const isPromptsFolder =
+    selectedProject?.fullPath === "/home/claude/prompts"
+    || selectedProject?.displayName === "Промпты";
+  const devinOnly = useSelectedChatProvider() === "devin" && !isPromptsFolder;
   const visibleProviderTabs = useMemo(
     () => PROVIDER_META.filter((p) => (devinOnly
       ? p.id === "devin"
@@ -222,12 +230,16 @@ export default function ProviderSelectionEmptyState({
   const handleModelSelect = useCallback(
     (providerId: LLMProvider, modelValue: string) => {
       setProvider(providerId);
-      writeSelectedProvider(providerId);
+      // В папке «Промпты» выбор мозга относится к этому чату: глобальную
+      // отметку аккаунта не двигаем, иначе список снова «уезжал» бы в Claude.
+      if (!isPromptsFolder) {
+        writeSelectedProvider(providerId);
+      }
       setModelForProvider(providerId, modelValue);
       setDialogOpen(false);
       setTimeout(() => textareaRef.current?.focus(), 100);
     },
-    [setProvider, setModelForProvider, textareaRef],
+    [isPromptsFolder, setProvider, setModelForProvider, textareaRef],
   );
 
   const openModelLibrary = () => {
