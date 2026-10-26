@@ -513,6 +513,7 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     // открытие такого чата не должно перебрасывать человека на другого
     // помощника, хотя мозги у хода claude (Егор 25.10.26).
     const pinnedPath = (selectedSession as { projectPath?: string }).projectPath
+      ?? (_selectedProject as { fullPath?: string; path?: string; projectPath?: string } | null)?.fullPath
       ?? (_selectedProject as { path?: string; projectPath?: string } | null)?.path
       ?? (_selectedProject as { path?: string; projectPath?: string } | null)?.projectPath;
     if (pinnedPath === PINNED_PROMPTS_PROJECT_PATH) {
