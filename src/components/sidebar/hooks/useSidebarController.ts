@@ -18,6 +18,7 @@ import {
   clearLegacyStarredProjectIds,
   filterProjects,
   getAllSessions,
+  isPromptsProject,
   readLegacyStarredProjectIds,
   readProjectSortOrder,
   sortProjects,

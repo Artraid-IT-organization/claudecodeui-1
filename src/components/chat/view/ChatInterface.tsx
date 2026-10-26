@@ -126,7 +126,11 @@ function ChatInterface({
   // callback reads the provider from a ref so a mid-stream provider switch
   // does not flush stale metadata.
   const providerRef = useRef(provider);
-  providerRef.current = provider;
+  // Подпись/значок ленты: у чата закреплённой вкладки — мозг самой сессии
+  // (brainProvider), у остальных — глобальный выбор composer'а, как раньше.
+  // Иначе ответ Claude в «Промптах» подписывался бы Devin (Егор 26.10.26).
+  const feedProvider = isPinnedProject ? brainProvider : provider;
+  providerRef.current = feedProvider;
   const streamSchedulerRef = useRef(createStreamingScheduler((sid, text) => {
     sessionStore.updateStreaming(sid, text, providerRef.current);
   }));
@@ -628,16 +632,17 @@ function ChatInterface({
     ? (sessionStore.getSessionSlot(outcomeSessionId)?.runOutcome ?? null)
     : null;
 
-  const selectedProviderLabel =
-    provider === 'cursor'
+  const feedProviderLabel =
+    feedProvider === 'cursor'
       ? t('messageTypes.cursor')
-      : provider === 'codex'
+      : feedProvider === 'codex'
         ? t('messageTypes.codex')
-        : provider === 'opencode'
+        : feedProvider === 'opencode'
             ? t('messageTypes.opencode', { defaultValue: 'OpenCode' })
-          : provider === 'devin'
+          : feedProvider === 'devin'
             ? t('messageTypes.devin', { defaultValue: 'Devin' })
           : t('messageTypes.claude');
+  const selectedProviderLabel = feedProviderLabel;
 
   if (!selectedProject) {
     return (
@@ -671,7 +676,7 @@ function ChatInterface({
           chatMessages={chatMessages}
           selectedSession={selectedSession}
           currentSessionId={currentSessionId}
-          provider={provider}
+          provider={feedProvider}
           setProvider={(nextProvider) => setProvider(nextProvider as Provider)}
           textareaRef={textareaRef}
           claudeModel={claudeModel}
