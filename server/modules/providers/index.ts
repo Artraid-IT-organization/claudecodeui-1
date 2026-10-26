@@ -24,10 +24,11 @@ export { providerModelsService } from './services/provider-models.service.js';
 // clampDevinModelForUser: модуль websocket приводит выбор модели Devin к
 // разрешённому пользователю перед запуском хода (chat-websocket.service).
 export { clampDevinModelForUser } from './services/devin-model-policy.js';
-// resolveProjectProvider/clampProjectProviderModel: модуль websocket приводит
-// модель привязанной вкладки («Промпты» → claude) к допустимой при отправке.
+// resolvePinnedProjectBrain/clampProjectProviderModel: создание сессии
+// наследует последний мозг привязанной папки, websocket приводит модель
+// claude-чата вкладки к допустимой при отправке.
 export {
-  resolveProjectProvider,
+  resolvePinnedProjectBrain,
   clampProjectProviderModel,
   resolvePinnedSessionProvider,
 } from './services/project-provider-policy.js';

@@ -3,22 +3,49 @@ import { describe, it } from 'node:test';
 
 import {
   clampProjectProviderModel,
+  resolvePinnedProjectBrain,
   resolvePinnedSessionProvider,
-  resolveProjectProvider,
 } from '../services/project-provider-policy.js';
 
 const PINNED_PATH = '/home/claude/prompts';
 const OTHER_PATH = '/home/claude/other';
 
-describe('resolveProjectProvider', () => {
-  it('заменяет провайдера на привязанного для закреплённого проекта', () => {
-    assert.equal(resolveProjectProvider(PINNED_PATH, 'devin'), 'claude');
-    assert.equal(resolveProjectProvider(PINNED_PATH, 'claude'), 'claude');
+describe('resolvePinnedProjectBrain', () => {
+  it('наследует последнюю использованную пару помощник+модель папки', () => {
+    assert.deepEqual(
+      resolvePinnedProjectBrain(PINNED_PATH, 'devin', { provider: 'claude', model: 'sonnet' }),
+      { provider: 'claude', model: 'sonnet' },
+    );
+    assert.deepEqual(
+      resolvePinnedProjectBrain(PINNED_PATH, 'devin', { provider: 'devin', model: 'swe-2-high' }),
+      { provider: 'devin', model: 'swe-2-high' },
+    );
   });
 
-  it('не трогает провайдера вне привязанных проектов', () => {
-    assert.equal(resolveProjectProvider(OTHER_PATH, 'devin'), 'devin');
-    assert.equal(resolveProjectProvider('', 'devin'), 'devin');
+  it('без истории или при чужом наследстве оставляет запрошенного провайдера', () => {
+    assert.deepEqual(
+      resolvePinnedProjectBrain(PINNED_PATH, 'devin', null),
+      { provider: 'devin', model: null },
+    );
+    assert.deepEqual(
+      resolvePinnedProjectBrain(PINNED_PATH, 'devin', { provider: 'codex', model: 'x' }),
+      { provider: 'devin', model: null },
+    );
+    assert.deepEqual(
+      resolvePinnedProjectBrain(OTHER_PATH, 'devin', { provider: 'claude', model: 'sonnet' }),
+      { provider: 'devin', model: null },
+    );
+  });
+
+  it('отбрасывает модель, недопустимую для унаследованного помощника', () => {
+    assert.deepEqual(
+      resolvePinnedProjectBrain(PINNED_PATH, 'devin', { provider: 'claude', model: 'swe-2-high' }),
+      { provider: 'claude', model: null },
+    );
+    assert.deepEqual(
+      resolvePinnedProjectBrain(PINNED_PATH, 'devin', { provider: 'claude', model: null }),
+      { provider: 'claude', model: null },
+    );
   });
 });
 

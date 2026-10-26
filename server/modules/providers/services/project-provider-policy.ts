@@ -1,11 +1,12 @@
 /**
- * Привязка проекта к провайдеру.
+ * Привязка проекта и память последнего мозга папки.
  *
- * Егор 25.10.26: вкладка «Промпты» (/home/claude/prompts) всегда работает на
- * Claude — промпты генерирует умная модель, а значок Devin у чатов вкладки
- * вводил в заблуждение. Выбор провайдера в composer'е при этом глобальный
- * (devin), поэтому сервер подменяет провайдер в момент создания сессии:
- * чат сразу ложится под тем провайдером, под которым пойдёт первый ход.
+ * Егор 26.10.26: вкладка «Промпты» (/home/claude/prompts) живёт в разделе
+ * Devin, и ничего в ней само не запускается на Claude — по умолчанию там
+ * работает Devin/SWE, как раньше. Claude включается только явным выбором
+ * модели в меню чата. Папка при этом запоминает последнюю использованную
+ * пару «помощник+модель»: новый чат наследует её от самого свежего чата
+ * папки; обычные чаты вне папки пользуются своим глобальным выбором.
  *
  * Политика — отдельным модулем, чтобы её видели обе точки входа:
  * создание сессии (provider routes → sessions.service) и отправка сообщения
@@ -45,14 +46,38 @@ const isValidModelForProvider = (provider: LLMProvider | string, model: string):
  */
 const PINNED_SWITCHABLE_PROVIDERS: ReadonlySet<string> = new Set(['claude', 'devin']);
 
+export type ProjectBrainHint = {
+  provider: string;
+  model: string | null;
+}
+
 /**
- * Провайдер, под которым должна создаваться сессия в этом проекте:
- * привязанный, либо запрошенный клиентом, если привязки нет.
+ * Пара «помощник+модель», под которой создаётся новая сессия проекта.
+ * В привязанной папке чат наследует последнюю использованную там пару
+ * (переданную caller'ом из самого свежего чата папки): выбранный когда-то
+ * Claude продолжает работать в следующих чатах, пока не выберут Devin.
+ * Наследуемое значение вне разрешённой пары claude|devin и чужая модель
+ * (не из каталога унаследованного помощника) отбрасываются. Без истории —
+ * запрошенный клиентом провайдер (глобальный выбор composer'а).
  */
-export const resolveProjectProvider = (
+export const resolvePinnedProjectBrain = (
   projectPath: string,
-  provider: LLMProvider,
-): LLMProvider => (PINNED_PROJECT_PROVIDERS.get(projectPath) as LLMProvider | undefined) ?? provider;
+  requestedProvider: LLMProvider,
+  latest: ProjectBrainHint | null,
+): { provider: LLMProvider; model: string | null } => {
+  if (
+    !PINNED_PROJECT_PROVIDERS.has(projectPath)
+    || !latest
+    || !PINNED_SWITCHABLE_PROVIDERS.has(latest.provider)
+  ) {
+    return { provider: requestedProvider, model: null };
+  }
+  const provider = latest.provider as LLMProvider;
+  const model = latest.model && isValidModelForProvider(provider, latest.model)
+    ? latest.model
+    : null;
+  return { provider, model };
+};
 
 /**
  * Явный выбор помощника внутри чата привязанного проекта: клиент присылает

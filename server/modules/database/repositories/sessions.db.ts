@@ -432,6 +432,25 @@ export const sessionsDb = {
   },
 
   /**
+   * Последняя использованная в проекте пара «помощник+модель» — чем думал
+   * самый свежий по активности чат папки (Егор 26.10.26: закреплённая папка
+   * запоминает последнюю выбранную модель, новый чат наследует её). Чаты без
+   * записанной модели (созданные, но ещё не отправленные) пропускаются —
+   * «использованной» считается модель, с которой реально шёл ход.
+   */
+  getLatestProjectBrain(projectPath: string): { provider: string; model: string | null } | null {
+    const row = getConnection().prepare(
+      `SELECT provider, model FROM sessions
+       WHERE project_path = ?
+         AND provider IN ('claude', 'devin')
+         AND model IS NOT NULL AND model <> ''
+       ORDER BY updated_at DESC
+       LIMIT 1`
+    ).get(projectPath) as { provider: string; model: string | null } | undefined;
+    return row ?? null;
+  },
+
+  /**
    * Прибивает devin-чат к корпоративному каналу (devin_connections.id).
    * Ставится рантаймом в момент session/new и при resume: канал чата не
    * меняется — sessions.db живёт внутри каталога канала.
