@@ -173,10 +173,19 @@ export default function ProviderSelectionEmptyState({
     || selectedProject?.displayName === "Промпты";
   const devinOnly = useSelectedChatProvider() === "devin" && !isPromptsFolder;
   const visibleProviderTabs = useMemo(
-    () => PROVIDER_META.filter((p) => (devinOnly
-      ? p.id === "devin"
-      : p.id !== "devin" || providerModelsLoading || providerModelCatalog[p.id] !== undefined)),
-    [providerModelCatalog, providerModelsLoading, devinOnly],
+    () => PROVIDER_META.filter((p) => {
+      // Папка «Промпты»: только живые мозги этого контура — Devin и Claude.
+      // Провайдеры без рабочего доступа (Codex выключен, у Cursor/OpenCode
+      // нет ключей) в списке не нужны (Егор 26.10.26: «лишних, которых нет»).
+      if (isPromptsFolder) {
+        return (p.id === "devin" || p.id === "claude")
+          && (providerModelCatalog[p.id] !== undefined || providerModelsLoading);
+      }
+      return devinOnly
+        ? p.id === "devin"
+        : p.id !== "devin" || providerModelsLoading || providerModelCatalog[p.id] !== undefined;
+    }),
+    [providerModelCatalog, providerModelsLoading, devinOnly, isPromptsFolder],
   );
 
   const handleDialogOpenChange = useCallback((open: boolean) => {
