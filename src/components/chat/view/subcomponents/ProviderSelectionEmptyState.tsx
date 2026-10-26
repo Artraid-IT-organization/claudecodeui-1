@@ -188,11 +188,6 @@ export default function ProviderSelectionEmptyState({
     [providerModelCatalog, providerModelsLoading, devinOnly, isPromptsFolder],
   );
 
-  const handleDialogOpenChange = useCallback((open: boolean) => {
-    if (open) setPickerProvider(displayProvider);
-    setDialogOpen(open);
-  }, [displayProvider]);
-
   const nextTaskPrompt = t("tasks.nextTaskPrompt", {
     defaultValue: "Start the next task",
   });
@@ -224,6 +219,13 @@ export default function ProviderSelectionEmptyState({
   const displayModel =
     folderBrain?.model
     ?? (isPromptsFolder && displayProvider === 'claude' ? 'opus' : currentModel);
+
+  // Ниже displayProvider: список зависимостей читается сразу при отрисовке,
+  // выше объявления он ронял весь экран чата (26.10.26).
+  const handleDialogOpenChange = useCallback((open: boolean) => {
+    if (open) setPickerProvider(displayProvider);
+    setDialogOpen(open);
+  }, [displayProvider]);
 
   const currentModelLabel = useMemo(() => {
     const config = getModelConfig(displayProvider, providerModelCatalog);
