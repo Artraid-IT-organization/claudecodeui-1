@@ -189,9 +189,9 @@ export default function ProviderSelectionEmptyState({
   );
 
   const handleDialogOpenChange = useCallback((open: boolean) => {
-    if (open) setPickerProvider(provider);
+    if (open) setPickerProvider(displayProvider);
     setDialogOpen(open);
-  }, [provider]);
+  }, [displayProvider]);
 
   const nextTaskPrompt = t("tasks.nextTaskPrompt", {
     defaultValue: "Start the next task",
@@ -206,13 +206,32 @@ export default function ProviderSelectionEmptyState({
     devinModel,
   );
 
+  // Папка «Промпты»: карточка и вкладка показывают честный мозг нового чата —
+  // последний использованный в папке, а не глобальный выбор (Егор 26.10.26).
+  const folderBrain = useMemo(() => {
+    const sessions = (selectedProject as { sessions?: Array<Record<string, unknown>> } | null | undefined)?.sessions;
+    if (!isPromptsFolder || !sessions?.length) {
+      return null;
+    }
+    const latest = [...sessions].sort(
+      (a, b) => String(b.lastActivity ?? b.updated_at ?? '')
+        .localeCompare(String(a.lastActivity ?? a.updated_at ?? '')),
+    )[0] as { __provider?: LLMProvider; provider?: LLMProvider; model?: string | null } | undefined;
+    const brain = latest?.__provider ?? latest?.provider ?? null;
+    return brain ? { provider: brain, model: latest?.model ?? null } : null;
+  }, [isPromptsFolder, selectedProject]);
+  const displayProvider: LLMProvider = folderBrain?.provider ?? provider;
+  const displayModel =
+    folderBrain?.model
+    ?? (isPromptsFolder && displayProvider === 'claude' ? 'opus' : currentModel);
+
   const currentModelLabel = useMemo(() => {
-    const config = getModelConfig(provider, providerModelCatalog);
+    const config = getModelConfig(displayProvider, providerModelCatalog);
     const found = config.OPTIONS.find(
-      (o: { value: string; label: string }) => o.value === currentModel,
+      (o: { value: string; label: string }) => o.value === displayModel,
     );
-    return found?.label || currentModel;
-  }, [provider, currentModel, providerModelCatalog]);
+    return found?.label || displayModel;
+  }, [displayProvider, displayModel, providerModelCatalog]);
 
   const setModelForProvider = useCallback(
     (providerId: LLMProvider, modelValue: string) => {
@@ -283,13 +302,13 @@ export default function ProviderSelectionEmptyState({
               >
                 <div className="flex items-center gap-2 p-3">
                   <LLMProviderLogo
-                    provider={provider}
+                    provider={displayProvider}
                     className="h-5 w-5 shrink-0"
                   />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-1">
                       <span className="text-xs font-semibold text-foreground">
-                        {getProviderDisplayName(provider)}
+                        {getProviderDisplayName(displayProvider)}
                       </span>
                       <span className="text-xs text-muted-foreground">·</span>
                       <span className="truncate text-xs text-foreground">
@@ -392,7 +411,7 @@ export default function ProviderSelectionEmptyState({
                         </CommandItem>
                       ) : null}
                       {group.models.map((model) => {
-                        const isSelected = provider === group.id && currentModel === model.value;
+                        const isSelected = displayProvider === group.id && displayModel === model.value;
                         return (
                           <CommandItem
                             key={`${group.id}-${model.value}`}
