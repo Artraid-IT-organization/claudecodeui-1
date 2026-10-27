@@ -22,14 +22,14 @@ describe('resolvePinnedProjectBrain', () => {
     );
   });
 
-  it('без истории или при чужом наследстве оставляет запрошенного провайдера', () => {
+  it('без истории или при чужом наследстве — умолчание папки Claude Opus, а у чужого проекта запрошенный провайдер', () => {
     assert.deepEqual(
       resolvePinnedProjectBrain(PINNED_PATH, 'devin', null),
-      { provider: 'devin', model: null },
+      { provider: 'claude', model: 'opus' },
     );
     assert.deepEqual(
       resolvePinnedProjectBrain(PINNED_PATH, 'devin', { provider: 'codex', model: 'x' }),
-      { provider: 'devin', model: null },
+      { provider: 'claude', model: 'opus' },
     );
     assert.deepEqual(
       resolvePinnedProjectBrain(OTHER_PATH, 'devin', { provider: 'claude', model: 'sonnet' }),

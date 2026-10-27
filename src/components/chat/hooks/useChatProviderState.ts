@@ -1027,5 +1027,7 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     resolvePermissionModeForProvider,
     isPinnedProject,
     brainProvider,
+    pendingBrainProvider,
+    setPendingBrainProvider,
   };
 }

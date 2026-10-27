@@ -79,6 +79,8 @@ type ProviderSelectionEmptyStateProps = {
   isTaskMasterInstalled: boolean | null;
   onShowAllTasks?: (() => void) | null;
   setInput: React.Dispatch<React.SetStateAction<string>>;
+  /** Папка «Промпты»: выбор мозга в этой карточке — явный выбор хода нового чата. */
+  onPromptBrainPick?: (provider: LLMProvider) => void;
 };
 
 type ProviderGroup = {
@@ -143,6 +145,7 @@ export default function ProviderSelectionEmptyState({
   isTaskMasterInstalled,
   onShowAllTasks,
   setInput,
+  onPromptBrainPick,
 }: ProviderSelectionEmptyStateProps) {
   const { t } = useTranslation("chat");
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -259,17 +262,21 @@ export default function ProviderSelectionEmptyState({
 
   const handleModelSelect = useCallback(
     (providerId: LLMProvider, modelValue: string) => {
-      setProvider(providerId);
-      // В папке «Промпты» выбор мозга относится к этому чату: глобальную
-      // отметку аккаунта не двигаем, иначе список снова «уезжал» бы в Claude.
-      if (!isPromptsFolder) {
+      if (isPromptsFolder) {
+        // В папке «Промпты» выбор мозга относится к этому чату: глобальную
+        // отметку аккаунта не двигаем вообще (ни в память, ни в хранилище),
+        // иначе список снова «уезжал» бы в Claude. Выбор идёт в options.provider
+        // отправки — сервер создаст/переключит чат под него.
+        onPromptBrainPick?.(providerId);
+      } else {
+        setProvider(providerId);
         writeSelectedProvider(providerId);
       }
       setModelForProvider(providerId, modelValue);
       setDialogOpen(false);
       setTimeout(() => textareaRef.current?.focus(), 100);
     },
-    [isPromptsFolder, setProvider, setModelForProvider, textareaRef],
+    [isPromptsFolder, onPromptBrainPick, setProvider, setModelForProvider, textareaRef],
   );
 
   const openModelLibrary = () => {

@@ -116,6 +116,8 @@ function ChatInterface({
     selectComposerModel,
     isPinnedProject,
     brainProvider,
+    pendingBrainProvider,
+    setPendingBrainProvider,
     resolvePermissionModeForProvider,
   } = useChatProviderState({
     selectedSession,
@@ -268,7 +270,11 @@ function ChatInterface({
     selectedSession,
     currentSessionId,
     provider,
-    pinnedBrainProvider: isPinnedProject ? brainProvider : null,
+    // Папка «Промпты»: options.provider — только ЯВНЫЙ выбор человека в меню
+    // моделей (pendingBrainProvider). Записанный/глобальный мозг не шлём —
+    // сервер принял бы его за явную смену и сбил память папки на Devin
+    // (Егор 27.10.26: «чат показывает Claude, а сообщение запускает Devin»).
+    pinnedBrainProvider: isPinnedProject ? pendingBrainProvider : null,
     permissionMode,
     cyclePermissionMode,
     currentProviderModel,
@@ -696,6 +702,7 @@ function ChatInterface({
           isTaskMasterInstalled={isTaskMasterInstalled}
           onShowAllTasks={onShowAllTasks}
           setInput={setInput}
+          onPromptBrainPick={setPendingBrainProvider}
           isLoadingMoreMessages={isLoadingMoreMessages}
           hasMoreMessages={hasMoreMessages}
           onLoadOlderMessages={loadOlderMessagesNow}

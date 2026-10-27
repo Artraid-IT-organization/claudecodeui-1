@@ -57,20 +57,24 @@ export type ProjectBrainHint = {
  * (переданную caller'ом из самого свежего чата папки): выбранный когда-то
  * Claude продолжает работать в следующих чатах, пока не выберут Devin.
  * Наследуемое значение вне разрешённой пары claude|devin и чужая модель
- * (не из каталога унаследованного помощника) отбрасываются. Без истории —
- * запрошенный клиентом провайдер (глобальный выбор composer'а).
+ * (не из каталога унаследованного помощника) отбрасываются. Без пригодной
+ * истории — умолчание папки: Claude Opus (Егор 26.10.26: «дефолтом Opus,
+ * независимо от выбранного аккаунта»), а не глобальный выбор composer'а.
  */
 export const resolvePinnedProjectBrain = (
   projectPath: string,
   requestedProvider: LLMProvider,
   latest: ProjectBrainHint | null,
 ): { provider: LLMProvider; model: string | null } => {
-  if (
-    !PINNED_PROJECT_PROVIDERS.has(projectPath)
-    || !latest
-    || !PINNED_SWITCHABLE_PROVIDERS.has(latest.provider)
-  ) {
+  const pinnedProvider = PINNED_PROJECT_PROVIDERS.get(projectPath);
+  if (!pinnedProvider) {
     return { provider: requestedProvider, model: null };
+  }
+  if (!latest || !PINNED_SWITCHABLE_PROVIDERS.has(latest.provider)) {
+    return {
+      provider: pinnedProvider as LLMProvider,
+      model: PINNED_FALLBACK_MODELS.get(projectPath) ?? null,
+    };
   }
   const provider = latest.provider as LLMProvider;
   const model = latest.model && isValidModelForProvider(provider, latest.model)

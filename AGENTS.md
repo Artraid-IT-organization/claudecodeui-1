@@ -1382,15 +1382,16 @@ HTML-тегов; сообщения разделяются `---`. HTML/PDF — �
 
 Карта `PINNED_PROJECT_PROVIDERS` (`server/shared/utils.ts`) закрепляет путь
 проекта за пространством Devin. Сейчас одна запись: `/home/claude/prompts`
-(вкладка «Промпты» владельца). Смысл записи — НЕ «всегда Claude»: Егор 26.10.26
-уточнил, что в cc2 ничего само на Claude не запускается — по умолчанию папка
-работает на Devin/SWE, Claude включается только явным выбором модели в меню.
+(вкладка «Промпты» владельца).
 
 Папка запоминает последнюю использованную пару «помощник+модель»: новый чат
 наследует её от самого свежего по активности чата папки с записанной моделью
 (`sessionsDb.getLatestProjectBrain` + `resolvePinnedProjectBrain`). Выбрал
-Claude в «Промптах» — следующие чаты папки идут на Claude, пока не выбран
-Devin; обычные чаты вне папки — свой глобальный последний выбор по провайдеру.
+Devin-модель в «Промптах» — следующие чаты папки идут на ней, пока не выбран
+Claude; обычные чаты вне папки — свой глобальный последний выбор по
+провайдеру. Без пригодной истории — умолчание папки Claude + `opus`
+(`PINNED_FALLBACK_MODELS`), а не глобальный выбор composer'а (Егор 26.10.26:
+«дефолтом Opus, независимо от выбранного аккаунта»).
 
 Это НАСТРОЙКА ВЛАДЕЛЬЦА, а не общая политика: наследование применяется только
 при `scopeRoot === null` в `createAppSession` — у остальных пользователей своя
@@ -1421,8 +1422,12 @@ Devin; обычные чаты вне папки — свой глобальны
 Выбор модели в чате вкладки (25.10.26): у привязанного проекта меню моделей
 объединённое — группы Claude и Devin, у опций поле `provider` в
 `ProviderModelOption`. Клиент (`useChatProviderState`: `isPinnedProject`,
-`brainProvider`, `pendingBrainProvider`, `selectComposerModel`) шлёт мозг
-ходит в `options.provider`; сервер (`resolvePinnedSessionProvider` +
+`brainProvider`, `pendingBrainProvider`, `selectComposerModel`) шлёт в
+`options.provider` ТОЛЬКО явный выбор человека (`pendingBrainProvider` —
+модель чужой группы в меню чата или `onPromptBrainPick` из карточки нового
+чата). Записанный/глобальный мозг не шлём: сервер принимал его за явную
+смену и сбивал claude-чат папки на devin при отправке (Егор 27.10.26).
+Сервер (`resolvePinnedSessionProvider` +
 переключение в `handleChatSend` до runProviderTurn) принимает только пару
 claude|devin, ретаргетит сессию (`retargetSessionProvider` обнуляет
 provider_session_id) и сбрасывает effort — модель сохраняется, это свежий

@@ -50,6 +50,8 @@ interface ChatMessagesPaneProps {
   isTaskMasterInstalled: boolean | null;
   onShowAllTasks?: (() => void) | null;
   setInput: Dispatch<SetStateAction<string>>;
+  /** Папка «Промпты»: явный выбор мозга в карточке нового чата → options.provider при отправке. */
+  onPromptBrainPick?: (provider: LLMProvider) => void;
   isLoadingMoreMessages: boolean;
   hasMoreMessages: boolean;
   /** Подгрузить порцию старых сообщений — нажатие на строку «Показано N из M». */
@@ -129,6 +131,7 @@ function ChatMessagesPane({
   isTaskMasterInstalled,
   onShowAllTasks,
   setInput,
+  onPromptBrainPick,
   isLoadingMoreMessages,
   hasMoreMessages,
   onLoadOlderMessages,
@@ -362,6 +365,7 @@ function ChatMessagesPane({
           isTaskMasterInstalled={isTaskMasterInstalled}
           onShowAllTasks={onShowAllTasks}
           setInput={setInput}
+          onPromptBrainPick={onPromptBrainPick}
         />
       ) : (
         <>
