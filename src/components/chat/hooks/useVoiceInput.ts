@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { authenticatedFetch } from '../../../utils/api';
-import { transcribeVoice } from '../../../lib/voiceApi';
+import {
+  transcribeVoice,
+  voiceStreamAbort,
+  voiceStreamChunk,
+  voiceStreamFinish,
+  voiceStreamingAvailable,
+} from '../../../lib/voiceApi';
 import {
   acknowledgeTranscript,
   deliverTranscript,
@@ -157,6 +163,12 @@ export function useVoiceInput(
   // Номер записи в очереди телефона — нужен requestSend, чтобы догнать флаг
   // «отправить сразу», выставленный уже после упаковки.
   const pendingIdRef = useRef<string | null>(null);
+  // Потоковая отгрузка кусков на сервер во время записи: после отпускания
+  // остаётся только распознавание, а не дорога всего файла (27.10.26).
+  // Цепочка строго последовательна — сервер клеит куски по порядку прихода.
+  const streamSidRef = useRef<string | null>(null);
+  const streamAliveRef = useRef(false);
+  const streamChainRef = useRef<Promise<void>>(Promise.resolve());
 
   const releaseScreen = () => {
     const lock = wakeLockRef.current;
@@ -239,6 +251,11 @@ export function useVoiceInput(
       recorderRef.current = rec;
       chunksRef.current = [];
       sendRef.current = false;
+      // Стримим только склеиваемые контейнеры (webm/ogg): куски mp4 от
+      // MediaRecorder конкатенацией в валидный файл не собираются.
+      streamAliveRef.current = voiceStreamingAvailable() && /webm|ogg/.test(mimeType || '');
+      streamSidRef.current = streamAliveRef.current ? newRecordingId() : null;
+      streamChainRef.current = Promise.resolve();
       const recId = newRecordingId();
       recordingIdRef.current = recId;
       markRecordingActive(recId);
@@ -254,6 +271,20 @@ export function useVoiceInput(
         if (e.data.size > 0) {
           chunksRef.current.push(e.data);
           void saveChunk(recId, seq++, e.data, recordingTargetRef.current);
+          if (streamAliveRef.current && streamSidRef.current) {
+            const sid = streamSidRef.current;
+            const chunk = e.data;
+            streamChainRef.current = streamChainRef.current
+              .then(() => voiceStreamChunk(sid, chunk))
+              .then((r) => {
+                if (!r.ok) throw new Error(`stream-chunk ${r.status}`);
+              })
+              .catch((err) => {
+                // Стрим умер — запись не теряем: в конце уйдёт файл целиком.
+                console.warn('[voice] stream chunk failed, will upload whole file', err);
+                streamAliveRef.current = false;
+              });
+          }
           chunkCountRef.current += 1;
           // Пауза кончилась: досчитываем её в потерянное время и снимаем флаг.
           if (pauseSinceRef.current !== null) {
@@ -355,11 +386,21 @@ export function useVoiceInput(
         if (cancelledRef.current) {
           // Экран ушёл с записи (смена чата, закрытие): ждать ответа некому, очередь дошлёт сама.
           if (pendingId) void flushOutbox();
+          if (streamSidRef.current) {
+            voiceStreamAbort(streamSidRef.current);
+            streamSidRef.current = null;
+            streamAliveRef.current = false;
+          }
           reportVoiceProbe({ outcome: 'cancelled', durMs, chunks: chunkCountRef.current, bytes: blob.size, lostMs, mime: type });
           return;
         }
         if (blob.size < 800) {
           sendRef.current = false;
+          if (streamSidRef.current) {
+            voiceStreamAbort(streamSidRef.current);
+            streamSidRef.current = null;
+            streamAliveRef.current = false;
+          }
           setState('idle');
           // «Короткая» запись после минуты диктовки - это не человек помолчал,
           // а iOS приглушил микрофон (экран погас, приложение свёрнуто): куски
@@ -380,14 +421,30 @@ export function useVoiceInput(
         let keptInQueue = false;
         try {
           const ext = type.includes('mp4') ? 'm4a' : type.includes('ogg') ? 'ogg' : 'webm';
-          let res: Response;
+          const meta = {
+            recId,
+            sessionId: recordingTargetRef.current?.sessionId,
+            scope: recordingTargetRef.current?.scope,
+            send: sendRef.current,
+          };
+          let res: Response | null = null;
           try {
-            res = await transcribeVoice(blob, `recording.${ext}`, abort.signal, {
-              recId,
-              sessionId: recordingTargetRef.current?.sessionId,
-              scope: recordingTargetRef.current?.scope,
-              send: sendRef.current,
-            });
+            const sid = streamSidRef.current;
+            streamSidRef.current = null;
+            if (sid && streamAliveRef.current) {
+              // Дожимаем цепочку кусков — последний кусок пришёл прямо перед onstop.
+              await streamChainRef.current;
+              if (streamAliveRef.current) {
+                const finishRes = await voiceStreamFinish(sid, meta, abort.signal);
+                // Не-ok ответ (сессия на сервере потерялась и т.п.) — догружаем
+                // файл целиком, запись не теряем.
+                if (finishRes.ok) res = finishRes;
+              }
+            } else if (sid) {
+              // Стрим умер по дороге — серверную сессию отпускаем, файл уйдёт целиком.
+              voiceStreamAbort(sid);
+            }
+            if (!res) res = await transcribeVoice(blob, `recording.${ext}`, abort.signal, meta);
           } catch (e) {
             keptInQueue = isConnectionFailure(e);
             throw e;
