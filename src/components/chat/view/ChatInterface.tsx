@@ -275,6 +275,7 @@ function ChatInterface({
     // сервер принял бы его за явную смену и сбил память папки на Devin
     // (Егор 27.10.26: «чат показывает Claude, а сообщение запускает Devin»).
     pinnedBrainProvider: isPinnedProject ? pendingBrainProvider : null,
+    sessionCreateProvider: feedProvider,
     permissionMode,
     cyclePermissionMode,
     currentProviderModel,

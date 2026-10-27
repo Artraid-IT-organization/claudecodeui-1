@@ -124,6 +124,10 @@ interface UseChatComposerStateArgs {
   provider: LLMProvider;
   /** Мозг хода в чате привязанной вкладки («Промпты»); у остальных — null. */
   pinnedBrainProvider?: LLMProvider | null;
+  /** Провайдер, под которым создаётся новая сессия в записи очереди: у
+   *  привязанной вкладки — мозг папки/явный выбор, не глобальный provider,
+   *  иначе свежий Claude-чат вспыхивал Devin до синхронизации сессии. */
+  sessionCreateProvider?: LLMProvider | null;
   permissionMode: PermissionMode | string;
   cyclePermissionMode: () => void;
   resolvePermissionModeForProvider: (provider: LLMProvider, requestedMode: PermissionMode | string) => PermissionMode;
@@ -396,6 +400,7 @@ export function useChatComposerState({
   currentSessionId,
   provider,
   pinnedBrainProvider = null,
+  sessionCreateProvider = null,
   permissionMode,
   cyclePermissionMode,
   resolvePermissionModeForProvider,
@@ -1153,7 +1158,7 @@ export function useChatComposerState({
         content,
         attachments: uploadedAttachments,
         options: buildSendOptions(content),
-        provider,
+        provider: sessionCreateProvider ?? provider,
         projectPath: (selectedProject?.fullPath || selectedProject?.path || '') as string,
         summary: getNotificationSessionSummary(null, content),
         sessionId: null,

@@ -1427,6 +1427,11 @@ Claude; обычные чаты вне папки — свой глобальн�
 модель чужой группы в меню чата или `onPromptBrainPick` из карточки нового
 чата). Записанный/глобальный мозг не шлём: сервер принимал его за явную
 смену и сбивал claude-чат папки на devin при отправке (Егор 27.10.26).
+`brainProvider` для ещё не созданного чата папки = мозг самого свежего чата
+папки (`pinnedFolderBrain` из `selectedProject.sessions`, та же логика что
+у сервера), а не глобальный выбор — иначе лента вспыхивала Devin до
+синхронизации сессии. Провайдер записи очереди нового чата —
+`sessionCreateProvider` (feedProvider), не глобальный.
 Сервер (`resolvePinnedSessionProvider` +
 переключение в `handleChatSend` до runProviderTurn) принимает только пару
 claude|devin, ретаргетит сессию (`retargetSessionProvider` обнуляет

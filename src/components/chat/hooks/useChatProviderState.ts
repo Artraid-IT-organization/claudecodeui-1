@@ -604,11 +604,33 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     setPendingBrainProvider(null);
   }, [selectedSessionId, selectedSessionProvider]);
 
+  // Мозг папки «Промпты» для ЕЩЁ НЕ созданного чата: последний использованный
+  // в папке (как решает серверная политика). Без него новый чат вспыхивал
+  // глобальным Devin и мигал на Claude после синхронизации сессии (Егор 27.10.26).
+  const pinnedFolderBrain = useMemo(() => {
+    if (!isPinnedProject) {
+      return null;
+    }
+    const sessions = (_selectedProject as { sessions?: Array<Record<string, unknown>> } | null | undefined)?.sessions;
+    if (!sessions?.length) {
+      return null;
+    }
+    const latest = [...sessions].sort(
+      (a, b) => String(b.lastActivity ?? b.updated_at ?? '')
+        .localeCompare(String(a.lastActivity ?? a.updated_at ?? '')),
+    )[0] as { __provider?: LLMProvider; provider?: LLMProvider; model?: string | null } | undefined;
+    const brain = latest?.__provider ?? latest?.provider ?? null;
+    return brain ? { provider: brain, model: latest?.model ?? null } : null;
+  }, [isPinnedProject, _selectedProject]);
+
   // Мозг, для которого строятся модель/усилие/список моделей: у привязанной
-  // вкладки — записанный сессией (или отложенный выбор), у остальных чатов —
-  // выбранный помощник как раньше.
+  // вкладки — записанный сессией (или отложенный выбор, или мозг папки для
+  // нового чата), у остальных чатов — выбранный помощник как раньше.
   const brainProvider: LLMProvider = isPinnedProject
-    ? (pendingBrainProvider ?? selectedSessionProvider)
+    ? (pendingBrainProvider
+        ?? (selectedSession ? selectedSessionProvider : null)
+        ?? pinnedFolderBrain?.provider
+        ?? selectedSessionProvider)
     : provider;
   const selectedSessionKey = selectedSessionId
     ? getSessionSelectionKey(selectedSessionProvider, selectedSessionId)
@@ -827,12 +849,20 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
   const sessionModelFitsBrain = sessionModel
     && (!providerModelCatalog[brainProvider]
       || providerModelCatalog[brainProvider].OPTIONS.some((option) => option.value === sessionModel));
+  // Модель мозга папки для нового чата «Промптов» — та же, что запишет
+  // сервер: последняя у чатов папки, если она есть в каталоге этого мозга.
+  const folderModelFitsBrain = Boolean(pinnedFolderBrain)
+    && pinnedFolderBrain!.provider === brainProvider
+    && Boolean(pinnedFolderBrain!.model)
+    && (!providerModelCatalog[brainProvider]
+      || providerModelCatalog[brainProvider]!.OPTIONS.some((option) => option.value === pinnedFolderBrain!.model));
   const currentProviderModel = pendingBrainProvider
     // Отложенный выбор мозга (вкладка «Промпты»): чип и отправка показывают
     // модель ВЫБРАННОГО помощника — записанная у сессии модель относится к
     // текущему мозгу и показывала бы чужое значение до ближайшего сообщения.
     ? providerModels[pendingBrainProvider]
     : (sessionModelFitsBrain ? sessionModel : null)
+      ?? (folderModelFitsBrain ? pinnedFolderBrain!.model! : null)
       ?? (isPinnedProject && brainProvider === 'claude'
         ? 'opus'
         : providerModels[brainProvider]);
