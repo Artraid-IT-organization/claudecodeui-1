@@ -290,7 +290,7 @@ export default function ChatExportMenu({
                 className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-foreground transition-colors hover:bg-muted"
               >
                 <Copy className="h-4 w-4" />
-                <span>{t('export.copyToClipboard', { defaultValue: 'Копировать (.md)' })}</span>
+                <span>{t('export.copyToClipboard', { defaultValue: 'Копировать (.txt)' })}</span>
               </button>
             )}
             {totalCount > loadedCount && !isPreparing && (
