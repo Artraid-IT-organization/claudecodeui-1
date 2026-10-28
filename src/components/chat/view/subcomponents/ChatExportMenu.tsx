@@ -185,21 +185,48 @@ export default function ChatExportMenu({
   // буфере обмена, дальше вставляется в любой чат. Положить в буфер именно
   // файл сайту iOS не даёт (ограничение системы), поэтому копируется текст
   // .md-выгрузки. Не скопировалось — отдаём файл как раньше, не теряем.
+  //
+  // iOS пускает запись в буфер только по свежему касанию, а текст собирается
+  // секунды (поток всей переписки) — запись после await отклонялась, и пункт
+  // превращался в обычное скачивание. Поэтому write() вызываем синхронно с
+  // ОБЕЩАНИЕМ текста: система докопирует сама, когда сборка закончится.
   const handleCopyToClipboard = async () => {
     if (isPreparing) return;
     setIsPreparing(true);
     try {
-      const { messages, filename } = await collectExport();
-      const content = exportToMarkdown(messages, sessionTitle);
+      const textPromise = collectExport().then((collected) =>
+        exportToMarkdown(collected.messages, sessionTitle),
+      );
+
+      const nav = navigator as Navigator & {
+        clipboard?: { write?: (items: unknown[]) => Promise<void> };
+      };
+      const ItemCtor = (window as { ClipboardItem?: new (items: Record<string, unknown>) => unknown })
+        .ClipboardItem;
+
+      let copied = false;
+      if (nav.clipboard?.write && ItemCtor) {
+        try {
+          const blobPromise = textPromise.then((text) => new Blob([text], { type: 'text/plain' }));
+          await nav.clipboard.write([new ItemCtor({ 'text/plain': blobPromise })]);
+          copied = true;
+        } catch {
+          copied = false;
+        }
+      }
+      if (!copied) {
+        copied = await copyTextToClipboard(await textPromise);
+      }
       setIsOpen(false);
-      if (await copyTextToClipboard(content)) {
+      if (copied) {
         setDidCopyText(true);
         if (copyFeedbackTimerRef.current !== null) {
           window.clearTimeout(copyFeedbackTimerRef.current);
         }
         copyFeedbackTimerRef.current = window.setTimeout(() => setDidCopyText(false), 1600);
       } else {
-        downloadMarkdown(messages, `${filename}.md`, sessionTitle);
+        const { messages, filename: name } = await collectExport();
+        downloadMarkdown(messages, `${name}.md`, sessionTitle);
       }
     } finally {
       setIsPreparing(false);
