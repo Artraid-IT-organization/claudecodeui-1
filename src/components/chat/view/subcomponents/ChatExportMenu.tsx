@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import { Check, Download, FileJson, FileText, Loader2, Share2 } from 'lucide-react';
+import { Check, Copy, Download, FileJson, FileText, Loader2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import type { NormalizedMessage } from '../../../../stores/useSessionStore';
@@ -128,7 +128,6 @@ export default function ChatExportMenu({
   const [isOpen, setIsOpen] = useState(false);
   const [isPreparing, setIsPreparing] = useState(false);
   const [didCopyText, setDidCopyText] = useState(false);
-  const [readyShareFile, setReadyShareFile] = useState<File | null>(null);
   const copyFeedbackTimerRef = useRef<number | null>(null);
 
   if (loadedCount === 0) {
@@ -182,99 +181,26 @@ export default function ChatExportMenu({
     }
   };
 
-  // Четвёртый пункт (Егор 28.10.26): на телефоне «Markdown» только скачивает
-  // файл, а дальше — «поделиться → ещё → копировать» вручную. Здесь нажатие
-  // открывает шторку отправки уже с готовым .md — из неё файл можно и
-  // скопировать, и сразу кинуть в нужное приложение.
-  //
-  // Файл собирается долго (поток всей переписки), а share() браузер пускает
-  // только по свежему касанию. Поэтому: (1) сразу пробуем share() с ОБЕЩАНИЕМ
-  // файла — где поддерживается (Chromium), шторка ждёт сборку сама и хватит
-  // одного нажатия; (2) где обещания нет — дожидаемся файл и пункт превращается
-  // в «Файл готов — отправить»: второй тап вызывает share() по свежему жесту
-  // с готовым файлом — на iPhone срабатывает всегда; (3) где шаринга файлов
-  // нет вообще — кладём текст в буфер, в последнюю очередь скачиваем.
-  const tryShare = async (files: File[]): Promise<'shared' | 'aborted' | 'unavailable'> => {
-    const nav = navigator as Navigator & {
-      share?: (data: { files?: File[] }) => Promise<void>;
-    };
-    try {
-      await nav.share!({ files });
-      return 'shared';
-    } catch (err) {
-      return (err as DOMException)?.name === 'AbortError' ? 'aborted' : 'unavailable';
-    }
-  };
-
-  const shareFilesSupported = (): boolean => {
-    const nav = navigator as Navigator & {
-      share?: (data: { files?: File[] }) => Promise<void>;
-      canShare?: (data: { files?: File[] }) => boolean;
-    };
-    if (typeof nav.share !== 'function') return false;
-    if (typeof nav.canShare !== 'function') return true;
-    try {
-      return nav.canShare({ files: [new File([], 'probe.md', { type: 'text/markdown' })] });
-    } catch {
-      return true;
-    }
-  };
-
-  const fallBackToClipboard = async (file: File) => {
-    setIsOpen(false);
-    if (await copyTextToClipboard(await file.text())) {
-      setDidCopyText(true);
-      if (copyFeedbackTimerRef.current !== null) {
-        window.clearTimeout(copyFeedbackTimerRef.current);
-      }
-      copyFeedbackTimerRef.current = window.setTimeout(() => setDidCopyText(false), 1600);
-    } else {
-      const { messages, filename } = await collectExport();
-      downloadMarkdown(messages, `${filename}.md`, sessionTitle);
-    }
-  };
-
-  const handleShareFile = async () => {
+  // Четвёртый пункт (Егор 28.10.26): одно нажатие — вся переписка текстом в
+  // буфере обмена, дальше вставляется в любой чат. Положить в буфер именно
+  // файл сайту iOS не даёт (ограничение системы), поэтому копируется текст
+  // .md-выгрузки. Не скопировалось — отдаём файл как раньше, не теряем.
+  const handleCopyToClipboard = async () => {
     if (isPreparing) return;
-
-    // Файл уже собран: свежий жест — share() сработает наверняка.
-    if (readyShareFile) {
-      const outcome = await tryShare([readyShareFile]);
-      if (outcome === 'unavailable') {
-        const file = readyShareFile;
-        setReadyShareFile(null);
-        await fallBackToClipboard(file);
-      } else {
-        setReadyShareFile(null);
-        setIsOpen(false);
-      }
-      return;
-    }
-
     setIsPreparing(true);
     try {
-      const filePromise = (async () => {
-        const { messages, filename } = await collectExport();
-        const content = exportToMarkdown(messages, sessionTitle);
-        return new File([content], `${filename}.md`, { type: 'text/markdown' });
-      })();
-
-      if (shareFilesSupported()) {
-        // Потолок ожидания: местами share() с обещанием зависает без исхода —
-        // тогда просто переходим на второй тап.
-        const outcome = await Promise.race([
-          tryShare([filePromise as unknown as File]),
-          new Promise<'pending'>((resolve) => window.setTimeout(() => resolve('pending'), 8000)),
-        ]);
-        if (outcome !== 'unavailable' && outcome !== 'pending') {
-          setIsOpen(false);
-          return;
+      const { messages, filename } = await collectExport();
+      const content = exportToMarkdown(messages, sessionTitle);
+      setIsOpen(false);
+      if (await copyTextToClipboard(content)) {
+        setDidCopyText(true);
+        if (copyFeedbackTimerRef.current !== null) {
+          window.clearTimeout(copyFeedbackTimerRef.current);
         }
-        setReadyShareFile(await filePromise);
-        return;
+        copyFeedbackTimerRef.current = window.setTimeout(() => setDidCopyText(false), 1600);
+      } else {
+        downloadMarkdown(messages, `${filename}.md`, sessionTitle);
       }
-
-      await fallBackToClipboard(await filePromise);
     } finally {
       setIsPreparing(false);
     }
@@ -333,15 +259,11 @@ export default function ChatExportMenu({
             {!isPreparing && (
               <button
                 type="button"
-                onClick={() => void handleShareFile()}
+                onClick={() => void handleCopyToClipboard()}
                 className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-foreground transition-colors hover:bg-muted"
               >
-                <Share2 className="h-4 w-4" />
-                <span>
-                  {readyShareFile
-                    ? t('export.shareFileReady', { defaultValue: 'Файл готов — отправить' })
-                    : t('export.shareFile', { defaultValue: 'Поделиться файлом (.md)' })}
-                </span>
+                <Copy className="h-4 w-4" />
+                <span>{t('export.copyToClipboard', { defaultValue: 'Копировать в буфер (.md)' })}</span>
               </button>
             )}
             {totalCount > loadedCount && !isPreparing && (
