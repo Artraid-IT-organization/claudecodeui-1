@@ -25,9 +25,9 @@
 
 For every task that creates, modifies, refactors, or reviews backend code under `server/`, load and follow `$backend-module-standards` from `.agents/skills/backend-module-standards/SKILL.md`. Apply it only to backend code; do not impose those architecture rules on the frontend.
 
-## Мониторинг подключения MacBook (`server/modules/mac-status`, 19.10.26)
+## Мониторинг российского выхода (`server/modules/mac-status`, 19.10.26)
 
-MacBook владельца поднимает SSH SOCKS5-туннель (`ru-exit.command`) → на сервере появляется прокси 127.0.0.1:1080. Модуль `mac-status` каждые 15 с (конфигурируется `MAC_STATUS_INTERVAL_MS`) проверяет SOCKS5, получает через него публичный IP и при смене IP кэширует страну и VPN-классификацию. Статус содержит `connected` и отдельный fail-closed признак `searchReady`: поиск разрешён только при ожидаемой стране `RU` и `isVpn=false`; ошибка внешней классификации оставляет туннель подключённым, но блокирует поиск.
+Домашняя коробка владельца (GL.iNet GL-MT300N-V2, autossh, до 02.11.26 — MacBook с `ru-exit.command`) поднимает SSH SOCKS5-туннель → на сервере появляется прокси 127.0.0.1:1080. Модуль `mac-status` каждые 15 с (конфигурируется `MAC_STATUS_INTERVAL_MS`) проверяет SOCKS5, получает через него публичный IP и при смене IP кэширует страну и VPN-классификацию. Статус содержит `connected` и отдельный fail-closed признак `searchReady`: поиск разрешён только при ожидаемой стране `RU` и `isVpn=false`; ошибка внешней классификации оставляет туннель подключённым, но блокирует поиск.
 
 Модуль:
 
