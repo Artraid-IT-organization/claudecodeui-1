@@ -250,6 +250,19 @@ export function createMacStatusService(
     }
   }
 
+  // Комментарий-пинг раз в интервал проверки: без него поток молчит между
+  // сменами статуса и промежуточный прокси рвёт «тихое» соединение —
+  // индикатор уходил в linkLost при живом туннеле.
+  function broadcastKeepalive(): void {
+    for (const client of sseClients) {
+      try {
+        client.write(`: ka\n\n`);
+      } catch {
+        // Тот же случай: клиент отвалится по close.
+      }
+    }
+  }
+
   function updateStatus(next: MacStatus): void {
     const changed = currentStatus.connected !== next.connected
       || currentStatus.searchReady !== next.searchReady
@@ -304,6 +317,7 @@ export function createMacStatusService(
       });
     } finally {
       checking = false;
+      broadcastKeepalive();
     }
   }
 
