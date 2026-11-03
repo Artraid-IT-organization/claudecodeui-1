@@ -35,7 +35,7 @@ export default function MainContentHeader({
           него группу чата и архив: это нужно каждый день, а пресеты — редко,
           и включаются теперь в настройках.
         */}
-        {activeTab === 'chat' && !terminalTitle && <ChatPromptsMenu />}
+        {activeTab === 'chat' && !terminalTitle && !isMobile && <ChatPromptsMenu />}
         {activeTab === 'chat' && !terminalTitle && (
           <ChatGroupSelector
             sessionId={selectedSession?.id ?? null}

@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { FileText, Zap } from 'lucide-react';
 
 import { ActionMenu, type ActionMenuItem } from '../../../../shared/view/ui';
@@ -17,8 +17,12 @@ import { insertComposerText } from '../../../chat/utils/composerInsert';
  * «добавь промпт X» — одна правка файла, интерфейса редактирования нет.
  * Подгружаем список при каждом открытии: свежая правка файла видна сразу.
  *
- * На телефоне кнопки не видно вовсе (hidden md:inline-flex): на 390px шапка
- * уже забита, а сценарий «промпт + ссылка» живёт на компьютере.
+ * На телефоне кнопки не видно вовсе. Прячем по сенсорному указателю
+ * (pointer: coarse), а не только по ширине: в desktop-режиме Safari и на
+ * PWA вьюпорт у телефона десктопный (≥768px), и одна медиа-ширина кнопку
+ * показывала — она вытесняла из шапки «Без группы» и название чата
+ * (Егор 03.11.26). Плюс hidden md:inline-flex как запасной рубеж и
+ * !isMobile у вызова в шапке.
  */
 
 type SavedPrompt = {
@@ -34,6 +38,17 @@ async function readJson(response: Response) {
 
 export default function ChatPromptsMenu() {
   const [prompts, setPrompts] = useState<SavedPrompt[]>([]);
+  // Телефон/планшет — coarse независимо от режима «десктопная версия сайта».
+  const [isCoarsePointer, setIsCoarsePointer] = useState<boolean>(
+    () => typeof window !== 'undefined' && window.matchMedia('(pointer: coarse)').matches,
+  );
+
+  useEffect(() => {
+    const mq = window.matchMedia('(pointer: coarse)');
+    const onChange = () => setIsCoarsePointer(mq.matches);
+    mq.addEventListener?.('change', onChange);
+    return () => mq.removeEventListener?.('change', onChange);
+  }, []);
 
   const loadPrompts = useCallback(async () => {
     try {
@@ -43,6 +58,8 @@ export default function ChatPromptsMenu() {
       console.error('[prompts] список промптов не прочитан:', error);
     }
   }, []);
+
+  if (isCoarsePointer) return null;
 
   const items: ActionMenuItem[] = prompts.length
     ? prompts.map((prompt, index) => ({
