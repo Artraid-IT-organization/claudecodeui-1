@@ -47,6 +47,7 @@ import { createAgentModule } from './modules/agent/index.js';
 import projectModuleRoutes from './modules/projects/projects.routes.js';
 import notificationRoutes from './modules/notifications/notifications.routes.js';
 import { promptPresetsRoutes } from './modules/presets/index.js';
+import { savedPromptsRoutes } from './modules/saved-prompts/index.js';
 import { chatGroupsRoutes } from './modules/chat-groups/index.js';
 import { handoffRoutes } from './modules/handoff/index.js';
 import { openTabsRoutes } from './modules/open-tabs/index.js';
@@ -263,6 +264,7 @@ app.use('/api/system', withUserRuntimeContext, systemRoutes);
 
 app.use('/api/notifications', withUserRuntimeContext, notificationRoutes);
 app.use('/api/prompt-presets', withUserRuntimeContext, promptPresetsRoutes);
+app.use('/api/saved-prompts', withUserRuntimeContext, savedPromptsRoutes);
 app.use('/api/chat-groups', withUserRuntimeContext, chatGroupsRoutes);
 // «Продолжить в новом чате»: выжимка главного из длинного чата.
 app.use('/api/handoff', withUserRuntimeContext, handoffRoutes);

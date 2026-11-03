@@ -388,6 +388,9 @@ export const api = {
   // (spinner/toast) rather than something callers need to apply themselves.
   // Группы чатов: список (свежие сверху), создание, группа одного чата.
   chatGroups: () => authenticatedFetch('/api/chat-groups'),
+  // Сохранённые промпты для вставки в поле ввода (файл saved-prompts.json
+  // рядом с базой инстанса; пополняется правкой файла, без UI).
+  savedPrompts: () => authenticatedFetch('/api/saved-prompts'),
   createChatGroup: (name, keywords = []) =>
     authenticatedFetch('/api/chat-groups', {
       method: 'POST',
