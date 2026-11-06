@@ -17,12 +17,13 @@ import { insertComposerText } from '../../../chat/utils/composerInsert';
  * «добавь промпт X» — одна правка файла, интерфейса редактирования нет.
  * Подгружаем список при каждом открытии: свежая правка файла видна сразу.
  *
- * На телефоне кнопки не видно вовсе. Прячем по сенсорному указателю
- * (pointer: coarse), а не только по ширине: в desktop-режиме Safari и на
- * PWA вьюпорт у телефона десктопный (≥768px), и одна медиа-ширина кнопку
- * показывала — она вытесняла из шапки «Без группы» и название чата
- * (Егор 03.11.26). Плюс hidden md:inline-flex как запасной рубеж и
- * !isMobile у вызова в шапке.
+ * На телефоне кнопка показывается ТОЛЬКО в новом чате (Егор 03.11.26):
+ * там «Без группы» всё равно не появляется — пустой чат в группу не
+ * положишь — а промпты человек вписывает именно в начале. Как только чат
+ * завёлся, «Промпты» уступают место «Без группы». Признак телефона —
+ * сенсорный указатель (pointer: coarse): у телефона в desktop-режиме
+ * Safari/PWA вьюпорт широкий, и ширина не отличает его от компьютера.
+ * Плюс у вызова в шапке рубеж по isMobile.
  */
 
 type SavedPrompt = {
@@ -36,7 +37,12 @@ async function readJson(response: Response) {
   return json;
 }
 
-export default function ChatPromptsMenu() {
+type Props = {
+  /** Открыт ли уже существующий чат (не новый, не пустой). */
+  hasSession: boolean;
+};
+
+export default function ChatPromptsMenu({ hasSession }: Props) {
   const [prompts, setPrompts] = useState<SavedPrompt[]>([]);
   // Телефон/планшет — coarse независимо от режима «десктопная версия сайта».
   const [isCoarsePointer, setIsCoarsePointer] = useState<boolean>(
@@ -59,7 +65,9 @@ export default function ChatPromptsMenu() {
     }
   }, []);
 
-  if (isCoarsePointer) return null;
+  // На сенсорном устройстве при открытом чате места в шапке нет — там
+  // работает «Без группы»; «Промпты» нужны телефону в новом чате.
+  if (isCoarsePointer && hasSession) return null;
 
   const items: ActionMenuItem[] = prompts.length
     ? prompts.map((prompt, index) => ({
@@ -86,7 +94,7 @@ export default function ChatPromptsMenu() {
       ariaLabel="Сохранённые промпты"
       size="sm"
       variant="ghost"
-      className="hidden md:inline-flex"
+      className="inline-flex"
       triggerClassName="h-7 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground"
       // Меню поверх всего, не внутри полупрозрачной шапки — как у группы чата.
       portal
