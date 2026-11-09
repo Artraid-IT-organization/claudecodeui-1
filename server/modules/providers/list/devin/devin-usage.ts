@@ -80,7 +80,22 @@ export type DevinTokenUsage = {
 
 type DevinSessionRow = { model: string | null; main_chain_id: number | null };
 type DevinLinkRow = { node_id: number; parent_node_id: number | null };
-type DevinMessageRow = { row_id: number; node_id: number; chat_message: string };
+/**
+ * Скан metrics — только скаляры json_extract, БЕЗ тела chat_message: узел
+ * несёт снимок контекста, у длинной беседы это сотни МБ, и `.all()` по ним
+ * укладывал процесс в OOM (09.11.26). Все поля, что читал разбор, достаются
+ * теми же путями `$.metadata.metrics.*` и `$.role`.
+ */
+type DevinMessageRow = {
+  row_id: number;
+  node_id: number;
+  role: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cache_read_tokens: number | null;
+  cache_creation_tokens: number | null;
+  request_id: string | null;
+};
 
 const scanStates = new Map<string, DevinScanState>();
 const SCAN_STATE_LIMIT = 64;
@@ -168,25 +183,20 @@ function contextOf(parts: DevinUsageParts): number {
  * ccusage для Claude: дубли ответа несут одинаковый счёт).
  */
 function applyDevinNode(state: DevinScanState, row: DevinMessageRow): void {
-  const message = readJsonRecord(row.chat_message);
-  if (!message || readOptionalString(message.role) !== 'assistant') {
-    return;
-  }
-  const metrics = readObjectRecord(readObjectRecord(message.metadata)?.metrics);
-  if (!metrics) {
+  if (row.role !== 'assistant') {
     return;
   }
   const parts: DevinUsageParts = {
-    input: readUsageNumber(metrics.input_tokens),
-    output: readUsageNumber(metrics.output_tokens),
-    cacheRead: readUsageNumber(metrics.cache_read_tokens),
-    cacheCreation: readUsageNumber(metrics.cache_creation_tokens),
+    input: readUsageNumber(row.input_tokens),
+    output: readUsageNumber(row.output_tokens),
+    cacheRead: readUsageNumber(row.cache_read_tokens),
+    cacheCreation: readUsageNumber(row.cache_creation_tokens),
   };
   if (contextOf(parts) + parts.output === 0) {
     return;
   }
 
-  const requestId = readOptionalString(metrics.request_id)
+  const requestId = (typeof row.request_id === 'string' && row.request_id.length > 0 ? row.request_id : null)
     ?? `node:${row.node_id}`;
   const previous = state.requests.get(requestId);
   const nodeIds = previous ? [...previous.nodeIds] : [];
@@ -275,7 +285,14 @@ export function readDevinTokenUsage(
     }
     if (maxRowId > state.maxRowId) {
       const rows = db
-        .prepare('SELECT row_id, node_id, chat_message FROM message_nodes WHERE session_id = ? AND row_id > ? ORDER BY row_id')
+        .prepare(`SELECT row_id, node_id,
+                   json_extract(chat_message, '$.role') AS role,
+                   json_extract(chat_message, '$.metadata.metrics.input_tokens') AS input_tokens,
+                   json_extract(chat_message, '$.metadata.metrics.output_tokens') AS output_tokens,
+                   json_extract(chat_message, '$.metadata.metrics.cache_read_tokens') AS cache_read_tokens,
+                   json_extract(chat_message, '$.metadata.metrics.cache_creation_tokens') AS cache_creation_tokens,
+                   json_extract(chat_message, '$.metadata.metrics.request_id') AS request_id
+                 FROM message_nodes WHERE session_id = ? AND row_id > ? ORDER BY row_id`)
         .all(providerSessionId, state.maxRowId) as DevinMessageRow[];
       for (const row of rows) {
         applyDevinNode(state, row);
