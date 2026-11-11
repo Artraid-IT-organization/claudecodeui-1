@@ -185,6 +185,7 @@ function ChatInterface({
     retryHistoryLoad,
     transcriptMissing,
     setTopSentinel,
+    isHistorySyncing,
   } = useChatSessionState({
     isActive,
     selectedProject,
@@ -705,6 +706,7 @@ function ChatInterface({
           setInput={setInput}
           onPromptBrainPick={setPendingBrainProvider}
           isLoadingMoreMessages={isLoadingMoreMessages}
+          isHistorySyncing={isHistorySyncing}
           hasMoreMessages={hasMoreMessages}
           onLoadOlderMessages={loadOlderMessagesNow}
           topSentinelRef={setTopSentinel}

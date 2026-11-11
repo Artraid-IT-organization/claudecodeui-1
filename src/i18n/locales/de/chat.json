@@ -147,6 +147,7 @@
       "description": "Stell Fragen zu deinem Code, fordere Änderungen an oder hol Hilfe bei Entwicklungsaufgaben"
     },
     "loading": {
+      "historySyncing": "Chatverlauf wird geladen…",
       "olderMessages": "Ältere Nachrichten werden geladen...",
       "sessionMessages": "Sitzungsnachrichten werden geladen..."
     },

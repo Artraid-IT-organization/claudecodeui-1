@@ -220,6 +220,7 @@
     "loading": {
       "olderMessages": "Loading older messages...",
       "sessionMessages": "Loading session messages...",
+      "historySyncing": "Loading chat history…",
       "failed": "Couldn't load the conversation — retrying",
       "failed_auth": "Your sign-in expired — please log in again",
       "failed_denied": "You don't have access to this conversation",

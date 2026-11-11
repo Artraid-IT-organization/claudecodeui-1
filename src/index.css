@@ -793,9 +793,35 @@
     animation: chat-shimmer-sweep 1.6s linear infinite;
   }
 
+  /* «Догружаю историю» у низа ленты: в потоке, как «печатает…» в мессенджере,
+     отдельно от activity-плашки над полем ввода. */
+  .chat-history-sync {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0;
+    font-size: 0.75rem;
+    color: rgb(128 128 128 / 0.9);
+  }
+
+  .chat-history-sync__spinner {
+    width: 0.875rem;
+    height: 0.875rem;
+    border-radius: 9999px;
+    border: 2px solid rgb(128 128 128 / 0.3);
+    border-top-color: rgb(128 128 128 / 0.85);
+    animation: chat-history-sync-spin 0.8s linear infinite;
+  }
+
+  @keyframes chat-history-sync-spin {
+    to { transform: rotate(360deg); }
+  }
+
   @media (prefers-reduced-motion: reduce) {
     .chat-shimmer,
-    .chat-skeleton.chat-skeleton--loading {
+    .chat-skeleton.chat-skeleton--loading,
+    .chat-history-sync__spinner {
       animation: none;
     }
   }

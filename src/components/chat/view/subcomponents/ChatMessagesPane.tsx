@@ -27,6 +27,11 @@ interface ChatMessagesPaneProps {
   isProcessing?: boolean;
   /** True while ChatComposer's floating activity/stop tab is rendered above the input. */
   hasActivityIndicator?: boolean;
+  /**
+   * В полёте запрос истории (первая порция, догон хвоста, старшие страницы) —
+   * у низа ленты рисуется строка «догружаю историю», отдельная от activity.
+   */
+  isHistorySyncing?: boolean;
   chatMessages: ChatMessage[];
   selectedSession: ProjectSession | null;
   currentSessionId: string | null;
@@ -108,6 +113,7 @@ function ChatMessagesPane({
   isLoadingSessionMessages,
   isProcessing = false,
   hasActivityIndicator = false,
+  isHistorySyncing = false,
   chatMessages,
   selectedSession,
   currentSessionId,
@@ -156,6 +162,16 @@ function ChatMessagesPane({
   selectedProject,
 }: ChatMessagesPaneProps) {
   const { t } = useTranslation('chat');
+  // Индикатор «догружаю историю» монтируется с задержкой 250 мс — после того,
+  // как лента уже доскроллена к последнему сообщению. Без доводки его высота
+  // уходит под фолд: пользователь у низа увидел бы только дёрганье.
+  useLayoutEffect(() => {
+    if (!isHistorySyncing) return;
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    if (nearBottom) el.scrollTop = el.scrollHeight;
+  }, [isHistorySyncing, scrollContainerRef]);
   // Вся работа между сообщением и ответом — одной свёрнутой строкой «Ход работы»,
   // как в Claude Code для VS Code; внутри — ключевые мысли и сделанные шаги.
   // Егор 13.09.26: «должно быть только то, что мне нужно знать в размышлениях и
@@ -462,6 +478,17 @@ function ChatMessagesPane({
               );
             });
           })()}
+
+          {isHistorySyncing && (
+            <div
+              className="chat-history-sync"
+              role="status"
+              aria-live="polite"
+            >
+              <span className="chat-history-sync__spinner" aria-hidden="true" />
+              <span>{t('session.loading.historySyncing')}</span>
+            </div>
+          )}
         </>
       )}
       </div>

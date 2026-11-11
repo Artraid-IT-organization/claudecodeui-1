@@ -183,6 +183,7 @@
       "description": "詢問有關程式碼的問題、要求修改或取得開發任務的協助"
     },
     "loading": {
+      "historySyncing": "正在載入聊天記錄…",
       "olderMessages": "正在載入較早的訊息...",
       "sessionMessages": "正在載入工作階段訊息..."
     },

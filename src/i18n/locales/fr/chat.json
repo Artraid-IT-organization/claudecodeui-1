@@ -149,6 +149,7 @@
       "description": "Posez des questions sur votre code, demandez des modifications ou obtenez de l'aide pour vos tâches de développement"
     },
     "loading": {
+      "historySyncing": "Chargement de l’historique…",
       "olderMessages": "Chargement des messages précédents...",
       "sessionMessages": "Chargement des messages de la session..."
     },

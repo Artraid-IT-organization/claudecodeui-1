@@ -147,6 +147,7 @@
       "description": "Kodun hakkında soru sor, değişiklik iste veya geliştirme görevlerinde yardım al"
     },
     "loading": {
+      "historySyncing": "Sohbet geçmişi yükleniyor…",
       "olderMessages": "Eski mesajlar yükleniyor...",
       "sessionMessages": "Oturum mesajları yükleniyor..."
     },

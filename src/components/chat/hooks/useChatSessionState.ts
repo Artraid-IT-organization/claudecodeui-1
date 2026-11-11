@@ -128,6 +128,24 @@ export function chatMessageToNormalized(
   } as NormalizedMessage;
 }
 
+/**
+ * Отложенное «истина»: включается через delayMs после того, как value
+ * стал true, а выключается мгновенно. Стандартный приём против вспышки
+ * спиннера на быстрых запросах (200–300 мс).
+ */
+function useDelayedTrue(value: boolean, delayMs: number): boolean {
+  const [delayed, setDelayed] = useState(false);
+  useEffect(() => {
+    if (!value) {
+      setDelayed(false);
+      return undefined;
+    }
+    const id = window.setTimeout(() => setDelayed(true), delayMs);
+    return () => window.clearTimeout(id);
+  }, [value, delayMs]);
+  return delayed;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Hook                                                              */
 /* ------------------------------------------------------------------ */
@@ -1491,6 +1509,17 @@ export function useChatSessionState({
     setVisibleMessageCount((prev) => prev + 100);
   }, []);
 
+  /**
+   * «История сейчас догружается» — счётчик в полёте операций из стора
+   * (первая порция, догон хвоста, старшие страницы). Задержка 250 мс
+   * прячет вспышку на кэше/быстром ответе; выключается мгновенно.
+   */
+  const historySyncingRaw = Boolean(
+    activeSessionId
+      && (sessionStore.getSessionSlot(activeSessionId)?.historyInFlight ?? 0) > 0,
+  );
+  const isHistorySyncing = useDelayedTrue(historySyncingRaw, 250);
+
   return {
     chatMessages,
     addMessage,
@@ -1534,5 +1563,6 @@ export function useChatSessionState({
     retryHistoryLoad,
     transcriptMissing,
     setTopSentinel,
+    isHistorySyncing,
   };
 }
