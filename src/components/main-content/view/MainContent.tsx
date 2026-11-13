@@ -7,7 +7,8 @@ import { usePaletteOpsRegister } from '../../../contexts/PaletteOpsContext';
 import { useTasksSettings } from '../../../contexts/TasksSettingsContext';
 import { useUiPreferences } from '../../../hooks/useUiPreferences';
 import { useFileOpenResolver } from '../../../hooks/useFileOpenResolver';
-import { api } from '../../../utils/api';
+import { authenticatedFetch, getStoredAuthToken } from '../../../utils/api';
+import { getDoorBase } from '../../../utils/doors';
 import { useEditorSidebar } from '../../code-editor/hooks/useEditorSidebar';
 import type { Project } from '../../../types/app';
 
@@ -115,8 +116,12 @@ function MainContent({
   // real project files before opening them in the in-app editor.
   const resolvedFileOpen = useFileOpenResolver(selectedProject, handleFileOpen);
 
-  // Deliverables linked in chat (.docx/.zip/…) save straight to the user's
-  // machine instead of opening the editor, which cannot display binary files.
+  // Deliverables linked in chat (.docx/.zip/…) download through the browser's
+  // own machinery instead of opening the editor, which cannot display binary
+  // files. The link is a real file URL: a HEAD probe keeps the editor fallback
+  // for missing files, then a same-origin `a[download]` click makes the browser
+  // fetch it natively. The session token rides in the query — the same auth
+  // channel the API already accepts for SSE and the WebSocket.
   const handleWorkspaceFileDownload = useCallback(
     async (filePath: string) => {
       if (!selectedProject) {
@@ -124,18 +129,18 @@ function MainContent({
       }
       const fileName = filePath.split(/[\\/]/).pop() || 'download';
       try {
-        const response = await api.readFileBlob(selectedProject.projectId, filePath);
-        if (!response.ok) {
-          throw new Error(`download failed: ${response.status}`);
+        const apiPath = `/api/file-tree/projects/${selectedProject.projectId}/files/content?path=${encodeURIComponent(filePath)}`;
+        const probe = await authenticatedFetch(apiPath, { method: 'HEAD' });
+        if (!probe.ok) {
+          throw new Error(`download failed: ${probe.status}`);
         }
-        const blobUrl = URL.createObjectURL(await response.blob());
+        const token = getStoredAuthToken();
         const anchor = document.createElement('a');
-        anchor.href = blobUrl;
+        anchor.href = `${getDoorBase()}${apiPath}&token=${encodeURIComponent(token ?? '')}`;
         anchor.download = fileName;
         document.body.appendChild(anchor);
         anchor.click();
         anchor.remove();
-        window.setTimeout(() => URL.revokeObjectURL(blobUrl), 0);
       } catch {
         // File missing or outside the project: fall back to the editor view,
         // which shows its own error instead of failing silently.
