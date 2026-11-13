@@ -6,6 +6,9 @@ export type PaletteOps = {
   // Opens a file in the editor side panel without changing the active tab
   // (used by in-chat file links so they behave like the inline edit view).
   openFileInEditor: (path: string) => void;
+  // Saves a workspace file to the user's machine (agent-produced deliverables
+  // linked in chat — documents, archives, exports).
+  downloadFile: (path: string) => void;
   openSettings: (tab?: string) => void;
   refreshProjects: () => Promise<void> | void;
 };
@@ -17,6 +20,7 @@ const PaletteOpsContext = createContext<Registry | null>(null);
 const defaultOps: PaletteOps = {
   openFile: () => undefined,
   openFileInEditor: () => undefined,
+  downloadFile: () => undefined,
   openSettings: () => undefined,
   refreshProjects: () => undefined,
 };
@@ -33,6 +37,7 @@ export function usePaletteOps(): PaletteOps {
       openFile: (path) => (ref?.current.openFile ?? defaultOps.openFile)(path),
       openFileInEditor: (path) =>
         (ref?.current.openFileInEditor ?? defaultOps.openFileInEditor)(path),
+      downloadFile: (path) => (ref?.current.downloadFile ?? defaultOps.downloadFile)(path),
       openSettings: (tab) => (ref?.current.openSettings ?? defaultOps.openSettings)(tab),
       refreshProjects: () => (ref?.current.refreshProjects ?? defaultOps.refreshProjects)(),
     }),
@@ -42,20 +47,22 @@ export function usePaletteOps(): PaletteOps {
 
 export function usePaletteOpsRegister(partial: Partial<PaletteOps>) {
   const ref = useContext(PaletteOpsContext);
-  const { openFile, openFileInEditor, openSettings, refreshProjects } = partial;
+  const { openFile, openFileInEditor, downloadFile, openSettings, refreshProjects } = partial;
 
   useEffect(() => {
     if (!ref) return undefined;
     const prev = { ...ref.current };
     if (openFile) ref.current.openFile = openFile;
     if (openFileInEditor) ref.current.openFileInEditor = openFileInEditor;
+    if (downloadFile) ref.current.downloadFile = downloadFile;
     if (openSettings) ref.current.openSettings = openSettings;
     if (refreshProjects) ref.current.refreshProjects = refreshProjects;
     return () => {
       if (openFile && ref.current.openFile === openFile) ref.current.openFile = prev.openFile;
       if (openFileInEditor && ref.current.openFileInEditor === openFileInEditor) ref.current.openFileInEditor = prev.openFileInEditor;
+      if (downloadFile && ref.current.downloadFile === downloadFile) ref.current.downloadFile = prev.downloadFile;
       if (openSettings && ref.current.openSettings === openSettings) ref.current.openSettings = prev.openSettings;
       if (refreshProjects && ref.current.refreshProjects === refreshProjects) ref.current.refreshProjects = prev.refreshProjects;
     };
-  }, [ref, openFile, openFileInEditor, openSettings, refreshProjects]);
+  }, [ref, openFile, openFileInEditor, downloadFile, openSettings, refreshProjects]);
 }
