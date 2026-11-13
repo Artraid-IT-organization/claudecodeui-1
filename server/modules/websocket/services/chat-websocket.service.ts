@@ -2,7 +2,7 @@ import path from 'node:path';
 
 import type { WebSocket } from 'ws';
 
-import { chatMessageQueueDb, chatRunsDb, sessionsDb, type StoredQueuedChatMessage } from '@/modules/database/index.js';
+import { chatMessageQueueDb, chatRunsDb, devinConnectionsDb, sessionsDb, type StoredQueuedChatMessage } from '@/modules/database/index.js';
 import {
   getSurvivorPhase,
   getSurvivorProvider,
@@ -55,7 +55,7 @@ import type {
   RealtimeClientConnection,
 } from '@/shared/types.js';
 import type { ProviderAdoptedTurn, ProviderAdoptPayload, ProviderSteerPayload } from '@/shared/interfaces.js';
-import { isCodexAllowedForWebUser, isPlatformOwnerWebUser, OPEN_REGISTRATION, parseIncomingJsonObject, resolveScopedWorkingDirectory } from '@/shared/utils.js';
+import { createNormalizedMessage, isCodexAllowedForWebUser, isPlatformOwnerWebUser, OPEN_REGISTRATION, parseIncomingJsonObject, resolveScopedWorkingDirectory } from '@/shared/utils.js';
 import {
   getImageAssetsDirForUser,
   readRequestUserId,
@@ -207,6 +207,61 @@ const CHAT_SEND_ACK_CAP = 'send-ack-1';
  */
 const SERVER_PING_CAP = 'server-ping-1';
 const SERVER_PING_MS = 25_000;
+/**
+ * Мягкий предел длины беседы: с этого числа ходов человеку в ленту уходит
+ * совет начать новый чат (аудит 13.11.26 — деградация сосредоточена в чатах
+ * на сотни ходов). Дальше напоминаем каждые STEP ходов.
+ */
+const SESSION_SOFT_TURN_LIMIT = 100;
+const SESSION_SOFT_TURN_STEP = 50;
+
+/**
+ * Совет «начните новый чат» на пороге длины беседы и дальше каждые
+ * SESSION_SOFT_TURN_STEP ходов. Идёт статусом в ленту текущего хода — попадает
+ * и человеку, и в историю. Ничего не блокирует: «мягкий» значит «предлагаем».
+ */
+function notifySessionSoftLimit(input: {
+  sessionId: string;
+  provider: LLMProvider;
+  providerSessionId: string | null;
+  writer: { send(data: unknown): void };
+}): void {
+  const priorTurns = chatRunsDb.countForSession(input.sessionId) - 1;
+  if (priorTurns < SESSION_SOFT_TURN_LIMIT || priorTurns % SESSION_SOFT_TURN_STEP !== 0) {
+    return;
+  }
+  input.writer.send(createNormalizedMessage({
+    provider: input.provider,
+    sessionId: input.providerSessionId,
+    kind: 'status',
+    text: `В этом чате уже ${priorTurns} ходов — длинные беседы отвечают заметно медленнее и чаще ломаются. Лучше продолжить в новом чате: напишите сюда «дай бриф для нового чата», агент соберёт короткое резюме — вставьте его первым сообщением новой беседы.`,
+  }));
+}
+
+/**
+ * Когда повторять сообщение после «Devin недоступен»: конец ближайшего
+ * cooldown среди годных каналов + минута запаса. Поле в базе — UTC-текст
+ * `datetime('now')` («YYYY-MM-DD HH:MM:SS»). Нет пауз — минутный бэкофф,
+ * дальше получаса — тоже минута: неизвестная пауза не должна стоять вечно.
+ */
+function devinOutageRetryAt(): number {
+  const now = Date.now();
+  let retryAt = now + 60_000;
+  try {
+    const ends = devinConnectionsDb
+      .list()
+      .filter((row) => row.enabled && row.health_status !== 'auth_failed' && row.cooldown_until)
+      .map((row) => Date.parse(`${String(row.cooldown_until).replace(' ', 'T')}Z`))
+      .filter((ts) => Number.isFinite(ts));
+    const earliest = Math.min(...ends);
+    if (Number.isFinite(earliest) && earliest > now && earliest <= now + 30 * 60_000) {
+      retryAt = earliest + 60_000;
+    }
+  } catch (error) {
+    console.error('[Chat] не смог посчитать конец cooldown Devin — повтор через минуту', error);
+  }
+  return retryAt;
+}
 
 function readSocketCaps(request: AuthenticatedWebSocketRequest): string[] {
   const rawUrl = (request as { url?: string }).url || '';
@@ -428,6 +483,16 @@ async function handleChatSend(
       });
     }
     return;
+  }
+
+  // Мягкий предел длины беседы (аудит 13.11.26: все таймауты загрузки и почти
+  // вся деградация — в чатах на сотни ходов). Не блокируем: на пороге и дальше
+  // каждые 50 ходов ленте уходит совет начать новый чат с кратким брифом —
+  // агент соберёт резюме, человек вставит его первым сообщением новой беседы.
+  try {
+    notifySessionSoftLimit({ sessionId, provider, providerSessionId: session.provider_session_id, writer: run.writer });
+  } catch (limitError) {
+    console.error('[Chat] проверка мягкого предела длины чата не сработала', limitError);
   }
 
   // Строка в очереди как write-ahead: до подтверждённой передачи prompt
@@ -682,6 +747,11 @@ async function runProviderTurn(input: {
     const pending = run.pendingMessage;
     if (pending && !run.promptAnchored) {
       run.pendingMessage = null;
+      // Аутридж провайдера (все каналы Devin в cooldown/auth_failed) — это
+      // пауза сервиса, а не брак доставки: попытки не жжём и ждём до конца
+      // ближайшего cooldown, а не фиксированную минуту. Инцидент 06.11.26:
+      // сообщения дохли после 30 redispatch'ей подряд посреди суточной паузы.
+      const providerOutage = provider === 'devin' && /no usable connection|Devin недоступен/i.test(turnError ?? '');
       const outcome = returnClaimedToQueue(
         {
           id: pending.id,
@@ -692,9 +762,22 @@ async function runProviderTurn(input: {
           createdAt: '',
         },
         turnError ?? 'ход завершился, не успев передать сообщение агенту',
+        providerOutage ? { notBefore: devinOutageRetryAt(), countAttempt: false } : undefined,
       );
       if (outcome === 'requeued') {
         console.warn(`[Chat] сообщение ${pending.id} чата ${sessionId} не дошло до агента (${turnError ?? '?'}) — вернул в очередь`);
+        if (providerOutage) {
+          // Человеку — честный статус: не «ошибка», а «ждёт восстановления
+          // связи и уйдёт само». Строка в доке очереди видна и так, но лента —
+          // первое, куда смотрят.
+          broadcastJson({
+            kind: 'status',
+            sessionId,
+            provider,
+            text: 'Devin сейчас недоступен — сообщение останется в очереди и уйдёт само, когда связь восстановится. Ничего повторять не нужно.',
+            timestamp: new Date().toISOString(),
+          });
+        }
       } else {
         // Открытая вкладка видит сбой и в ленте: строка в доке очереди уже
         // помечена ошибкой, но лента — первое, куда смотрит человек.
@@ -840,6 +923,14 @@ async function runQueuedChatMessage(
   });
   if (!run) {
     return false;
+  }
+
+  // Тот же мягкий предел длины, что при прямой отправке: снятое с очереди
+  // сообщение запускает ход точно так же.
+  try {
+    notifySessionSoftLimit({ sessionId, provider, providerSessionId: session.provider_session_id, writer: run.writer });
+  } catch (limitError) {
+    console.error('[Очередь чата] проверка мягкого предела длины чата не сработала', limitError);
   }
 
   // Копия: `message.options` — тот же объект, что у pendingMessage, а там

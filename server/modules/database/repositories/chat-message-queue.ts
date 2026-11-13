@@ -324,7 +324,7 @@ export const chatMessageQueueDb = {
   releaseClaim(id: string, options?: { bumpAttempts?: boolean; notBefore?: number }): void {
     ensureTable();
     const db = getConnection();
-    if (!options?.bumpAttempts) {
+    if (!options?.bumpAttempts && !options?.notBefore) {
       db.prepare('UPDATE chat_message_queue SET claimed_at = NULL WHERE id = ?').run(id);
       return;
     }
@@ -335,7 +335,9 @@ export const chatMessageQueueDb = {
       return;
     }
     const parsed = parseOptions(row.options_json);
-    parsed.__redispatch = Number(parsed.__redispatch ?? 0) + 1;
+    if (options?.bumpAttempts) {
+      parsed.__redispatch = Number(parsed.__redispatch ?? 0) + 1;
+    }
     if (options.notBefore) {
       parsed.__notBefore = options.notBefore;
     }

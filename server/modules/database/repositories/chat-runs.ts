@@ -188,6 +188,19 @@ export const chatRunsDb = {
     return row ? toStoredRun(row) : null;
   },
 
+  /**
+   * Сколько всего ходов запускал этот чат — мягкому пределу длины беседы
+   * (chat-websocket.service): длинные чаты медленнее грузятся и чаще
+   * ломаются, поэтому после порога человеку советуют новый чат.
+   */
+  countForSession(sessionId: string): number {
+    ensureTable();
+    const row = getConnection()
+      .prepare(`SELECT COUNT(*) AS count FROM chat_runs WHERE session_id = ?`)
+      .get(sessionId) as { count: number } | undefined;
+    return Number(row?.count ?? 0);
+  },
+
   /** Старший по времени незавершённый ход чата — сверке при старте. */
   runningForSession(sessionId: string): StoredChatRun | null {
     ensureTable();

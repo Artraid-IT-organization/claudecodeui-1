@@ -223,6 +223,28 @@ function emitDevinTokenBudget(ws, run, appSessionId, { force = false } = {}) {
   if (!usage || (!force && usage.used === run.lastEmittedUsage)) {
     return;
   }
+  // Пересборка контекста: Devin сжал беседу — заполненность окна падает
+  // резко вниз при продолжающемся ответе. Считаем для наблюдаемости (аудит
+  // 13.11.26: 130 пересборок в 10 самых длинных чатах проходили незаметно),
+  // человеку — нейтральный статус, НЕ реплика пользователя.
+  if (
+    typeof run.lastContextTokens === 'number' && run.lastContextTokens > 0
+    && typeof usage.contextTokens === 'number'
+    && usage.contextTokens < run.lastContextTokens * 0.5
+    && run.lastContextTokens > (usage.contextWindow || 0) * 0.5
+  ) {
+    run.contextRebuilds = (run.contextRebuilds || 0) + 1;
+    console.warn(`[Devin] метрика: пересборка контекста #${run.contextRebuilds} чата ${appSessionId || devinSessionId} (окно ${run.lastContextTokens}→${usage.contextTokens} токенов)`);
+    sendMessage(ws, createNormalizedMessage({
+      provider: 'devin',
+      sessionId: appSessionId || devinSessionId,
+      kind: 'status',
+      text: 'Беседа длинная — Devin сжал контекст и продолжает. Если ответ потеряет детали, лучше начать новый чат.',
+    }));
+  }
+  if (typeof usage.contextTokens === 'number') {
+    run.lastContextTokens = usage.contextTokens;
+  }
   run.lastEmittedUsage = usage.used;
   sendMessage(ws, createNormalizedMessage({
     provider: 'devin',

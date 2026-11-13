@@ -163,12 +163,20 @@ export function failQueuedMessageNow(
 export function returnClaimedToQueue(
   message: Pick<StoredQueuedChatMessage, 'id' | 'sessionId' | 'userId' | 'content' | 'options' | 'createdAt'>,
   reason: string,
+  opts: { notBefore?: number; countAttempt?: boolean } = {},
 ): 'requeued' | 'failed' {
-  const attempts = Number((message.options as Record<string, unknown> | undefined)?.__redispatch ?? 0) + 1;
+  // countAttempt=false — пауза провайдера (аутридж), а не брак доставки:
+  // попытки не жгём, сообщение просто терпеливо ждёт восстановления связи
+  // (инцидент 06.11.26: 117 отказов за день, сообщения дохли после 30
+  // redispatch'ей подряд, хотя каналы были просто в cooldown).
+  const countAttempt = opts.countAttempt !== false;
+  const attempts = countAttempt
+    ? Number((message.options as Record<string, unknown> | undefined)?.__redispatch ?? 0) + 1
+    : Number((message.options as Record<string, unknown> | undefined)?.__redispatch ?? 0);
   if (attempts < MAX_DELIVERY_ATTEMPTS) {
-    const notBefore = Date.now() + REDELIVERY_BACKOFF_MS;
+    const notBefore = opts.notBefore ?? (Date.now() + REDELIVERY_BACKOFF_MS);
     if (chatMessageQueueDb.has(message.id)) {
-      chatMessageQueueDb.releaseClaim(message.id, { bumpAttempts: true, notBefore });
+      chatMessageQueueDb.releaseClaim(message.id, { bumpAttempts: countAttempt, notBefore });
     } else {
       chatMessageQueueDb.insertFront({
         ...message,
