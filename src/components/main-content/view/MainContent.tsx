@@ -129,7 +129,7 @@ function MainContent({
       }
       const fileName = filePath.split(/[\\/]/).pop() || 'download';
       try {
-        const apiPath = `/api/file-tree/projects/${selectedProject.projectId}/files/content?path=${encodeURIComponent(filePath)}`;
+        const apiPath = `/api/file-tree/projects/${selectedProject.projectId}/files/content?path=${encodeURIComponent(filePath)}&download=1`;
         const probe = await authenticatedFetch(apiPath, { method: 'HEAD' });
         if (!probe.ok) {
           throw new Error(`download failed: ${probe.status}`);
