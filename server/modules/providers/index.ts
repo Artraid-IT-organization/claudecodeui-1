@@ -24,6 +24,14 @@ export { providerModelsService } from './services/provider-models.service.js';
 // clampDevinModelForUser: модуль websocket приводит выбор модели Devin к
 // разрешённому пользователю перед запуском хода (chat-websocket.service).
 export { clampDevinModelForUser } from './services/devin-model-policy.js';
+// resolvePinnedProjectBrain/clampProjectProviderModel: создание сессии
+// наследует последний мозг привязанной папки, websocket приводит модель
+// claude-чата вкладки к допустимой при отправке.
+export {
+  resolvePinnedProjectBrain,
+  clampProjectProviderModel,
+  resolvePinnedSessionProvider,
+} from './services/project-provider-policy.js';
 // describeDevinFailureForUser: причина сбоя хода Devin словами человека —
 // журнал chat_runs и плашка в ленте (chat-websocket.service).
 export { describeDevinFailureForUser } from './services/devin-connections.service.js';

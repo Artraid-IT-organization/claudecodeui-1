@@ -4,6 +4,7 @@ import MobileMenuButton from './MobileMenuButton';
 import MainContentTitle from './MainContentTitle';
 import ConnectionStatus from './ConnectionStatus';
 import ChatGroupSelector from './ChatGroupSelector';
+import ChatPromptsMenu from './ChatPromptsMenu';
 
 export default function MainContentHeader({
   activeTab,
@@ -34,6 +35,9 @@ export default function MainContentHeader({
           него группу чата и архив: это нужно каждый день, а пресеты — редко,
           и включаются теперь в настройках.
         */}
+        {activeTab === 'chat' && !terminalTitle && (!isMobile || !selectedSession?.id) && (
+          <ChatPromptsMenu hasSession={Boolean(selectedSession?.id)} />
+        )}
         {activeTab === 'chat' && !terminalTitle && (
           <ChatGroupSelector
             sessionId={selectedSession?.id ?? null}

@@ -1,25 +1,10 @@
-import { ChevronDown } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { useCodexAccount } from '../../../../hooks/useCodexAccount';
-import { useDevinAccount } from '../../../../hooks/useDevinAccount';
+import { useSelectedChatProvider } from '../../../../hooks/useCodexAccount';
 import { api } from '../../../../utils/api';
-import { cn } from '../../../../lib/utils';
 
-type UsageLimit = {
-  kind: string;
-  percent: number;
-  severity: string;
-  resetsAt: string | null;
-  modelName: string | null;
-  expired: boolean;
-};
-
-type UsageLimitsPayload = {
-  fetchedAtMs: number | null;
-  limits: UsageLimit[];
-};
+import { UsageLimitsView, type UsageLimitsPayload } from './UsageLimitsView';
 
 /**
  * Сервер берёт проценты у Anthropic (как `/usage`) и держит их минуту,
@@ -33,52 +18,19 @@ const EMPTY_RETRY_INTERVAL_MS = 30 * 1000;
 // нужны»); сервер отдаёт все окна — отбор дело показа, а не источника.
 const VISIBLE_KINDS = ['session', 'weekly_all'];
 /**
- * Позже этого возраста кэш считается несвежим и это подписывается.
+ * Лимиты подписки Claude: окно на пять часов и недельное — как `/usage`.
  *
- * Полчаса было слишком строго: числа меняет сам CLI, и пока Егор не пишет в
- * чат, им неоткуда обновиться — подпись «данные не свежие» висела почти
- * всегда и обесценивала сама себя. Три часа — та граница, за которой внутри
- * пятичасового окна проценту действительно нельзя верить.
- */
-const STALE_AFTER_MS = 3 * 60 * 60 * 1000;
-
-function formatResetsIn(resetsAt: string | null): string | null {
-  if (!resetsAt) {
-    return null;
-  }
-  const left = Date.parse(resetsAt) - Date.now();
-  if (!Number.isFinite(left) || left <= 0) {
-    return null;
-  }
-  const minutes = Math.round(left / 60000);
-  if (minutes < 60) {
-    return `${minutes} мин`;
-  }
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) {
-    return `${hours} ч`;
-  }
-  return `${Math.round(hours / 24)} дн`;
-}
-
-/**
- * Расход подписки тремя полосами — как в панели Клода для VS Code: окно на
- * пять часов, недельное окно и лимит конкретной модели.
- *
- * Значения готовит сам CLI и складывает в ~/.claude.json, поэтому показ ничего
- * не стоит: своего запроса к API нет, а он расходовал бы ровно ту квоту,
- * которую показывает. Обратная сторона — данные могут отстать, поэтому возраст
- * подписывается честно, а окно, которое уже сбросилось, не показывается вовсе:
- * лучше ничего, чем неверное число.
+ * Числа даёт сервер (`GET /api/user/usage-limits`: официальный запрос по входу
+ * именно этого пользователя, запасной путь — кэш CLI). Окно, которое уже
+ * сбросилось, не показывается вовсе: лучше ничего, чем неверное число.
+ * Показывается только при выбранном Claude — у Devin и Codex таких окон нет.
  */
 export default function SidebarUsageLimits() {
   const { t } = useTranslation('sidebar');
   const [payload, setPayload] = useState<UsageLimitsPayload | null>(null);
-  const [isOpen, setIsOpen] = useState(true);
-  // Подписка Codex (третий аккаунт) — те же два окна, числа прямо от Codex.
-  const codex = useCodexAccount();
-  // Подписка Devin — дневное и недельное окна квоты (пятичасового нет).
-  const devin = useDevinAccount();
+  // Лимиты есть только у подписки Claude: у Devin и Codex своих окон нет, и
+  // чужой помощник не должен показывать цифры Claude как свои.
+  const isClaudeSelected = useSelectedChatProvider() === 'claude';
 
   const load = useCallback(async () => {
     try {
@@ -125,131 +77,9 @@ export default function SidebarUsageLimits() {
     return () => document.removeEventListener('visibilitychange', onVisible);
   }, [load]);
 
-  const codexRows: UsageLimit[] = codex?.available
-    ? codex.limits
-      .filter((limit) => !limit.expired && VISIBLE_KINDS.includes(limit.kind))
-      .map((limit) => ({
-        kind: limit.kind,
-        percent: limit.percent,
-        // Порогов предупреждения Codex не присылает — ставим свои.
-        severity: limit.percent >= 90 ? 'critical' : limit.percent >= 75 ? 'warning' : 'normal',
-        resetsAt: limit.resetsAt,
-        modelName: null,
-        expired: false,
-      }))
-    : [];
-  const devinRows: UsageLimit[] = devin?.available
-    ? devin.limits
-      .filter((limit) => !limit.expired && ['daily', 'weekly'].includes(limit.kind))
-      .map((limit) => ({
-        kind: limit.kind,
-        percent: limit.percent,
-        // Порогов предупреждения Devin не присылает — ставим свои.
-        severity: limit.percent >= 90 ? 'critical' : limit.percent >= 75 ? 'warning' : 'normal',
-        resetsAt: limit.resetsAt,
-        modelName: null,
-        expired: false,
-      }))
-    : [];
-
-  // Подпись группы обязательна у любого не-Claude источника: без неё чужие
-  // окна выглядят как «лимиты вообще» — так цифры Codex однажды приняли за
-  // лимиты Devin. Заголовок прячем только когда показан один Claude.
-  const groups = [
-    { key: 'claude', title: 'Claude', rows },
-    { key: 'codex', title: 'Codex', rows: codexRows },
-    { key: 'devin', title: 'Devin', rows: devinRows },
-  ].filter((group) => group.rows.length > 0);
-  if (groups.length === 0) {
+  if (!isClaudeSelected || !hasRows) {
     return null;
   }
-  const showGroupTitles = groups.length > 1 || groups[0].key !== 'claude';
 
-  const isStale = payload?.fetchedAtMs
-    ? Date.now() - payload.fetchedAtMs > STALE_AFTER_MS
-    : false;
-
-  const labelFor = (limit: UsageLimit): string => {
-    if (limit.kind === 'session') {
-      return t('usage.session', { defaultValue: 'Сеанс (5 ч)' });
-    }
-    if (limit.kind === 'daily') {
-      return t('usage.daily', { defaultValue: 'День (24 ч)' });
-    }
-    if (limit.kind === 'weekly' || limit.kind === 'weekly_all') {
-      return t('usage.weekly', { defaultValue: 'Неделя (7 дней)' });
-    }
-    return t('usage.other', { defaultValue: 'Прочий лимит' });
-  };
-
-  const renderRows = (list: UsageLimit[], group: string) => (
-    <>
-      {list.map((limit) => {
-            const resetsIn = formatResetsIn(limit.resetsAt);
-            return (
-              <div key={`${group}-${limit.kind}-${limit.modelName ?? ''}`}>
-                <div className="flex items-baseline justify-between gap-2">
-                  <span className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-[11px] text-foreground">
-                    {labelFor(limit)}
-                  </span>
-                  <span className="flex-shrink-0 text-[11px] tabular-nums text-muted-foreground">
-                    {limit.percent}%
-                  </span>
-                </div>
-                <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-muted">
-                  <div
-                    className={cn(
-                      'h-full rounded-full transition-[width]',
-                      limit.severity === 'critical'
-                        ? 'bg-destructive'
-                        : limit.severity === 'warning'
-                          ? 'bg-amber-500'
-                          : 'bg-primary',
-                    )}
-                    style={{ width: `${limit.percent}%` }}
-                  />
-                </div>
-                {resetsIn && (
-                  <p className="mt-0.5 text-[10px] text-muted-foreground/80">
-                    {t('usage.resetsIn', { defaultValue: 'Обновится через {{time}}', time: resetsIn })}
-                  </p>
-                )}
-              </div>
-            );
-          })}
-    </>
-  );
-
-  return (
-    <div className="flex-shrink-0 border-b border-border/60 px-3 py-2">
-      <button
-        type="button"
-        onClick={() => setIsOpen((open) => !open)}
-        className="flex w-full items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground transition-colors hover:text-foreground"
-      >
-        <ChevronDown className={cn('h-3 w-3 transition-transform', !isOpen && '-rotate-90')} />
-        {t('usage.title', { defaultValue: 'Расход' })}
-        {isStale && (
-          <span className="ml-auto font-normal normal-case text-muted-foreground/70">
-            {t('usage.stale', { defaultValue: 'данные не свежие' })}
-          </span>
-        )}
-      </button>
-
-      {isOpen && (
-        <div className="mt-2 space-y-2">
-          {groups.map((group, index) => (
-            <div key={group.key}>
-              {showGroupTitles && (
-                <p className={cn('text-[10px] font-medium text-muted-foreground', index > 0 && 'pt-1')}>
-                  {group.title}
-                </p>
-              )}
-              {renderRows(group.rows, group.key)}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
+  return <UsageLimitsView rows={rows} fetchedAtMs={payload?.fetchedAtMs ?? null} t={t} />;
 }

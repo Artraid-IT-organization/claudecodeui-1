@@ -99,12 +99,12 @@ export default function MacStatusIndicator({ variant }: MacStatusIndicatorProps)
   }[status];
 
   const tooltip = linkLost
-    ? 'Статус MacBook недоступен: связь с сервером потеряна'
+    ? 'Статус домашней коробки недоступен: связь с сервером потеряна'
     : status === 'ready'
-      ? `MacBook подключён, российский выход готов (${data?.exitIp || 'IP проверен'})`
+      ? `Домашняя коробка подключена, российский выход готов (${data?.exitIp || 'IP проверен'})`
       : status === 'vpn'
-        ? `MacBook подключён, но поиск заблокирован: ${data?.isVpn ? 'обнаружен VPN' : data?.details || 'выход не подтверждён'} (${data?.exitIp || 'IP неизвестен'})`
-        : `MacBook не подключён, последняя проверка ${formatLastCheck(data?.lastCheck)}`;
+        ? `Домашняя коробка подключена, но поиск заблокирован: ${data?.isVpn ? 'обнаружен VPN' : data?.details || 'выход не подтверждён'} (${data?.exitIp || 'IP неизвестен'})`
+        : `Домашняя коробка не подключена, последняя проверка ${formatLastCheck(data?.lastCheck)}`;
 
   const isDesktop = variant === 'desktop';
   const wrapperSize = isDesktop ? 'h-7 w-7' : 'h-8 w-8';

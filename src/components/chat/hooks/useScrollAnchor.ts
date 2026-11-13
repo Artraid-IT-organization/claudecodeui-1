@@ -20,11 +20,14 @@ import type { MutableRefObject, RefObject } from 'react';
  * Встроенное удержание Chrome выключено (`overflow-anchor: none` в index.css),
  * иначе сдвиг возвращался бы дважды.
  *
- * Палец на стекле или лента едет по инерции — запись `scrollTop` на iPhone
- * обрывает бросок. Тогда сдвиг держится отрицательным отступом ленты
- * (`margin-top`), а в прокрутку переносится, когда движение остановилось:
- * отступ снимается и прокрутка прибавляется в одном кадре, на экране ничего не
- * шевелится. Приём из TanStack Virtual (PR #1189, issue #1287).
+ * Сдвиг ВСЕГДА держится отрицательным отступом ленты (`margin-top`), а в
+ * прокрутку переносится, когда высота перестала меняться: высота порции
+ * устанавливается за несколько кадров (строки получают настоящую высоту
+ * партиями), и каждая немедленная запись `scrollTop` показывалась отдельным
+ * кадром — лента видимо ехала ступенями на суммарные 1500+ px (замер на бою
+ * 23.10.26: 4 записи за 80 мс). Отступ снимается и прокрутка прибавляется в
+ * одном кадре — на экране ни разу не шевелится. На iPhone это ещё и не
+ * обрывает бросок пальца. Приём из TanStack Virtual (PR #1189, issue #1287).
  */
 
 const ROW_SELECTOR = '.chat-row';
@@ -38,10 +41,17 @@ const MOTION_IDLE_MS = 140;
  */
 const TOUCH_STALE_MS = 1000;
 
-interface Anchor {
+interface AnchorRow {
   row: HTMLElement;
   /** Положение строки внутри ленты без временного отступа. */
   top: number;
+}
+
+interface Anchor {
+  /** Опора и запасная (следующая строка): первую React может пересоздать —
+   * мысль влилась в «Ход работы», эхо заменено серверной копией, — и без
+   * запасной сдвиг не возвращался бы, лента прыгала. */
+  rows: AnchorRow[];
   /** Прокрутка в момент, когда опора запомнена. */
   scrollTop: number;
 }
@@ -59,27 +69,89 @@ interface UseScrollAnchorArgs {
 // Инвариант: `offsetTop` строк отсчитывается от самой панели прокрутки
 // (`.chat-messages-pane` — `relative`). Если сделать `.chat-rows` или
 // `.chat-row` позиционированными, опора молча начнёт врать.
+//
+// Опора — первая строка, НАЧИНАЮЩАЯСЯ на экране, а не та, что пересекает его
+// верх. Строка у верхней кромки часто только что приехала порцией или была
+// пропущена content-visibility и стоит с оценочной высотой; на следующем кадре
+// она получает настоящую — и если опорой была она сама, её верх стоял, а всё
+// видимое ниже съезжало (замер 22.10.26: −147 px после порции). Строка выше
+// опоры меняет высоту вверх — видимая её часть (низ) остаётся на месте.
+// Если экран целиком внутри одной длинной строки — опорой она.
 function pickAnchorRow(container: HTMLDivElement): HTMLElement | null {
   const rows = Array.from(container.querySelectorAll<HTMLElement>(ROW_SELECTOR));
   if (rows.length === 0) return null;
   const viewTop = container.scrollTop;
   let lo = 0;
   let hi = rows.length - 1;
-  let found = rows.length - 1;
+  let found = -1;
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
-    const row = rows[mid];
-    if (row.offsetTop + row.offsetHeight > viewTop) {
+    if (rows[mid].offsetTop >= viewTop) {
       found = mid;
       hi = mid - 1;
     } else {
       lo = mid + 1;
     }
   }
-  // Самую верхнюю строку опорой не берём: в неё вливаются ранние действия, и
-  // React пересоздаёт её под новым ключом — опора пропала бы из документа.
-  if (found === 0 && rows.length > 1) return rows[1];
+  if (found === -1) return rows[rows.length - 1];
+  if (found > 0 && rows[found].offsetTop >= viewTop + container.clientHeight) return rows[found - 1];
+  // Самая верхняя строка может пересоздаться (в неё вливаются ранние
+  // действия) — тогда сработает запасная опора (следующая строка, см. record).
   return rows[found];
+}
+
+const WARM_CLASS = 'chat-message--warm';
+/** Строки, уже побывавшие в зоне экрана (см. warmRowsInView). */
+const zoneSeen = new WeakSet<HTMLElement>();
+
+/**
+ * Строки в зоне экрана, которые браузер ещё пропускает (content-visibility),
+ * размечаются СЕЙЧАС, до отрисовки. Иначе после прыжка прокрутки (порция
+ * сверху, встали в низ) они первый кадр стоят с оценочной высотой и получают
+ * настоящую уже на глазах — видимое съезжало на 60–130 px (замер 22.10.26).
+ * Класс прогрева держится до следующего кадра — браузер запоминает настоящую
+ * высоту (`contain-intrinsic-size: auto`), — как в useRowPrewarm.
+ * Возвращает true, если что-то разметили (высоты могли смениться).
+ */
+function warmRowsInView(container: HTMLDivElement): boolean {
+  const probe = container.querySelector<HTMLElement>('.chat-message');
+  if (!probe || typeof probe.checkVisibility !== 'function') return false;
+  const rows = Array.from(container.querySelectorAll<HTMLElement>(ROW_SELECTOR));
+  if (rows.length === 0) return false;
+  const from = container.scrollTop - container.clientHeight / 2;
+  const to = container.scrollTop + container.clientHeight * 1.5;
+  let lo = 0;
+  let hi = rows.length - 1;
+  let first = rows.length;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (rows[mid].offsetTop + rows[mid].offsetHeight > from) {
+      first = mid;
+      hi = mid - 1;
+    } else {
+      lo = mid + 1;
+    }
+  }
+  const warmed: HTMLElement[] = [];
+  for (let i = first; i < rows.length && rows[i].offsetTop < to; i += 1) {
+    rows[i].querySelectorAll<HTMLElement>('.chat-message').forEach((message) => {
+      // Только что вставленную строку браузер ещё не успел признать
+      // пропущенной (checkVisibility отвечает «видна»), а в следующем кадре
+      // она встаёт с оценкой и потом растёт (замер: +68 px). Поэтому каждая
+      // строка, впервые попавшая в зону, греется один раз без спроса.
+      if (message.classList.contains(WARM_CLASS)) return;
+      if (zoneSeen.has(message) && message.checkVisibility({ contentVisibilityAuto: true })) return;
+      zoneSeen.add(message);
+      message.classList.add(WARM_CLASS);
+      warmed.push(message);
+    });
+  }
+  if (warmed.length === 0) return false;
+  void container.scrollHeight;
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    warmed.forEach((message) => message.classList.remove(WARM_CLASS));
+  }));
+  return true;
 }
 
 export function useScrollAnchor({
@@ -114,9 +186,15 @@ export function useScrollAnchor({
 
   const record = useCallback((container: HTMLDivElement) => {
     const row = pickAnchorRow(container);
-    anchorRef.current = row
-      ? { row, top: row.offsetTop + deferredRef.current, scrollTop: container.scrollTop }
-      : null;
+    const rows: AnchorRow[] = [];
+    if (row) {
+      rows.push({ row, top: row.offsetTop + deferredRef.current });
+      const next = row.nextElementSibling;
+      if (next instanceof HTMLElement && next.matches(ROW_SELECTOR)) {
+        rows.push({ row: next, top: next.offsetTop + deferredRef.current });
+      }
+    }
+    anchorRef.current = rows.length > 0 ? { rows, scrollTop: container.scrollTop } : null;
     wasAtBottomRef.current = deferredRef.current === 0
       && container.scrollHeight - container.scrollTop - container.clientHeight <= 2;
   }, []);
@@ -157,7 +235,7 @@ export function useScrollAnchor({
   }, [flush]);
 
   /** Сверить опору: высота ленты поменялась — вернуть место, затем запомнить новую опору. */
-  const reconcile = useCallback(() => {
+  const reconcileOnce = useCallback(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
     // Вкладка чата скрыта (display: none) — все размеры нулевые, опора бессмысленна.
@@ -197,16 +275,18 @@ export function useScrollAnchor({
       return;
     }
     const anchor = anchorRef.current;
+    const live = anchor?.rows.find((entry) => entry.row.isConnected);
     if (
       enabledRef.current
       && !suspendedRef.current
-      && anchor?.row.isConnected
+      && anchor
+      && live
       && lastHeightRef.current >= 0
       && height !== lastHeightRef.current
     ) {
-      const delta = anchor.row.offsetTop + deferredRef.current - anchor.top;
+      const delta = live.row.offsetTop + deferredRef.current - live.top;
       if (Math.abs(delta) >= 1) {
-        if (wrapper && inMotion(container)) {
+        if (wrapper) {
           deferredRef.current += delta;
           wrapper.style.marginTop = `${-deferredRef.current}px`;
           scheduleFlush();
@@ -227,6 +307,16 @@ export function useScrollAnchor({
     lastHeightRef.current = height;
     record(container);
   }, [inMotion, record, scheduleFlush, scrollContainerRef, suspendedRef, writeScrollTop]);
+
+  // После сверки строки, оказавшиеся у экрана ещё неразмеченными, размечаем
+  // сразу и сверяемся второй раз — в том же кадре, до отрисовки: их настоящая
+  // высота гасится опорой, а не съезжает на глазах (warmRowsInView).
+  const reconcile = useCallback(() => {
+    reconcileOnce();
+    const container = scrollContainerRef.current;
+    if (!container || container.clientHeight === 0 || !enabledRef.current || suspendedRef.current) return;
+    if (warmRowsInView(container)) reconcileOnce();
+  }, [reconcileOnce, scrollContainerRef, suspendedRef]);
 
   /** Сбросить отложенный сдвиг без записи прокрутки — перед прыжком в низ. */
   const clearDeferredShift = useCallback(() => {

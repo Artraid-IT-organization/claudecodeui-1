@@ -4,7 +4,7 @@ import { getRequestRuntimeContext } from '@/shared/request-context.js';
 import { getActiveAccountDir, type SessionOrigin } from '@/shared/session-scope.js';
 import { projectsDb } from '@/modules/database/repositories/projects.db.js';
 import type { ServerScope, SessionTitleSource } from '@/shared/types.js';
-import { normalizeProjectPath } from '@/shared/utils.js';
+import { normalizeProjectPath, pinnedProjectPathSql } from '@/shared/utils.js';
 
 const TITLE_SOURCE_RANK: Record<SessionTitleSource, number> = {
   naive: 0,
@@ -212,9 +212,12 @@ function sessionListScopeSql(
   const params: unknown[] = [];
 
   if (scope?.providerSpace === 'codex' || scope?.providerSpace === 'devin') {
-    sql += ` AND ${prefix}provider = '${scope.providerSpace}'`;
+    // Пространство devin у владельца включает и claude-чаты закреплённых
+    // проектов («Промпты» — мозги Claude, но видны в базе Devin; Егор 25.10.26).
+    const pinnedOr = scope.providerSpace === 'devin' ? ` OR ${pinnedProjectPathSql(prefix.slice(0, -1))}` : '';
+    sql += ` AND (${prefix}provider = '${scope.providerSpace}'${pinnedOr})`;
   } else if (scope?.providerSpace === 'claude') {
-    sql += ` AND ${prefix}provider NOT IN ('codex', 'devin')`;
+    sql += ` AND ${prefix}provider NOT IN ('codex', 'devin') AND NOT ${pinnedProjectPathSql(prefix.slice(0, -1))}`;
   }
 
   if (scope?.serverScope) {
@@ -426,6 +429,25 @@ export const sessionsDb = {
     );
 
     return sessionId;
+  },
+
+  /**
+   * Последняя использованная в проекте пара «помощник+модель» — чем думал
+   * самый свежий по активности чат папки (Егор 26.10.26: закреплённая папка
+   * запоминает последнюю выбранную модель, новый чат наследует её). Чаты без
+   * записанной модели (созданные, но ещё не отправленные) пропускаются —
+   * «использованной» считается модель, с которой реально шёл ход.
+   */
+  getLatestProjectBrain(projectPath: string): { provider: string; model: string | null } | null {
+    const row = getConnection().prepare(
+      `SELECT provider, model FROM sessions
+       WHERE project_path = ?
+         AND provider IN ('claude', 'devin')
+         AND model IS NOT NULL AND model <> ''
+       ORDER BY updated_at DESC
+       LIMIT 1`
+    ).get(projectPath) as { provider: string; model: string | null } | undefined;
+    return row ?? null;
   },
 
   /**
@@ -862,8 +884,8 @@ export const sessionsDb = {
       // Чаты Codex — свой список, как второй блок (Егор 29.09.26: «его чат
       // находится среди других чатов — странно и неудобно»).
       + (providerSpace === 'codex' ? ` AND sessions.provider = 'codex'` : '')
-      + (providerSpace === 'devin' ? ` AND sessions.provider = 'devin'` : '')
-      + (providerSpace === 'claude' ? ` AND sessions.provider NOT IN ('codex', 'devin')` : '');
+      + (providerSpace === 'devin' ? ` AND (sessions.provider = 'devin' OR ${pinnedProjectPathSql('sessions')})` : '')
+      + (providerSpace === 'claude' ? ` AND sessions.provider NOT IN ('codex', 'devin') AND NOT ${pinnedProjectPathSql('sessions')}` : '');
     // Лента — только чаты, запущенные человеком (Егор 15.10.26: «запуски
     // нейросетей я не должен видеть, мне важен результат»). Служебные =
     // origin='auto' + одноразовые папки (та же логика, что isMachineMadeChat

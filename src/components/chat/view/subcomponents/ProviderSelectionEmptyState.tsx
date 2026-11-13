@@ -58,6 +58,7 @@ function modelSearchFilter(value: string, search: string): number {
 type ProviderSelectionEmptyStateProps = {
   selectedSession: ProjectSession | null;
   currentSessionId: string | null;
+  selectedProject?: { fullPath?: string; displayName?: string } | null;
   provider: LLMProvider;
   setProvider: (next: LLMProvider) => void;
   textareaRef: React.RefObject<HTMLTextAreaElement>;
@@ -78,6 +79,8 @@ type ProviderSelectionEmptyStateProps = {
   isTaskMasterInstalled: boolean | null;
   onShowAllTasks?: (() => void) | null;
   setInput: React.Dispatch<React.SetStateAction<string>>;
+  /** Папка «Промпты»: выбор мозга в этой карточке — явный выбор хода нового чата. */
+  onPromptBrainPick?: (provider: LLMProvider) => void;
 };
 
 type ProviderGroup = {
@@ -121,6 +124,7 @@ function getProviderDisplayName(p: LLMProvider) {
 export default function ProviderSelectionEmptyState({
   selectedSession,
   currentSessionId,
+  selectedProject,
   provider,
   setProvider,
   textareaRef,
@@ -141,6 +145,7 @@ export default function ProviderSelectionEmptyState({
   isTaskMasterInstalled,
   onShowAllTasks,
   setInput,
+  onPromptBrainPick,
 }: ProviderSelectionEmptyStateProps) {
   const { t } = useTranslation("chat");
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -163,18 +168,28 @@ export default function ProviderSelectionEmptyState({
   // rejects their /devin/models request with 403).
   // В режиме «Devin» (выбор в меню аккаунтов) работает только он: других вкладок нет,
   // чтобы случайно не потратить токены Claude или Codex (Егор 03.10.26).
-  const devinOnly = useSelectedChatProvider() === "devin";
+  // В папке «Промпты» выбор мозга разрешён даже в режиме Devin — там живут
+  // обе группы моделей (Егор 26.10.26). В остальных чатах режим Devin
+  // по-прежнему показывает только Devin, чтобы не тратить Claude случайно.
+  const isPromptsFolder =
+    selectedProject?.fullPath === "/home/claude/prompts"
+    || selectedProject?.displayName === "Промпты";
+  const devinOnly = useSelectedChatProvider() === "devin" && !isPromptsFolder;
   const visibleProviderTabs = useMemo(
-    () => PROVIDER_META.filter((p) => (devinOnly
-      ? p.id === "devin"
-      : p.id !== "devin" || providerModelsLoading || providerModelCatalog[p.id] !== undefined)),
-    [providerModelCatalog, providerModelsLoading, devinOnly],
+    () => PROVIDER_META.filter((p) => {
+      // Папка «Промпты»: только живые мозги этого контура — Devin и Claude.
+      // Провайдеры без рабочего доступа (Codex выключен, у Cursor/OpenCode
+      // нет ключей) в списке не нужны (Егор 26.10.26: «лишних, которых нет»).
+      if (isPromptsFolder) {
+        return (p.id === "devin" || p.id === "claude")
+          && (providerModelCatalog[p.id] !== undefined || providerModelsLoading);
+      }
+      return devinOnly
+        ? p.id === "devin"
+        : p.id !== "devin" || providerModelsLoading || providerModelCatalog[p.id] !== undefined;
+    }),
+    [providerModelCatalog, providerModelsLoading, devinOnly, isPromptsFolder],
   );
-
-  const handleDialogOpenChange = useCallback((open: boolean) => {
-    if (open) setPickerProvider(provider);
-    setDialogOpen(open);
-  }, [provider]);
 
   const nextTaskPrompt = t("tasks.nextTaskPrompt", {
     defaultValue: "Start the next task",
@@ -189,13 +204,39 @@ export default function ProviderSelectionEmptyState({
     devinModel,
   );
 
+  // Папка «Промпты»: карточка и вкладка показывают честный мозг нового чата —
+  // последний использованный в папке, а не глобальный выбор (Егор 26.10.26).
+  const folderBrain = useMemo(() => {
+    const sessions = (selectedProject as { sessions?: Array<Record<string, unknown>> } | null | undefined)?.sessions;
+    if (!isPromptsFolder || !sessions?.length) {
+      return null;
+    }
+    const latest = [...sessions].sort(
+      (a, b) => String(b.lastActivity ?? b.updated_at ?? '')
+        .localeCompare(String(a.lastActivity ?? a.updated_at ?? '')),
+    )[0] as { __provider?: LLMProvider; provider?: LLMProvider; model?: string | null } | undefined;
+    const brain = latest?.__provider ?? latest?.provider ?? null;
+    return brain ? { provider: brain, model: latest?.model ?? null } : null;
+  }, [isPromptsFolder, selectedProject]);
+  const displayProvider: LLMProvider = folderBrain?.provider ?? provider;
+  const displayModel =
+    folderBrain?.model
+    ?? (isPromptsFolder && displayProvider === 'claude' ? 'opus' : currentModel);
+
+  // Ниже displayProvider: список зависимостей читается сразу при отрисовке,
+  // выше объявления он ронял весь экран чата (26.10.26).
+  const handleDialogOpenChange = useCallback((open: boolean) => {
+    if (open) setPickerProvider(displayProvider);
+    setDialogOpen(open);
+  }, [displayProvider]);
+
   const currentModelLabel = useMemo(() => {
-    const config = getModelConfig(provider, providerModelCatalog);
+    const config = getModelConfig(displayProvider, providerModelCatalog);
     const found = config.OPTIONS.find(
-      (o: { value: string; label: string }) => o.value === currentModel,
+      (o: { value: string; label: string }) => o.value === displayModel,
     );
-    return found?.label || currentModel;
-  }, [provider, currentModel, providerModelCatalog]);
+    return found?.label || displayModel;
+  }, [displayProvider, displayModel, providerModelCatalog]);
 
   const setModelForProvider = useCallback(
     (providerId: LLMProvider, modelValue: string) => {
@@ -221,13 +262,21 @@ export default function ProviderSelectionEmptyState({
 
   const handleModelSelect = useCallback(
     (providerId: LLMProvider, modelValue: string) => {
-      setProvider(providerId);
-      writeSelectedProvider(providerId);
+      if (isPromptsFolder) {
+        // В папке «Промпты» выбор мозга относится к этому чату: глобальную
+        // отметку аккаунта не двигаем вообще (ни в память, ни в хранилище),
+        // иначе список снова «уезжал» бы в Claude. Выбор идёт в options.provider
+        // отправки — сервер создаст/переключит чат под него.
+        onPromptBrainPick?.(providerId);
+      } else {
+        setProvider(providerId);
+        writeSelectedProvider(providerId);
+      }
       setModelForProvider(providerId, modelValue);
       setDialogOpen(false);
       setTimeout(() => textareaRef.current?.focus(), 100);
     },
-    [setProvider, setModelForProvider, textareaRef],
+    [isPromptsFolder, onPromptBrainPick, setProvider, setModelForProvider, textareaRef],
   );
 
   const openModelLibrary = () => {
@@ -262,13 +311,13 @@ export default function ProviderSelectionEmptyState({
               >
                 <div className="flex items-center gap-2 p-3">
                   <LLMProviderLogo
-                    provider={provider}
+                    provider={displayProvider}
                     className="h-5 w-5 shrink-0"
                   />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-1">
                       <span className="text-xs font-semibold text-foreground">
-                        {getProviderDisplayName(provider)}
+                        {getProviderDisplayName(displayProvider)}
                       </span>
                       <span className="text-xs text-muted-foreground">·</span>
                       <span className="truncate text-xs text-foreground">
@@ -371,7 +420,7 @@ export default function ProviderSelectionEmptyState({
                         </CommandItem>
                       ) : null}
                       {group.models.map((model) => {
-                        const isSelected = provider === group.id && currentModel === model.value;
+                        const isSelected = displayProvider === group.id && displayModel === model.value;
                         return (
                           <CommandItem
                             key={`${group.id}-${model.value}`}

@@ -175,6 +175,7 @@
       "description": "Haz preguntas sobre tu código, pide cambios u obtén ayuda con tareas de desarrollo"
     },
     "loading": {
+      "historySyncing": "Cargando el historial del chat…",
       "olderMessages": "Cargando mensajes anteriores...",
       "sessionMessages": "Cargando mensajes de la sesión..."
     },

@@ -97,6 +97,24 @@ export const devinConnectionsDb = {
       .get(...excludedIds) as DevinConnectionRow | undefined) ?? null;
   },
 
+  /**
+   * Запасной выбор, когда годных нет: включённый канал с отозванной кредой не берём,
+   * а паузу (cooldown) игнорируем — первым идёт тот, у кого она кончается раньше.
+   * 22.10.26: пауза на всю подписку блокировала бесплатные SWE-чаты, хотя лимит
+   * бывает только у платных моделей. Пауза остаётся порядком предпочтения, а не запретом.
+   */
+  pickIgnoringCooldownExcluding(excludedIds: number[]): DevinConnectionRow | null {
+    const marks = excludedIds.map(() => '?').join(',');
+    return (getConnection()
+      .prepare(
+        `SELECT * FROM devin_connections
+         WHERE enabled = 1 AND health_status <> 'auth_failed'
+         ${excludedIds.length ? `AND id NOT IN (${marks})` : ''}
+         ORDER BY COALESCE(cooldown_until, '') ASC, priority ASC, id ASC LIMIT 1`,
+      )
+      .get(...excludedIds) as DevinConnectionRow | undefined) ?? null;
+  },
+
   create(input: {
     name: string;
     description?: string;

@@ -164,7 +164,13 @@ const sendAuthenticatedFetch = (url, options = {}, doorOptions = {}) => {
     // (e.g. an anonymous pre-login status/health check), which is the
     // normal, expected state for a visitor who has never logged in, not an
     // expired session worth alarming them about.
-    if (token && response.headers.get('X-Auth-Error')) {
+    //
+    // The token sent with this request must still BE the stored one: a 401
+    // can arrive late, after a silent re-login already installed a fresh
+    // session. Without the equality check every stale 401 wiped the new
+    // session again, and the screens alternated login <-> loading for as
+    // long as old-token responses kept landing (26.10.26).
+    if (token && response.headers.get('X-Auth-Error') && getStoredAuthToken() === token) {
       expireAuthSession();
     }
     return response;
@@ -195,10 +201,16 @@ export const api = {
       body: JSON.stringify({ username, inviteToken }),
     }),
     // Instant login via a persistent login-link token (the `/enter/<token>` URL).
+    // Timeout: the request used to hang without limit, and on the owner's
+    // freezing home route a silent re-login could sit on the login screen
+    // for minutes. A timed-out enter is retried by the auth state machine.
     enter: (token) => doorFetch('/api/auth/enter', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token }),
+      ...(typeof AbortSignal !== 'undefined' && AbortSignal.timeout
+        ? { signal: AbortSignal.timeout(15000) }
+        : {}),
     }),
     // Public: checks whether an invite token (the `/invite/<token>` URL) is
     // still valid before showing the registration form.
@@ -376,6 +388,9 @@ export const api = {
   // (spinner/toast) rather than something callers need to apply themselves.
   // Группы чатов: список (свежие сверху), создание, группа одного чата.
   chatGroups: () => authenticatedFetch('/api/chat-groups'),
+  // Сохранённые промпты для вставки в поле ввода (файл saved-prompts.json
+  // рядом с базой инстанса; пополняется правкой файла, без UI).
+  savedPrompts: () => authenticatedFetch('/api/saved-prompts'),
   createChatGroup: (name, keywords = []) =>
     authenticatedFetch('/api/chat-groups', {
       method: 'POST',

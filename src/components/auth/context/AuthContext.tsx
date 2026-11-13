@@ -139,35 +139,66 @@ export function AuthProvider({ children }: AuthProviderProps) {
   /**
    * Exchanges an `/enter/<token>` magic-link token for a session, and
    * remembers the token so a later expiry can repeat this without the user
-   * having to find the link again. Returns whether the exchange succeeded;
-   * callers decide what to show when it did not.
+   * having to find the link again.
+   *
+   * Outcome is a tri-state, not a boolean: 'rejected' means the server
+   * explicitly refused the link (4xx - dead/regenerated, worth showing the
+   * login screen), 'unreachable' means the network or the server itself
+   * failed (5xx/timeout - worth a retry, NOT the login screen). Mixing the
+   * two was what showed a false "Вход" on every connection hiccup.
    */
-  const enterWithLoginLinkToken = useCallback(async (loginToken: string): Promise<boolean> => {
-    try {
-      const enterResponse = await api.auth.enter(loginToken);
-      const enterPayload = await parseJsonSafely<AuthSessionPayload>(enterResponse);
+  const enterInFlightRef = useRef(new Map<string, Promise<'ok' | 'rejected' | 'unreachable'>>());
 
-      if (!enterResponse.ok || !enterPayload?.token || !enterPayload.user) {
-        return false;
+  const enterWithLoginLinkTokenOnce = useCallback(
+    async (loginToken: string): Promise<'ok' | 'rejected' | 'unreachable'> => {
+      try {
+        const enterResponse = await api.auth.enter(loginToken);
+        if (!enterResponse.ok) {
+          return enterResponse.status >= 500 ? 'unreachable' : 'rejected';
+        }
+        const enterPayload = await parseJsonSafely<AuthSessionPayload>(enterResponse);
+        if (!enterPayload?.token || !enterPayload.user) {
+          return 'unreachable';
+        }
+
+        setSession(enterPayload.user, enterPayload.token);
+        storeLoginLinkToken(loginToken);
+        // From here on, "Add to Home Screen" produces an icon that opens this
+        // link rather than a logged-out "/".
+        installLoginLinkManifest(loginToken);
+        setNeedsSetup(false);
+        setOpenRegistration(true);
+        setError(null);
+        await checkOnboardingStatus();
+        return 'ok';
+      } catch (caughtError) {
+        // A network blip must not look like a rejected link: keep the remembered
+        // token and let the next attempt (reload, focus, expiry) try again.
+        console.warn('[Auth] Login-link sign-in failed:', caughtError);
+        return 'unreachable';
       }
+    },
+    [checkOnboardingStatus, setSession],
+  );
 
-      setSession(enterPayload.user, enterPayload.token);
-      storeLoginLinkToken(loginToken);
-      // From here on, "Add to Home Screen" produces an icon that opens this
-      // link rather than a logged-out "/".
-      installLoginLinkManifest(loginToken);
-      setNeedsSetup(false);
-      setOpenRegistration(true);
-      setError(null);
-      await checkOnboardingStatus();
-      return true;
-    } catch (caughtError) {
-      // A network blip must not look like a rejected link: keep the remembered
-      // token and let the next attempt (reload, focus, expiry) try again.
-      console.warn('[Auth] Login-link sign-in failed:', caughtError);
-      return false;
-    }
-  }, [checkOnboardingStatus, setSession]);
+  const enterWithLoginLinkToken = useCallback(
+    (loginToken: string): Promise<'ok' | 'rejected' | 'unreachable'> => {
+      // Одно и то же восстановление может запуститься из нескольких мест
+      // разом (событие истечения + проверка статуса + WS): вход один —
+      // все ждущие получают общий промис.
+      const running = enterInFlightRef.current.get(loginToken);
+      if (running) {
+        return running;
+      }
+      const attempt = enterWithLoginLinkTokenOnce(loginToken);
+      enterInFlightRef.current.set(loginToken, attempt);
+      void attempt.finally(() => {
+        enterInFlightRef.current.delete(loginToken);
+      });
+      return attempt;
+    },
+    [enterWithLoginLinkTokenOnce],
+  );
 
   const refreshSession = useCallback(async () => {
     if (IS_PLATFORM || !token || !user) {
@@ -210,10 +241,30 @@ export function AuthProvider({ children }: AuthProviderProps) {
         setError(AUTH_ERROR_MESSAGES.sessionExpired);
         return;
       }
-      void enterWithLoginLinkToken(rememberedLoginToken).then((signedIn) => {
-        if (!signedIn) {
-          setError(AUTH_ERROR_MESSAGES.sessionExpired);
+      // The silent re-login used to run while ProtectedRoute already showed
+      // the login screen: user=null + isLoading=false = "Вход в Claude UI"
+      // flashing for the whole exchange, and every late 401 restarted the
+      // cycle. While the re-login runs, this is a LOADING screen (26.10.26):
+      // оба маркера — isLoading и statusCheckFailedAt — потому что
+      // параллельный checkAuthStatus может снять isLoading раньше времени.
+      setIsLoading(true);
+      setStatusCheckFailedAt(Date.now());
+      void enterWithLoginLinkToken(rememberedLoginToken).then((outcome) => {
+        setIsLoading(false);
+        if (outcome === 'ok') {
+          setStatusCheckFailedAt(null);
+          statusRetriesRef.current = 0;
+          return;
         }
+        if (outcome === 'rejected') {
+          setStatusCheckFailedAt(null);
+          clearStoredLoginLinkToken();
+          setError(AUTH_ERROR_MESSAGES.loginLinkInvalid);
+          return;
+        }
+        // 'unreachable': связь подвела — не выход. Маркер оставляем —
+        // механизм повторов (statusCheckFailedAt → checkAuthStatus)
+        // поднимет вход сам.
       });
     };
 
@@ -225,7 +276,17 @@ export function AuthProvider({ children }: AuthProviderProps) {
     };
   }, [clearSession, enterWithLoginLinkToken]);
 
+  // Единовременно может идти только одна проверка входа: параллельные прогоны
+  // (таймер повтора + online/visibilitychange) наступали друг другу на пятки —
+  // один уже восстановил сессию, а второй ещё шёл по старой ветке и снова её
+  // сносил (26.10.26).
+  const checkInFlightRef = useRef(false);
+
   const checkAuthStatus = useCallback(async () => {
+    if (checkInFlightRef.current) {
+      return;
+    }
+    checkInFlightRef.current = true;
     // Провал отмечается в catch, а успех — отсутствием провала: выходов из
     // try несколько (настройка, приглашение, вход по ссылке), и все они
     // проходят через finally.
@@ -263,8 +324,13 @@ export function AuthProvider({ children }: AuthProviderProps) {
       const loginLinkMatch = window.location.pathname.match(LOGIN_LINK_PATH_PATTERN);
       if (loginLinkMatch) {
         const loginToken = decodeURIComponent(loginLinkMatch[1]);
-        if (await enterWithLoginLinkToken(loginToken)) {
+        const outcome = await enterWithLoginLinkToken(loginToken);
+        if (outcome === 'ok') {
           return;
+        }
+        if (outcome === 'unreachable') {
+          // Связь, а не отказ ссылки — повтор через механизм ниже.
+          throw new Error('Login-link exchange unreachable');
         }
 
         setError(AUTH_ERROR_MESSAGES.loginLinkInvalid);
@@ -284,18 +350,17 @@ export function AuthProvider({ children }: AuthProviderProps) {
         const currentInviteToken = decodeURIComponent(inviteLinkMatch[1]);
         setInviteToken(currentInviteToken);
         setInviteStatus('checking');
-        try {
-          const inviteResponse = await api.auth.inviteStatus(currentInviteToken);
-          const invitePayload = await parseJsonSafely<InviteStatusPayload>(inviteResponse);
-          if (inviteResponse.ok && invitePayload?.valid) {
-            setInviteStatus('valid');
-            setInviteLabel(invitePayload.label ?? null);
-          } else {
-            setInviteStatus('invalid');
-            setInviteLabel(null);
-          }
-        } catch (inviteError) {
-          console.error('[Auth] Invite status check failed:', inviteError);
+        const inviteResponse = await api.auth.inviteStatus(currentInviteToken);
+        if (!inviteResponse.ok) {
+          // 5xx/окно рестарта ≠ «приглашение мёртво» — уходим в общий повтор,
+          // а не в экран «ссылка не работает».
+          throw new Error(`invite-status HTTP ${inviteResponse.status}`);
+        }
+        const invitePayload = await parseJsonSafely<InviteStatusPayload>(inviteResponse);
+        if (invitePayload?.valid) {
+          setInviteStatus('valid');
+          setInviteLabel(invitePayload.label ?? null);
+        } else {
           setInviteStatus('invalid');
           setInviteLabel(null);
         }
@@ -306,6 +371,12 @@ export function AuthProvider({ children }: AuthProviderProps) {
       }
 
       const statusResponse = await api.auth.status();
+      // Не-200 — это не «входа нет»: 502 в окне рестарта раньше молча
+      // сбрасывало openRegistration и вело на чужой экран входа. Любой сбой
+      // ответа — в повтор, как и сетевую ошибку.
+      if (!statusResponse.ok) {
+        throw new Error(`auth status HTTP ${statusResponse.status}`);
+      }
       const statusPayload = await parseJsonSafely<AuthStatusPayload>(statusResponse);
 
       setOpenRegistration(Boolean(statusPayload?.openRegistration));
@@ -322,27 +393,52 @@ export function AuthProvider({ children }: AuthProviderProps) {
       // quietly aged out of its week. If this browser ever came in through a
       // login link, use it: the link stays valid until its owner regenerates
       // it, so there is nothing for the user to do here.
-      const signInWithRememberedLink = async (): Promise<boolean> => {
+      const signInWithRememberedLink = async (): Promise<'ok' | 'rejected' | 'unreachable' | 'none'> => {
         const rememberedLoginToken = readStoredLoginLinkToken();
-        return rememberedLoginToken ? enterWithLoginLinkToken(rememberedLoginToken) : false;
+        if (!rememberedLoginToken) {
+          return 'none';
+        }
+        const outcome = await enterWithLoginLinkToken(rememberedLoginToken);
+        // Мёртвую ссылку не таскаем за собой: каждая следующая загрузка
+        // иначе снова начинала бы с заведомо отклонённого обмена.
+        if (outcome === 'rejected') {
+          clearStoredLoginLinkToken();
+        }
+        return outcome;
       };
 
       if (!tokenRef.current) {
-        await signInWithRememberedLink();
+        const outcome = await signInWithRememberedLink();
+        if (outcome === 'unreachable') {
+          // Сеть/сервер подвели — повтор, а не экран входа.
+          throw new Error('remembered-link sign-in unreachable');
+        }
         return;
       }
 
       const userResponse = await api.auth.user();
       if (!userResponse.ok) {
-        clearSession();
-        await signInWithRememberedLink();
-        return;
+        // «Не вошёл» — только явные 401/403 от сервера. 5xx (окно рестарта,
+        // перегруз) — временное: сессию не трогаем, уходим в повтор, иначе
+        // каждый рестарт службы выбивал человека на экран входа.
+        if (userResponse.status === 401 || userResponse.status === 403) {
+          clearSession();
+          const outcome = await signInWithRememberedLink();
+          if (outcome === 'unreachable') {
+            throw new Error('post-401 re-login unreachable');
+          }
+          return;
+        }
+        throw new Error(`auth user HTTP ${userResponse.status}`);
       }
 
       const userPayload = await parseJsonSafely<AuthUserPayload>(userResponse);
       if (!userPayload?.user) {
         clearSession();
-        await signInWithRememberedLink();
+        const outcome = await signInWithRememberedLink();
+        if (outcome === 'unreachable') {
+          throw new Error('re-login unreachable');
+        }
         return;
       }
 
@@ -357,6 +453,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
       failed = true;
       setStatusCheckFailedAt(Date.now());
     } finally {
+      checkInFlightRef.current = false;
       if (!alreadyAuthenticated) {
         setIsLoading(false);
       }

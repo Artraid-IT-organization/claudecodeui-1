@@ -137,6 +137,27 @@ rl.on('line', (line) => {
         setTimeout(() => process.exit(0), 1000);
         return;
       }
+      if (process.env.DEVIN_INCOMPLETE === 'pending_work') {
+        // Реальный обрыв twilight-ursinia (22.10): структурированный пересказ
+        // состояния, заканчивающийся объявленным своим шагом — раньше проходил
+        // эвристику как «полный» из-за списков.
+        if (promptCount === 1) {
+          notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Где сейчас работа:\\n\\n- Ветка от develop, базовый контракт закоммичен.\\n- В дереве незакоммиченная правка парсера.\\n- Найденный риск: ложные отказы рождаются в intake.\\n- Автоотказ никуда не подключён.\\n- На проде не изменено ничего.\\n\\nДальше: дожму и закоммичу правку, затем разбор intake и прогон обработчика.' } } });
+        } else {
+          notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '## Ответ\\n\\nПравка закоммичена, обработчик прогнан, всё проверено.' } } });
+        }
+        respond(msg.id, { stopReason: 'end_turn' });
+        setTimeout(() => process.exit(0), 1000);
+        return;
+      }
+      if (process.env.DEVIN_INCOMPLETE === 'same_incomplete_repeat') {
+        // Модель упорно повторяет тот же вопрос-разрешение — это её осознанный
+        // ответ, а не обрыв: один пинок, затем штатное завершение без ошибки.
+        notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Состояние не изменилось. Продолжаю?' } } });
+        respond(msg.id, { stopReason: 'end_turn' });
+        setTimeout(() => process.exit(0), 1000);
+        return;
+      }
       if (process.env.DEVIN_INCOMPLETE === 'tool_only') {
         notify('session/update', { sessionId: sid, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Проверяю данные.' } } });
         notify('session/update', { sessionId: sid, update: { sessionUpdate: 'tool_call', toolCallId: 'tc-incomplete', title: 'Read', kind: 'read' } });
@@ -387,6 +408,39 @@ test('devin runtime: a stalled first answer recovers via auto-continue without a
     assert.ok(!writer.messages.some((message) => message.kind === 'error'));
     const completes = writer.messages.filter((message) => message.kind === 'complete');
     assert.equal(completes.length, 1);
+    assert.equal(completes[0].exitCode, 0);
+  });
+});
+
+test('devin runtime: recap with declared own next step auto-continues (twilight-ursinia regression)', async () => {
+  await withFakeDevin(async (tempRoot) => {
+    process.env.DEVIN_INCOMPLETE = 'pending_work';
+    const writer = makeWriter();
+
+    await devinRuntime.run('Проверь телефоны в CRM', { cwd: tempRoot, sessionId: 'app-pending-work' }, writer, runtimeContext);
+
+    const capture = JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8'));
+    const prompts = capture.calls.filter((call) => call.method === 'session/prompt');
+    assert.equal(prompts.length, 2, 'structured recap declaring own work must be continued');
+    assert.ok(prompts[1].params.prompt[0].text.includes('cc2-auto-continue'));
+    assert.ok(!writer.messages.some((message) => message.kind === 'error'));
+    const completes = writer.messages.filter((message) => message.kind === 'complete');
+    assert.equal(completes[0].exitCode, 0);
+  });
+});
+
+test('devin runtime: repeated identical pending tail ends the turn cleanly, no error', async () => {
+  await withFakeDevin(async (tempRoot) => {
+    process.env.DEVIN_INCOMPLETE = 'same_incomplete_repeat';
+    const writer = makeWriter();
+
+    await devinRuntime.run('Статус?', { cwd: tempRoot, sessionId: 'app-repeat-tail' }, writer, runtimeContext);
+
+    const capture = JSON.parse(await readFile(process.env.DEVIN_RPC_CAPTURE, 'utf8'));
+    const prompts = capture.calls.filter((call) => call.method === 'session/prompt');
+    assert.equal(prompts.length, 2, 'one auto-continue, then the deliberate answer stands');
+    assert.ok(!writer.messages.some((message) => message.kind === 'error'), 'conscious repeat is not a failure');
+    const completes = writer.messages.filter((message) => message.kind === 'complete');
     assert.equal(completes[0].exitCode, 0);
   });
 });
@@ -869,6 +923,25 @@ test('devin runtime: completeness classifier regression', async () => {
   // Инструмент без последующего текста — не завершение.
   assert.equal(isIncompleteDevinResponse('Проверяю данные.', true, ''), true);
   assert.equal(isIncompleteDevinResponse('Проверяю данные.', true, 'Вот ответ.'), false);
+
+  // Боевые обрывы 22.10 (twilight-ursinia): структура есть, но хвост объявляет
+  // свою работу или просит разрешения — такой финал недоделан.
+  assert.equal(isIncompleteDevinResponse(
+    'Обновил `agent.md`: описал изменения, отметил необходимость повторных тестов. `git diff --check` — без ошибок.\n\nДальше: дожму и закоммичу правку, затем разбор intake.',
+    true,
+    'Обновил `agent.md`: описал изменения, отметил необходимость повторных тестов. `git diff --check` — без ошибок.\n\nДальше: дожму и закоммичу правку, затем разбор intake.',
+  ), true);
+  assert.equal(isIncompleteDevinResponse(
+    'Где сейчас работа:\n- Ветка закоммичена.\n- Правка в дереве.\n- Риск найден.\n- Автоотказ не подключён.\n- На проде не изменено.\n\nДальше: дожму и закоммичу правку.',
+    false,
+  ), true);
+  assert.equal(isIncompleteDevinResponse('Состояние не изменилось. Ближайшее действие — перепрогнать selftest. Продолжаю?', false), true);
+  assert.equal(isIncompleteDevinResponse('## Ответ\n\nСделано почти всё. Осталось: закоммитить checkpoint и прогнать selftest.', false), true);
+
+  // Легальные финалы: шаги человеку / внешнему процессу — завершение, а не обрыв.
+  assert.equal(isIncompleteDevinResponse('## Ответ\n\n🟡 Готово частично.\n\n## Дальше\nНужно от вас: перезапуск службы — требует sudo.', false), false);
+  assert.equal(isIncompleteDevinResponse('## Дальше\nПо плану: сторож пришлёт результат проверки через 30 минут.', false), false);
+  assert.equal(isIncompleteDevinResponse('## Готово\nPR подготовлен к ревью, в прод не внедрено — решение за человеком, пришлите вердикт.', false), false);
 
   // Реальный обрывный ответ из сессии sable-fragment (17.10.26) должен был
   // считаться полноценным, а не ошибкой.

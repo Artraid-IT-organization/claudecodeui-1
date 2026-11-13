@@ -25,6 +25,10 @@ const BARE_IMAGE_NAME_PATTERN = /^[^\s/?#]+\.(?:png|jpe?g|gif|webp|svg)$/i;
 function ProtectedMarkdownImage({ image, alt }: { image: ChatImage; alt: string }) {
   const { src, failed } = useChatImageSrc(image);
   const [expanded, setExpanded] = useState(false);
+  // Пока картинка не раскодирована, держим высоту заглушки: иначе строка
+  // меняла высоту дважды (заглушка → пустой <img> → картинка) и лента
+  // вздрагивала на каждой картинке выше экрана.
+  const [loaded, setLoaded] = useState(false);
 
   if (failed) {
     return (
@@ -49,7 +53,9 @@ function ProtectedMarkdownImage({ image, alt }: { image: ChatImage; alt: string 
         <img
           src={src}
           alt={alt}
-          className="block max-h-80 w-auto max-w-full cursor-zoom-in object-contain"
+          onLoad={() => setLoaded(true)}
+          onError={() => setLoaded(true)}
+          className={`block max-h-80 w-auto max-w-full cursor-zoom-in object-contain${loaded ? '' : ' min-h-40'}`}
         />
       </button>
       {expanded && <ImageLightbox src={src} alt={alt} onClose={() => setExpanded(false)} />}

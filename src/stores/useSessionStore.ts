@@ -176,6 +176,12 @@ export interface SessionSlot {
    * request calculates its offset after any latest-page refresh completes.
    */
   _historyMutationQueue: Promise<void>;
+  /**
+   * @internal Сколько операций с историей (первичная загрузка, ранние
+   * порции, догон хвоста) стоит в очереди или в полёте прямо сейчас.
+   * >0 — «история догружается»: единый источник для индикатора у низа ленты.
+   */
+  historyInFlight: number;
   status: SessionStatus;
   fetchedAt: number;
   total: number;
@@ -216,6 +222,7 @@ function createEmptySlot(): SessionSlot {
     transcriptMissing: false,
     errorKind: null,
     runOutcome: null,
+    historyInFlight: 0,
     _historyMutationQueue: Promise.resolve(),
   };
 }
@@ -477,6 +484,27 @@ export function useSessionStore() {
   }, []);
 
   /**
+   * Обёртка над enqueueHistoryMutation: держит счётчик historyInFlight и
+   * будит рендер просматриваемого чата на переходах 0↔1 — индикатор
+   * «история догружается» показывает реальное состояние, а не таймер.
+   */
+  const trackedHistoryMutation = useCallback(<T,>(
+    sessionId: string,
+    operation: () => Promise<T>,
+  ): Promise<T> => {
+    const slot = getSlot(sessionId);
+    slot.historyInFlight += 1;
+    if (slot.historyInFlight === 1) notify(sessionId);
+    const done = () => {
+      slot.historyInFlight = Math.max(0, slot.historyInFlight - 1);
+      if (slot.historyInFlight === 0) notify(sessionId);
+    };
+    const result = enqueueHistoryMutation(slot, operation);
+    result.then(done, done);
+    return result;
+  }, [getSlot, notify]);
+
+  /**
    * Fetch messages from the provider sessions endpoint and populate serverMessages.
    *
    * Provider and project metadata are resolved server-side from `sessionId`.
@@ -494,7 +522,7 @@ export function useSessionStore() {
     slot.status = 'loading';
     notify(sessionId);
 
-    return enqueueHistoryMutation(slot, async () => {
+    return trackedHistoryMutation(sessionId, async () => {
       const { canRequest = () => true, ...requestOptions } = opts;
       if (!canRequest()) {
         slot.status = 'idle';
@@ -531,7 +559,7 @@ export function useSessionStore() {
         return slot;
       }
     });
-  }, [getSlot, notify]);
+  }, [getSlot, notify, trackedHistoryMutation]);
 
   /**
    * Load older (paginated) messages and prepend to serverMessages.
@@ -544,7 +572,7 @@ export function useSessionStore() {
     } = {},
   ) => {
     const slot = getSlot(sessionId);
-    return enqueueHistoryMutation(slot, async () => {
+    return trackedHistoryMutation(sessionId, async () => {
       let prependedCount = 0;
       let changed = false;
       const canRequest = opts.canRequest ?? (() => true);
@@ -611,7 +639,7 @@ export function useSessionStore() {
         return { slot, prependedCount };
       }
     });
-  }, [getSlot, notify]);
+  }, [getSlot, notify, trackedHistoryMutation]);
 
   /**
    * Append a realtime (WebSocket) message to the correct session slot.
@@ -666,7 +694,7 @@ export function useSessionStore() {
   ) => {
     const slot = getSlot(sessionId);
 
-    return enqueueHistoryMutation(slot, async () => {
+    return trackedHistoryMutation(sessionId, async () => {
       try {
         const result = await refreshLatestSlotFromServer(
           sessionId,
@@ -682,7 +710,7 @@ export function useSessionStore() {
         return { slot, applied: false, changed: false, deferred: false, failed: failed.slice(0, 80) || 'error' };
       }
     });
-  }, [getSlot, notify]);
+  }, [getSlot, notify, trackedHistoryMutation]);
 
   /**
    * Update session status.

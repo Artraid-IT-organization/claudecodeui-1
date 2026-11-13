@@ -12,11 +12,8 @@
 import Database from 'better-sqlite3';
 
 import {
+  DEVIN_AUTO_CONTINUE_TAG,
   getDevinDatabasePath,
-  isDevinAutoContinueText,
-  readJsonRecord,
-  readObjectRecord,
-  readOptionalString,
 } from '@/shared/utils.js';
 
 export type DevinChainRow = {
@@ -27,12 +24,60 @@ export type DevinChainRow = {
   createdAt: number | null;
 };
 
-type DevinNodeRow = {
+/**
+ * Узел дерева без тела `chat_message`. Снимки контекста — сотни МБ на
+ * беседу, поэтому тела достаются вторым проходом только для принятых узлов
+ * (иначе `.all()` по 15 тыс. снимков укладывал весь процесс в OOM,
+ * 09.11.26). Поля разбора приходят скалярами из json_extract/instr — это
+ * ровно те данные, что parse() доставал из распарсенного JSON.
+ */
+type DevinNodeMetaRow = {
+  row_id: number;
   node_id: number;
   parent_node_id: number | null;
-  chat_message: string;
   created_at: number | null;
+  role: string | null;
+  message_id: string | null;
+  meta_created_at: string | number | null;
+  has_auto_continue: number;
+  has_summarize_marker: number;
 };
+
+const NODE_META_SELECT = `
+  SELECT row_id, node_id, parent_node_id, created_at,
+         json_extract(chat_message, '$.role') AS role,
+         json_extract(chat_message, '$.message_id') AS message_id,
+         json_extract(chat_message, '$.metadata.created_at') AS meta_created_at,
+         instr(chat_message, ?) > 0 AS has_auto_continue,
+         instr(lower(chat_message), 'conversation to summarize:') > 0 AS has_summarize_marker
+  FROM message_nodes
+  WHERE session_id = ?
+`;
+
+/**
+ * Тела chat_message для выбранных row_id — кусками, чтобы не упираться в
+ * лимит переменных SQLite. Второй проход двухпроходной загрузки: на этом
+ * этапе в кучу идут только реплики, которые реально попадут в ленту.
+ */
+function loadMessageBodies(
+  db: InstanceType<typeof Database>,
+  providerSessionId: string,
+  rowIds: number[],
+): Map<number, string> {
+  const bodies = new Map<number, string>();
+  const CHUNK = 500;
+  for (let i = 0; i < rowIds.length; i += CHUNK) {
+    const chunk = rowIds.slice(i, i + CHUNK);
+    const rows = db
+      .prepare(
+        `SELECT row_id, chat_message FROM message_nodes
+         WHERE session_id = ? AND row_id IN (${chunk.map(() => '?').join(',')})`,
+      )
+      .all(providerSessionId, ...chunk) as { row_id: number; chat_message: string }[];
+    for (const row of rows) bodies.set(row.row_id, row.chat_message);
+  }
+  return bodies;
+}
 
 /**
  * Цепочка от корня к вершине — в порядке разговора.
@@ -47,16 +92,11 @@ export function liveDevinChain(
   providerSessionId: string,
 ): DevinChainRow[] {
   const rows = db
-    .prepare('SELECT node_id, parent_node_id, chat_message, created_at FROM message_nodes WHERE session_id = ?')
-    .all(providerSessionId) as DevinNodeRow[];
-  const byId = new Map<number, DevinChainRow>();
+    .prepare(NODE_META_SELECT)
+    .all(DEVIN_AUTO_CONTINUE_TAG, providerSessionId) as DevinNodeMetaRow[];
+  const byId = new Map<number, DevinNodeMetaRow>();
   for (const row of rows) {
-    byId.set(row.node_id, {
-      nodeId: row.node_id,
-      parentId: row.parent_node_id,
-      chatMessage: row.chat_message,
-      createdAt: row.created_at,
-    });
+    byId.set(row.node_id, row);
   }
 
   const sessionRow = db
@@ -68,15 +108,23 @@ export function liveDevinChain(
     ? sessionRow.main_chain_id
     : rows.reduce<number | null>((acc, row) => (acc === null || row.node_id > acc ? row.node_id : acc), null);
 
-  const chain: DevinChainRow[] = [];
+  const chain: DevinNodeMetaRow[] = [];
   const seen = new Set<number>();
   while (tip !== null && byId.has(tip) && !seen.has(tip)) {
     seen.add(tip);
     const node = byId.get(tip)!;
     chain.push(node);
-    tip = node.parentId;
+    tip = node.parent_node_id;
   }
-  return chain.reverse();
+  chain.reverse();
+
+  const bodies = loadMessageBodies(db, providerSessionId, chain.map((row) => row.row_id));
+  return chain.map((row) => ({
+    nodeId: row.node_id,
+    parentId: row.parent_node_id,
+    chatMessage: bodies.get(row.row_id) ?? '',
+    createdAt: row.created_at,
+  }));
 }
 
 /**
@@ -111,10 +159,10 @@ export function fullDevinConversation(
   db: InstanceType<typeof Database>,
   providerSessionId: string,
 ): DevinChainRow[] {
-  type RawRow = DevinNodeRow & { row_id: number };
+  type RawRow = DevinNodeMetaRow;
   const rows = db
-    .prepare('SELECT row_id, node_id, parent_node_id, chat_message, created_at FROM message_nodes WHERE session_id = ?')
-    .all(providerSessionId) as RawRow[];
+    .prepare(NODE_META_SELECT)
+    .all(DEVIN_AUTO_CONTINUE_TAG, providerSessionId) as RawRow[];
   if (rows.length === 0) return [];
 
   const byId = new Map<number, RawRow>();
@@ -142,26 +190,20 @@ export function fullDevinConversation(
   const parse = (row: RawRow): Parsed => {
     const cached = parsedByRowId.get(row.row_id);
     if (cached) return cached;
-    const message = readJsonRecord(row.chat_message) ?? {};
-    const metadata = readObjectRecord(message.metadata);
-    const messageId = readOptionalString(message.message_id);
-    const atMeta = metadata?.created_at;
+    const atMeta = row.meta_created_at;
     const parsedAt = typeof atMeta === 'string' ? Date.parse(atMeta)
       : typeof atMeta === 'number' ? normalizeProviderTimestampMs(atMeta)
       : NaN;
-    const content = readOptionalString(message.content) ?? '';
-    const role = readOptionalString(message.role);
     const parsed: Parsed = {
-      key: messageId ?? `node_${row.node_id}`,
+      key: row.message_id ?? `node_${row.node_id}`,
       time: Number.isFinite(parsedAt)
         ? parsedAt
         : (typeof row.created_at === 'number' ? row.created_at * 1000 : 0),
       // Служебное автопродолжение — не ход человека: оно не должно ни
       // «засвидетельствовать» снимки, ни становиться последним ходом.
-      isUser: role === 'user' && !isDevinAutoContinueText(content),
-      isAgentWork: role === 'assistant' || role === 'tool',
-      isSummarizeMarker: role === 'user'
-        && /conversation to summarize:/i.test(content),
+      isUser: row.role === 'user' && !row.has_auto_continue,
+      isAgentWork: row.role === 'assistant' || row.role === 'tool',
+      isSummarizeMarker: row.role === 'user' && row.has_summarize_marker !== 0,
     };
     parsedByRowId.set(row.row_id, parsed);
     return parsed;
@@ -243,14 +285,16 @@ export function fullDevinConversation(
     }
   }
 
-  return [...accepted.values()]
+  const acceptedRows = [...accepted.values()]
     .sort((a, b) => (a.time - b.time) || (a.row.row_id - b.row.row_id))
-    .map(({ row }) => ({
-      nodeId: row.node_id,
-      parentId: row.parent_node_id,
-      chatMessage: row.chat_message,
-      createdAt: row.created_at,
-    }));
+    .map(({ row }) => row);
+  const bodies = loadMessageBodies(db, providerSessionId, acceptedRows.map((row) => row.row_id));
+  return acceptedRows.map((row) => ({
+    nodeId: row.node_id,
+    parentId: row.parent_node_id,
+    chatMessage: bodies.get(row.row_id) ?? '',
+    createdAt: row.created_at,
+  }));
 }
 
 /** metadata.created_at бывает секундами и миллисекундами — к миллисекундам. */

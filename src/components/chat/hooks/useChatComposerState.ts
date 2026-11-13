@@ -27,6 +27,7 @@ import {
   writeDraftInput,
 } from '../utils/chatStorage';
 import { clearAttachmentDraft, stashAttachmentDraft, takeAttachmentDraft } from '../utils/attachmentDrafts';
+import { INSERT_COMPOSER_TEXT_EVENT } from '../utils/composerInsert';
 import {
   appendPendingSend,
   clearPendingSends,
@@ -122,6 +123,12 @@ interface UseChatComposerStateArgs {
   selectedSession: ProjectSession | null;
   currentSessionId: string | null;
   provider: LLMProvider;
+  /** Мозг хода в чате привязанной вкладки («Промпты»); у остальных — null. */
+  pinnedBrainProvider?: LLMProvider | null;
+  /** Провайдер, под которым создаётся новая сессия в записи очереди: у
+   *  привязанной вкладки — мозг папки/явный выбор, не глобальный provider,
+   *  иначе свежий Claude-чат вспыхивал Devin до синхронизации сессии. */
+  sessionCreateProvider?: LLMProvider | null;
   permissionMode: PermissionMode | string;
   cyclePermissionMode: () => void;
   resolvePermissionModeForProvider: (provider: LLMProvider, requestedMode: PermissionMode | string) => PermissionMode;
@@ -393,6 +400,8 @@ export function useChatComposerState({
   selectedSession,
   currentSessionId,
   provider,
+  pinnedBrainProvider = null,
+  sessionCreateProvider = null,
   permissionMode,
   cyclePermissionMode,
   resolvePermissionModeForProvider,
@@ -938,8 +947,11 @@ export function useChatComposerState({
     const toolsSettings = getToolsSettings();
 
     return {
+      // Мозг хода в чате привязанной вкладки («Промпты»): приходит из
+      // объединённого меню моделей, сервер переключает сессию по нему.
+      ...(pinnedBrainProvider ? { provider: pinnedBrainProvider } : {}),
       // Подписка Devin из пикера аккаунтов: платит за этот ход (новый или открытый чат), если годна.
-      ...(provider === 'devin' ? { devinConnectionId: readSelectedDevinConnectionId() } : {}),
+      ...((pinnedBrainProvider ?? provider) === 'devin' ? { devinConnectionId: readSelectedDevinConnectionId() } : {}),
       model: currentProviderModel,
       effort: currentProviderEffort,
       permissionMode: resolvePermissionModeForProvider(provider, permissionMode),
@@ -956,6 +968,7 @@ export function useChatComposerState({
     currentProviderEffort,
     currentProviderModel,
     permissionMode,
+    pinnedBrainProvider,
     provider,
     resolvePermissionModeForProvider,
     selectedSession,
@@ -1146,7 +1159,7 @@ export function useChatComposerState({
         content,
         attachments: uploadedAttachments,
         options: buildSendOptions(content),
-        provider,
+        provider: sessionCreateProvider ?? provider,
         projectPath: (selectedProject?.fullPath || selectedProject?.path || '') as string,
         summary: getNotificationSessionSummary(null, content),
         sessionId: null,
@@ -1863,6 +1876,41 @@ export function useChatComposerState({
     window.addEventListener(CONTINUE_IN_PROVIDER_EVENT, onContinue);
     return () => window.removeEventListener(CONTINUE_IN_PROVIDER_EVENT, onContinue);
   }, [onStartNewChat, selectedProject]);
+
+  /*
+   * Сохранённый промпт из шапки (меню «Промпты»): вставка в поле, НЕ отправка.
+   * Типовой ход Егора: вставить «Разбор задачи» → дописать ссылку YouGile →
+   * отправить, поэтому текст кладём в позицию курсора (или заменяем
+   * выделенное), фокус возвращаем в поле, каретку — в конец вставки.
+   * Черновик сохраняет обычный эффект на `input`, отдельно писать не нужно.
+   */
+  useEffect(() => {
+    const onInsert = (event: Event) => {
+      const text = (event as CustomEvent<{ text?: unknown }>).detail?.text;
+      if (typeof text !== 'string' || !text) return;
+      const area = textareaRef.current;
+      const current = inputValueRef.current;
+      const start = area ? area.selectionStart : current.length;
+      const end = area ? area.selectionEnd : current.length;
+      const next = current.slice(0, start) + text + current.slice(end);
+      inputValueRef.current = next;
+      setInput(next);
+      const caret = start + text.length;
+      setCursorPosition(caret);
+      if (area) {
+        // Фокус и выбор — на следующий кадр: меню в шапке само возвращает
+        // фокус на свою кнопку эффектом после выбора пункта, а браузер
+        // сбрасывает каретку при подмене value контролируемого поля.
+        requestAnimationFrame(() => {
+          if (textareaRef.current !== area) return;
+          area.focus();
+          area.setSelectionRange(caret, caret);
+        });
+      }
+    };
+    window.addEventListener(INSERT_COMPOSER_TEXT_EVENT, onInsert);
+    return () => window.removeEventListener(INSERT_COMPOSER_TEXT_EVENT, onInsert);
+  }, [setCursorPosition]);
 
   /*
    * «Сжать в этом чате» (Егор 27.09.26, вариант 1 после сравнения со встроенным

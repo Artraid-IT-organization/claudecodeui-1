@@ -18,6 +18,7 @@ import {
 import type { IProviderSessionSynchronizer } from '@/shared/interfaces.js';
 import type { SessionTitleSource } from '@/shared/types.js';
 import { readLastMessageTimestamp } from '@/modules/providers/services/session-activity-sync.service.js';
+import { isCc2BornTranscriptPath } from '@/modules/providers/list/claude/transcript-presence.js';
 
 type ParsedSession = {
   sessionId: string;
@@ -261,6 +262,13 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
       if (this.isSubagentTranscript(filePath)) {
         continue;
       }
+      // Каталоги `*--cc2` — стенограммы чатов, рождённых на общем инстансе
+      // (cc2). Пометку ставит рантайм при создании; этот экземпляр их не
+      // импортирует — чужой чат не появляется в списке ни на секунду
+      // (Егор 25.10.26).
+      if (isCc2BornTranscriptPath(filePath, claudeHome)) {
+        continue;
+      }
       if (this.isMigratedTranscript(filePath)) {
         continue;
       }
@@ -310,6 +318,14 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
     // falls back to the process default and would file another account's
     // transcript - and its history.jsonl lookup - under the wrong account.
     const accountDir = accountDirFromTranscriptPath(filePath) ?? getClaudeConfigDir();
+
+    // Каталоги `*--cc2` — стенограммы чатов, рождённых на общем инстансе
+    // (cc2): файловый наблюдатель привносит их за секунды в обход полного
+    // скана, поэтому тот же пропуск стоит и здесь (Егор 25.10.26).
+    if (isCc2BornTranscriptPath(filePath, accountDir)) {
+      return null;
+    }
+
     const nameMap = await buildLookupMap(path.join(accountDir, 'history.jsonl'), 'sessionId', 'display');
     const parsed = await this.processSessionFile(filePath, nameMap);
     if (!parsed) {

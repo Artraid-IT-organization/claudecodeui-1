@@ -10,6 +10,7 @@ import { OPEN_REGISTRATION, isPlatformOwnerWebUser } from '@/shared/utils.js';
 import { createAudioArchiveService } from './audio-archive.service.js';
 import { createVoiceRouter } from './voice.routes.js';
 import { createVoiceService } from './voice.service.js';
+import { createVoiceStreamStore } from './voice-stream-store.js';
 
 // Recognition runs at roughly a fifth of real time on this class of machine
 // (measured: a 10-minute recording came back in 2 minutes, end to end through
@@ -164,10 +165,20 @@ const audioArchive = createAudioArchiveService({
 });
 audioArchive.startRetentionSweep();
 
+// Куски диктовки в полёте (stream-chunk → stream-finish): звук уходит на
+// сервер во время записи и после отпускания остаётся только распознавание.
+// Тот же потолок байт, что у цельного файла; брошенная запись сгорает за
+// 15 минут — отменённую с клиента снимает /stream-abort.
+const streamStore = createVoiceStreamStore({
+  maxTotalBytes: voiceMaxUploadBytes,
+  ttlMs: 15 * 60 * 1000,
+});
+
 /** Voice router assembled for the server entrypoint. */
 export const voiceRoutes = createVoiceRouter({
   voiceService,
   audioArchive,
   parseAudioUpload: audioUpload.single('audio'),
   transcripts: voiceTranscriptsDb,
+  streamStore,
 });

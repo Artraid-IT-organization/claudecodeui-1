@@ -1,5 +1,5 @@
 import { useTranslation } from 'react-i18next';
-import { memo, useCallback, useMemo } from 'react';
+import { memo, useCallback, useLayoutEffect, useMemo } from 'react';
 import type { Dispatch, RefObject, SetStateAction } from 'react';
 
 import type { ChatMessage } from '../../types/types';
@@ -27,6 +27,11 @@ interface ChatMessagesPaneProps {
   isProcessing?: boolean;
   /** True while ChatComposer's floating activity/stop tab is rendered above the input. */
   hasActivityIndicator?: boolean;
+  /**
+   * В полёте запрос истории (первая порция, догон хвоста, старшие страницы) —
+   * у низа ленты рисуется строка «догружаю историю», отдельная от activity.
+   */
+  isHistorySyncing?: boolean;
   chatMessages: ChatMessage[];
   selectedSession: ProjectSession | null;
   currentSessionId: string | null;
@@ -50,6 +55,8 @@ interface ChatMessagesPaneProps {
   isTaskMasterInstalled: boolean | null;
   onShowAllTasks?: (() => void) | null;
   setInput: Dispatch<SetStateAction<string>>;
+  /** Папка «Промпты»: явный выбор мозга в карточке нового чата → options.provider при отправке. */
+  onPromptBrainPick?: (provider: LLMProvider) => void;
   isLoadingMoreMessages: boolean;
   hasMoreMessages: boolean;
   /** Подгрузить порцию старых сообщений — нажатие на строку «Показано N из M». */
@@ -89,6 +96,16 @@ interface ChatMessagesPaneProps {
  */
 const LIVE_TAIL_SIZE = 3;
 
+// Форма экрана загрузки чата сверху вниз: человек справа, ответ слева; числа —
+// ширина строк в процентах. Настоящих сообщений ещё нет — рисуем типичный ритм.
+const LOADING_SKELETON_BLOCKS: Array<{ side: 'user' | 'assistant'; lines: number[] }> = [
+  { side: 'assistant', lines: [92, 78, 55] },
+  { side: 'user', lines: [88, 46] },
+  { side: 'assistant', lines: [95, 90, 84, 40] },
+  { side: 'user', lines: [64] },
+  { side: 'assistant', lines: [90, 72] },
+];
+
 function ChatMessagesPane({
   scrollContainerRef,
   onWheel,
@@ -96,6 +113,7 @@ function ChatMessagesPane({
   isLoadingSessionMessages,
   isProcessing = false,
   hasActivityIndicator = false,
+  isHistorySyncing = false,
   chatMessages,
   selectedSession,
   currentSessionId,
@@ -119,6 +137,7 @@ function ChatMessagesPane({
   isTaskMasterInstalled,
   onShowAllTasks,
   setInput,
+  onPromptBrainPick,
   isLoadingMoreMessages,
   hasMoreMessages,
   onLoadOlderMessages,
@@ -143,6 +162,16 @@ function ChatMessagesPane({
   selectedProject,
 }: ChatMessagesPaneProps) {
   const { t } = useTranslation('chat');
+  // Индикатор «догружаю историю» монтируется с задержкой 250 мс — после того,
+  // как лента уже доскроллена к последнему сообщению. Без доводки его высота
+  // уходит под фолд: пользователь у низа увидел бы только дёрганье.
+  useLayoutEffect(() => {
+    if (!isHistorySyncing) return;
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    if (nearBottom) el.scrollTop = el.scrollHeight;
+  }, [isHistorySyncing, scrollContainerRef]);
   // Вся работа между сообщением и ответом — одной свёрнутой строкой «Ход работы»,
   // как в Claude Code для VS Code; внутри — ключевые мысли и сделанные шаги.
   // Егор 13.09.26: «должно быть только то, что мне нужно знать в размышлениях и
@@ -186,6 +215,66 @@ function ChatMessagesPane({
       messageKeyMap.get(message) ?? getIntrinsicMessageKey(message) ?? 'message-generated',
     [messageKeyMap],
   );
+
+  // Строку, которую браузер сейчас пропускает (content-visibility), помечаем —
+  // CSS рисует на её месте заглушку, а не пустоту (index.css, `data-cv-skipped`).
+  // Событие не всплывает — слушаем на перехвате. До отрисовки (layout), чтобы
+  // не пропустить первое состояние строк, пришедших вместе с панелью.
+  useLayoutEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return undefined;
+    const onState = (event: Event) => {
+      const target = event.target as HTMLElement | null;
+      if (!target?.classList?.contains('chat-message')) return;
+      target.toggleAttribute('data-cv-skipped', Boolean((event as Event & { skipped?: boolean }).skipped));
+    };
+    container.addEventListener('contentvisibilityautostatechange', onState, true);
+
+    // Сторож «либо заглушка, либо текст» (Егор 24.10.26). Метка ставится по
+    // событию браузера, а событие может запоздать или не прийти (в Chromium
+    // задержки до 250 мс, на iPhone проверить нечем) — тогда полосы остаются
+    // под настоящим текстом. Строка в окне просмотра пропущенной быть не
+    // может, поэтому метка на ней дольше HOLD_MS — устаревшая, и мы её снимаем.
+    // Не трогаем: строки вне экрана (их метка законна) и строки в режиме
+    // `visible` (живой хвост, прогрев) — у них метку держит прежнее состояние,
+    // а полосы скрыты правилом CSS; снятая там метка потом оставила бы
+    // перепропущенную строку пустой (браузер новое событие не шлёт).
+    const HOLD_MS = 250;
+    const visibleSince = new Map<HTMLElement, number>();
+    const sweepStaleMarks = () => {
+      if (document.hidden) return;
+      const marked = container.querySelectorAll<HTMLElement>('.chat-message[data-cv-skipped]');
+      if (marked.length === 0) {
+        if (visibleSince.size > 0) visibleSince.clear();
+        return;
+      }
+      const pane = container.getBoundingClientRect();
+      const now = performance.now();
+      const stillVisible = new Set<HTMLElement>();
+      marked.forEach((message) => {
+        const rect = message.getBoundingClientRect();
+        if (rect.bottom <= pane.top || rect.top >= pane.bottom) return;
+        if (getComputedStyle(message).contentVisibility !== 'auto') return;
+        stillVisible.add(message);
+        const since = visibleSince.get(message);
+        if (since === undefined) {
+          visibleSince.set(message, now);
+        } else if (now - since >= HOLD_MS) {
+          message.removeAttribute('data-cv-skipped');
+          visibleSince.delete(message);
+          stillVisible.delete(message);
+        }
+      });
+      visibleSince.forEach((_, message) => {
+        if (!stillVisible.has(message)) visibleSince.delete(message);
+      });
+    };
+    const sweepTimer = window.setInterval(sweepStaleMarks, 120);
+    return () => {
+      container.removeEventListener('contentvisibilityautostatechange', onState, true);
+      window.clearInterval(sweepTimer);
+    };
+  }, [scrollContainerRef]);
 
   return (
     <div
@@ -231,7 +320,29 @@ function ChatMessagesPane({
             {isLoadingSessionMessages ? t('session.loading.retrying') : t('session.loading.retry')}
           </button>
         </div>
-      ) : (isLoadingSessionMessages || isProcessing) && chatMessages.length === 0 ? (
+      ) : isLoadingSessionMessages && chatMessages.length === 0 ? (
+        // Открытие чата: на месте будущей переписки — переливающиеся блоки в
+        // форме сообщений (Егор 24.10.26: «понимаешь, что идёт загрузка»).
+        // Стоят у низа, как встанет настоящая лента, — ничего не «выстреливает».
+        <div className="chat-loading-skeleton" role="status" aria-live="polite">
+          <span className="sr-only">{t('session.loading.sessionMessages')}</span>
+          {LOADING_SKELETON_BLOCKS.map((block, index) => (
+            <div
+              key={index}
+              aria-hidden="true"
+              // Имена целиком, не шаблоном: Tailwind вырезает из @layer правила
+              // с классами, которых не нашёл в исходниках буквально.
+              className={block.side === 'user'
+                ? 'chat-loading-skeleton__item chat-loading-skeleton__item--user'
+                : 'chat-loading-skeleton__item'}
+            >
+              {block.lines.map((width, lineIndex) => (
+                <span key={lineIndex} className="chat-shimmer" style={{ width: `${width}%` }} />
+              ))}
+            </div>
+          ))}
+        </div>
+      ) : isProcessing && chatMessages.length === 0 ? (
         <div className="mt-8 text-center text-gray-500 dark:text-gray-400">
           <div className="flex items-center justify-center space-x-2">
             <div className="h-4 w-4 animate-spin rounded-full border-b-2 border-gray-400" />
@@ -249,6 +360,7 @@ function ChatMessagesPane({
         <ProviderSelectionEmptyState
           selectedSession={selectedSession}
           currentSessionId={currentSessionId}
+          selectedProject={selectedProject}
           provider={provider}
           setProvider={setProvider}
           textareaRef={textareaRef}
@@ -269,21 +381,12 @@ function ChatMessagesPane({
           isTaskMasterInstalled={isTaskMasterInstalled}
           onShowAllTasks={onShowAllTasks}
           setInput={setInput}
+          onPromptBrainPick={onPromptBrainPick}
         />
       ) : (
         <>
           {hasMoreMessages && !allMessagesLoaded && (
             <div ref={topSentinelRef} aria-hidden="true" className="h-px w-full" />
-          )}
-
-          {/* Loading indicator for older messages (hide when load-all is active) */}
-          {isLoadingMoreMessages && !isLoadingAllMessages && !allMessagesLoaded && (
-            <div className="py-3 text-center text-gray-500 dark:text-gray-400">
-              <div className="flex items-center justify-center space-x-2">
-                <div className="h-4 w-4 animate-spin rounded-full border-b-2 border-gray-400" />
-                <p className="text-sm">{t('session.loading.olderMessages')}</p>
-              </div>
-            </div>
           )}
 
           {/* Indicator showing there are more messages to load (hide when all loaded) */}
@@ -302,6 +405,18 @@ function ChatMessagesPane({
                 </span>
               )}
             </button>
+          )}
+
+          {/* Место под ещё не догруженные ранние сообщения: листая вверх во
+              время подгрузки, человек видит заглушку, а не пустоту. Высотой
+              в экран — короткая первая порция не стоит прижатой к верху и не
+              переезжает вниз, когда сверху приходит следующая. Не .chat-row:
+              опорой useScrollAnchor она не бывает. */}
+          {hasMoreMessages && !allMessagesLoaded && (
+            <div
+              className={isLoadingMoreMessages || isLoadingAllMessages ? 'chat-skeleton chat-skeleton--loading' : 'chat-skeleton'}
+              aria-hidden="true"
+            />
           )}
 
           {(() => {
@@ -363,6 +478,17 @@ function ChatMessagesPane({
               );
             });
           })()}
+
+          {isHistorySyncing && (
+            <div
+              className="chat-history-sync"
+              role="status"
+              aria-live="polite"
+            >
+              <span className="chat-history-sync__spinner" aria-hidden="true" />
+              <span>{t('session.loading.historySyncing')}</span>
+            </div>
+          )}
         </>
       )}
       </div>

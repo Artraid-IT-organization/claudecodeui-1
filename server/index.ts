@@ -26,7 +26,7 @@ import {
     startSessionActivitySync,
     stopSessionActivitySync,
 } from '@/modules/providers/index.js';
-import { userDb, initializeDatabase, sessionsDb, chatRunsDb  } from '@/modules/database/index.js';
+import { userDb, initializeDatabase, sessionsDb, chatRunsDb, devinConnectionsDb  } from '@/modules/database/index.js';
 import { chatRunRegistry, createWebSocketServer, dispatchChatQueues, reconcilePersistedRuns, startRunWatchdog } from '@/modules/websocket/index.js';
 
 import { getConnectableHost } from '../shared/networkHosts.js';
@@ -47,6 +47,7 @@ import { createAgentModule } from './modules/agent/index.js';
 import projectModuleRoutes from './modules/projects/projects.routes.js';
 import notificationRoutes from './modules/notifications/notifications.routes.js';
 import { promptPresetsRoutes } from './modules/presets/index.js';
+import { savedPromptsRoutes } from './modules/saved-prompts/index.js';
 import { chatGroupsRoutes } from './modules/chat-groups/index.js';
 import { handoffRoutes } from './modules/handoff/index.js';
 import { openTabsRoutes } from './modules/open-tabs/index.js';
@@ -263,6 +264,7 @@ app.use('/api/system', withUserRuntimeContext, systemRoutes);
 
 app.use('/api/notifications', withUserRuntimeContext, notificationRoutes);
 app.use('/api/prompt-presets', withUserRuntimeContext, promptPresetsRoutes);
+app.use('/api/saved-prompts', withUserRuntimeContext, savedPromptsRoutes);
 app.use('/api/chat-groups', withUserRuntimeContext, chatGroupsRoutes);
 // «Продолжить в новом чате»: выжимка главного из длинного чата.
 app.use('/api/handoff', withUserRuntimeContext, handoffRoutes);
@@ -698,6 +700,39 @@ async function startServer() {
                     .then(({ files, ms }) => console.log(`[search-index] выжимки готовы: ${files} файлов за ${ms} мс`))
                     .catch((error) => console.warn('[search-index] прогрев не удался:', error?.message ?? error));
             }, 30_000).unref();
+
+            // FTS-индекс чатов: фоновая сверка закрывает хвосты, которые не
+            // вошли в бюджет reconcile на поисковом запросе. Первая — сразу за
+            // прогревом выжимок (индекс читает их же), дальше раз в минуту.
+            // Сверка отдаёт ход между чатами и может идти дольше минуты —
+            // следующая не стартует, пока не закончилась предыдущая.
+            let chatIndexRunning = false;
+            const reconcileChatIndex = async (): Promise<void> => {
+                if (chatIndexRunning) return;
+                chatIndexRunning = true;
+                try {
+                    const { reconcileChatSearchIndex } = await import('@/modules/providers/services/chat-search-index.service.js');
+                    const { extractorFor } = await import('@/modules/providers/services/session-conversations-search.service.js');
+                    const result = await reconcileChatSearchIndex(sessionsDb.getAllSessions(), {
+                        maxSessions: 400,
+                        budgetMs: 10_000,
+                        extractorFor,
+                        devinConnectionsDb,
+                    });
+                    if (result.indexed > 0 || result.deleted > 0 || result.remaining > 0) {
+                        console.log(`[chat-search] индекс: +${result.indexed} −${result.deleted}, осталось ${result.remaining}`);
+                    }
+                } catch (error) {
+                    console.warn('[chat-search] фоновая сверка не удалась:', error instanceof Error ? error.message : error);
+                } finally {
+                    chatIndexRunning = false;
+                }
+            };
+            setTimeout(() => {
+                void reconcileChatIndex().finally(() => {
+                    setInterval(() => void reconcileChatIndex(), 60_000).unref();
+                });
+            }, 45_000).unref();
 
             // Start server-side plugin processes for enabled plugins
             startEnabledPluginServers().catch(err => {

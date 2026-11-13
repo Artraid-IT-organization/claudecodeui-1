@@ -31,6 +31,9 @@ const FALLBACK_DEFAULT_MODEL: Record<LLMProvider, string> = {
 
 const PROVIDERS: LLMProvider[] = ['claude', 'cursor', 'codex', 'opencode', 'devin'];
 
+/** Привязанный проект «Промпты» (зеркало серверного PINNED_PROJECT_PROVIDERS). */
+const PINNED_PROMPTS_PROJECT_PATH = '/home/claude/prompts';
+
 const readStoredProvider = (): LLMProvider => {
   const storedProvider = readSelectedProviderRaw();
   return PROVIDERS.includes(storedProvider as LLMProvider)
@@ -506,6 +509,16 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     if (!selectedSession?.__provider || selectedSession.__provider === provider) {
       return;
     }
+    // Чаты закреплённой папки («Промпты») живут в пространстве Devin-списка —
+    // открытие такого чата не должно перебрасывать человека на другого
+    // помощника, хотя мозги у хода claude (Егор 25.10.26).
+    const pinnedPath = (selectedSession as { projectPath?: string }).projectPath
+      ?? (_selectedProject as { fullPath?: string; path?: string; projectPath?: string } | null)?.fullPath
+      ?? (_selectedProject as { path?: string; projectPath?: string } | null)?.path
+      ?? (_selectedProject as { path?: string; projectPath?: string } | null)?.projectPath;
+    if (pinnedPath === PINNED_PROMPTS_PROJECT_PATH) {
+      return;
+    }
 
     reportProviderProbe('prov-sync-session', { to: selectedSession.__provider, was: provider, session: String(selectedSession.id).slice(0, 8) });
     setProvider(selectedSession.__provider);
@@ -571,6 +584,54 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
   const [sessionSelection, setSessionSelection] = useState<SessionProviderSelection | null>(null);
   const selectedSessionId = selectedSession?.id?.trim() || null;
   const selectedSessionProvider = selectedSession?.__provider ?? provider;
+
+  // Вкладка «Промпты» — привязанный проект: чаты живут в списке Devin, а
+  // мозг хода выбирается в чате из объединённого меню Claude|Devin
+  // (Егор 25.10.26). Путь — из открытой сессии, запасной — из проекта.
+  const sessionProjectPath =
+    (selectedSession as { projectPath?: string } | null | undefined)?.projectPath
+    ?? (_selectedProject as { fullPath?: string; path?: string; projectPath?: string } | null | undefined)?.fullPath
+    ?? (_selectedProject as { path?: string; projectPath?: string } | null | undefined)?.path
+    ?? (_selectedProject as { path?: string; projectPath?: string } | null | undefined)?.projectPath
+    ?? null;
+  const isPinnedProject = sessionProjectPath === PINNED_PROMPTS_PROJECT_PATH;
+
+  // Выбранный в меню мозг, который сессия ещё не записала: отправка с ним
+  // переключит сессию (сервер принимает только claude|devin у привязанного
+  // проекта). null — меню отражает записанного помощника сессии.
+  const [pendingBrainProvider, setPendingBrainProvider] = useState<LLMProvider | null>(null);
+  useEffect(() => {
+    setPendingBrainProvider(null);
+  }, [selectedSessionId, selectedSessionProvider]);
+
+  // Мозг папки «Промпты» для ЕЩЁ НЕ созданного чата: последний использованный
+  // в папке (как решает серверная политика). Без него новый чат вспыхивал
+  // глобальным Devin и мигал на Claude после синхронизации сессии (Егор 27.10.26).
+  const pinnedFolderBrain = useMemo(() => {
+    if (!isPinnedProject) {
+      return null;
+    }
+    const sessions = (_selectedProject as { sessions?: Array<Record<string, unknown>> } | null | undefined)?.sessions;
+    if (!sessions?.length) {
+      return null;
+    }
+    const latest = [...sessions].sort(
+      (a, b) => String(b.lastActivity ?? b.updated_at ?? '')
+        .localeCompare(String(a.lastActivity ?? a.updated_at ?? '')),
+    )[0] as { __provider?: LLMProvider; provider?: LLMProvider; model?: string | null } | undefined;
+    const brain = latest?.__provider ?? latest?.provider ?? null;
+    return brain ? { provider: brain, model: latest?.model ?? null } : null;
+  }, [isPinnedProject, _selectedProject]);
+
+  // Мозг, для которого строятся модель/усилие/список моделей: у привязанной
+  // вкладки — записанный сессией (или отложенный выбор, или мозг папки для
+  // нового чата), у остальных чатов — выбранный помощник как раньше.
+  const brainProvider: LLMProvider = isPinnedProject
+    ? (pendingBrainProvider
+        ?? (selectedSession ? selectedSessionProvider : null)
+        ?? pinnedFolderBrain?.provider
+        ?? selectedSessionProvider)
+    : provider;
   const selectedSessionKey = selectedSessionId
     ? getSessionSelectionKey(selectedSessionProvider, selectedSessionId)
     : null;
@@ -779,24 +840,77 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
   }, [sessionSelection, setStoredProviderEffort]);
 
   // The open session's model wins over the per-provider default, so switching
-  // sessions shows (and sends) what each session actually runs with.
-  const currentProviderModel = sessionModel ?? providerModels[provider];
+  // sessions shows (and sends) what each session actually runs with. У
+  // привязанной вкладки «Промпты» модель/усилие — мозга сессии, а не общего
+  // выбора composer'а: без записанной модели умолчание чата — Opus.
+  // Записанная у сессии модель учитывается, только если она есть в каталоге
+  // текущего мозга: после смены провайдера в строке могла остаться чужая
+  // модель («sonnet» у devin-чата) — чип и отправка показывали бы не то.
+  const sessionModelFitsBrain = sessionModel
+    && (!providerModelCatalog[brainProvider]
+      || providerModelCatalog[brainProvider].OPTIONS.some((option) => option.value === sessionModel));
+  // Модель мозга папки для нового чата «Промптов» — та же, что запишет
+  // сервер: последняя у чатов папки, если она есть в каталоге этого мозга.
+  const folderModelFitsBrain = Boolean(pinnedFolderBrain)
+    && pinnedFolderBrain!.provider === brainProvider
+    && Boolean(pinnedFolderBrain!.model)
+    && (!providerModelCatalog[brainProvider]
+      || providerModelCatalog[brainProvider]!.OPTIONS.some((option) => option.value === pinnedFolderBrain!.model));
+  const currentProviderModel = pendingBrainProvider
+    // Отложенный выбор мозга (вкладка «Промпты»): чип и отправка показывают
+    // модель ВЫБРАННОГО помощника — записанная у сессии модель относится к
+    // текущему мозгу и показывала бы чужое значение до ближайшего сообщения.
+    ? providerModels[pendingBrainProvider]
+    : (sessionModelFitsBrain ? sessionModel : null)
+      ?? (folderModelFitsBrain ? pinnedFolderBrain!.model! : null)
+      ?? (isPinnedProject && brainProvider === 'claude'
+        ? 'opus'
+        : providerModels[brainProvider]);
   const currentProviderEffortOptions = useMemo(() => {
-    return getEffortOptionsForModel(provider, currentProviderModel);
-  }, [currentProviderModel, getEffortOptionsForModel, provider]);
+    return getEffortOptionsForModel(brainProvider, currentProviderModel);
+  }, [currentProviderModel, getEffortOptionsForModel, brainProvider]);
   const currentProviderEffort = useMemo(() => {
     return reconcileStoredEffort(
-      provider,
+      brainProvider,
       currentProviderModel,
       activeSessionSelection?.effort
-        ?? providerEfforts[provider]
+        ?? providerEfforts[brainProvider]
         ?? DEFAULT_EFFORT_VALUE,
     );
-  }, [activeSessionSelection?.effort, currentProviderModel, provider, providerEfforts, reconcileStoredEffort]);
-  const currentProviderModelOptions = useMemo(
-    () => providerModelCatalog[provider]?.OPTIONS ?? [],
-    [provider, providerModelCatalog],
-  );
+  }, [activeSessionSelection?.effort, currentProviderModel, brainProvider, providerEfforts, reconcileStoredEffort]);
+  const currentProviderModelOptions = useMemo(() => {
+    if (!isPinnedProject) {
+      return providerModelCatalog[provider]?.OPTIONS ?? [];
+    }
+    // Объединённое меню привязанной вкладки: обе группы с пометкой мозга —
+    // выбор опции другой группы переключает сессию при отправке.
+    const tagOptions = (target: LLMProvider): ProviderModelOption[] =>
+      (providerModelCatalog[target]?.OPTIONS ?? []).map((option) => ({ ...option, provider: target }));
+    return [...tagOptions('claude'), ...tagOptions('devin')];
+  }, [isPinnedProject, provider, providerModelCatalog]);
+
+  /**
+   * Выбор модели в меню композера. У привязанной вкладки опции помечены
+   * мозгом: модель другой группы откладывает переключение сессии — сервер
+   * применит его на ближайшей отправке (options.provider).
+   */
+  const selectComposerModel = useCallback(async (
+    model: string,
+    sessionId?: string | null,
+  ) => {
+    const option = currentProviderModelOptions.find((candidate) => candidate.value === model);
+    const targetProvider = option?.provider ?? brainProvider;
+    await selectProviderModel(targetProvider, model, sessionId);
+    if (isPinnedProject) {
+      setPendingBrainProvider(targetProvider === selectedSessionProvider ? null : targetProvider);
+    }
+  }, [
+    brainProvider,
+    currentProviderModelOptions,
+    isPinnedProject,
+    selectProviderModel,
+    selectedSessionProvider,
+  ]);
 
   const applyProviderCatalog = useCallback((
     targetProvider: LLMProvider,
@@ -939,6 +1053,11 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     providerModelActions,
     selectProviderModel,
     selectProviderEffort,
+    selectComposerModel,
     resolvePermissionModeForProvider,
+    isPinnedProject,
+    brainProvider,
+    pendingBrainProvider,
+    setPendingBrainProvider,
   };
 }

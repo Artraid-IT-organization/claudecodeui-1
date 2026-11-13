@@ -17,6 +17,7 @@ import { type SidebarProjectListProps } from './SidebarProjectList';
 import SidebarProjectSessions from './SidebarProjectSessions';
 import SidebarPromptsPinned from './SidebarPromptsPinned';
 import SidebarRecentConversations from './SidebarRecentConversations';
+import SidebarUsageLimits from './SidebarUsageLimits';
 import { useSecondServerLabel, useServerScope } from '../../hooks/useServerScope';
 
 function HighlightedSnippet({ snippet, highlights }: { snippet: string; highlights: { start: number; end: number }[] }) {
@@ -269,6 +270,7 @@ export default function SidebarContent({
         flagged: existing?.flagged ?? false,
         done: existing?.done ?? false,
         serverScope,
+        searchSnippet: null,
       });
     }
     for (const project of conversationResults.results) {
@@ -285,6 +287,7 @@ export default function SidebarContent({
           flagged: existing?.flagged ?? false,
           done: existing?.done ?? false,
           serverScope,
+          searchSnippet: session.matches[0]?.snippet ?? null,
         });
       }
     }
@@ -350,7 +353,11 @@ export default function SidebarContent({
       {/* Строки «название чата / папка» над списком больше нет: Егор 13.09.26
           обвёл её на снимке — «надо убрать совсем». Открытый чат и так
           подсвечен в списке ниже. Блок «РАСХОД» убран 14.10.26 — Егор обвёл
-          его на снимке: места под чаты не остаётся. */}
+          его на снимке: места под чаты не остаётся. Возвращён 25.10.26 только
+          для Claude (5 часов и неделя) и в две тонкие строки: «лимиты Claude
+          пропали, они есть и пятичасовые, и недельные». */}
+
+      <SidebarUsageLimits />
 
       {searchMode === 'projects' && promptsProject && (
         <SidebarPromptsPinned

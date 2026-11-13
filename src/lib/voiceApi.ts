@@ -55,6 +55,51 @@ export function transcribeVoice(blob: Blob, filename: string, signal?: AbortSign
   });
 }
 
+/**
+ * Потоковая диктовка кусками (27.10.26): кусок записи уходит на сервер прямо
+ * во время диктовки отдельным POST — после отпускания остаётся только
+ * распознавание, дорога файла не добавляется к ожиданию. Живёт только на
+ * нашем сервере: при настроенном своём бэкенде включается обычный путь.
+ */
+export function voiceStreamingAvailable(): boolean {
+  return !readVoiceConfig().baseUrl.trim();
+}
+
+/** Один кусок записи. Клиент обязан слать их строго последовательно. */
+export function voiceStreamChunk(sid: string, chunk: Blob): Promise<Response> {
+  return authenticatedFetch(`/api/voice/stream-chunk?sid=${encodeURIComponent(sid)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': chunk.type || 'audio/webm' },
+    body: chunk,
+  });
+}
+
+/** Завершение потока: сервер склеивает куски и распознаёт. Ответ — как у transcribe. */
+export function voiceStreamFinish(sid: string, meta?: VoiceTranscribeMeta, signal?: AbortSignal): Promise<Response> {
+  return authenticatedFetch('/api/voice/stream-finish', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...voiceConfigHeaders() },
+    body: JSON.stringify({
+      sid,
+      ...(meta?.recId ? { clientRecId: meta.recId } : {}),
+      ...(meta?.sessionId ? { targetSession: meta.sessionId } : {}),
+      ...(meta?.scope ? { targetScope: meta.scope } : {}),
+      ...(meta?.send ? { sendIntent: '1' } : {}),
+    }),
+    signal,
+  });
+}
+
+/** Освобождает недоеденную сессию на сервере (запись отменена/страница ушла). */
+export function voiceStreamAbort(sid: string): void {
+  void authenticatedFetch('/api/voice/stream-abort', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sid }),
+    keepalive: true,
+  }).catch(() => undefined);
+}
+
 export function synthesizeVoice(text: string, signal: AbortSignal): Promise<Response> {
   const config = readVoiceConfig();
 

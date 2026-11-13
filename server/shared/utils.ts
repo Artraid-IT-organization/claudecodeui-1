@@ -1329,6 +1329,51 @@ function hasResultStructure(text: string): boolean {
 }
 
 /**
+ * Хвост, в котором модель передаёт работу человеку или внешнему процессу —
+ * легальное завершение, снимает сигнал недоделанности.
+ */
+const DEVIN_DELEGATION_TAIL =
+  /(нужно от вас|нужен ваш|нужна ваша|ваше решение|пришлите|подтвердите|вашего (?:решения|подтверждения|ответа|действия)|со стороны вас|на вашей стороне|жд[уе] (?:ваш|тво)|только вам|решать вам|как решите|сторож|крон|по расписанию|уведомлени)/iu;
+
+/**
+ * Объявленный в хвосте следующий СВОЙ шаг — только формы 1-го лица и инфинитив,
+ * чтобы «сторож проверяет» (чужой процесс, 3-е лицо) не давало ложный сигнал.
+ */
+const DEVIN_SELF_WORK_STEP = new RegExp(
+  '(?:дальше|следующ(?:ий|ая|ее)\\s+(?:шаг|пункт|действие)|осталось|остался|теперь|далее|затем)[\\s:—–-]{0,40}' +
+    '(?:дожму|дожмём|дожать|закоммичу|закоммитим|закоммитить|перепрогоню|перепрогоним|перепрогнать|' +
+    'перепроверю|перепроверим|перепроверить|доделаю|доделаем|доделать|доработаю|доработаем|доработать|' +
+    'разберу|разберём|разобрать|внедрю|внедрим|внедрить|проверю|проверим|проверить|прогоню|прогоним|прогнать|' +
+    'запущу|запустим|запустить|обновлю|обновим|обновить|поправлю|поправим|поправить|исправлю|исправим|исправить|' +
+    'напишу|напишем|написать|соберу|соберём|собрать|выкачу|выкатим|выкатить|пересоберу|пересоберём|пересобрать|' +
+    'зафиксирую|зафиксируем|зафиксировать|продолжу|продолжим|продолжить|сделаю|сделаем|сделать)',
+  'iu',
+);
+
+/**
+ * Ответ, законченный вопросом-разрешением («продолжаю?», «делать дальше?»,
+ * «внедряю?») — ранняя остановка. Намеренно только просьбы-разрешения:
+ * информационный вопрос человеку («какой вариант выбираете?») сюда не попадает.
+ */
+// NB: \w в JS не включает кириллицу — продолжения слов пишем [а-яё]*.
+const DEVIN_PERMISSION_TAIL =
+  /(?:продолж[а-яё]*|делаю|делать|двига[а-яё]*|ид[её]м дальше|идти дальше|внедря[а-яё]*|выкатыва[а-яё]*|запуска[а-яё]*|начина[а-яё]*|приступ[а-яё]*)[?.!\s]*\?\s*$/iu;
+
+/**
+ * True if the tail owes the agent's own next steps or asks for permission —
+ * a premature stop even when the text carries result structure (a status
+ * recap ending «Дальше: дожму и закоммичу…» or «Продолжаю?» is still a stall).
+ * Delegation to the human or an external async process is a legal ending.
+ * 22.10.26, twilight-ursinia: реплика «Дальше: дожму и закоммичу правку…»
+ * прошла эвристику как «полная» из-за списка — чат простоял ~19 часов.
+ */
+export function hasPendingWorkTail(text: string): boolean {
+  const tail = text.slice(-600);
+  if (DEVIN_DELEGATION_TAIL.test(tail)) return false;
+  return DEVIN_SELF_WORK_STEP.test(tail) || DEVIN_PERMISSION_TAIL.test(tail);
+}
+
+/**
  * True if the text looks like the assistant stopped at the understanding
  * preamble without producing any result structure.
  */
@@ -1351,6 +1396,8 @@ function looksLikeUnderstandingOnly(text: string): boolean {
  * - the text is missing or empty;
  * - there were tool calls but no text after the last tool call;
  * - the tail is an explicit promise to continue working;
+ * - the tail declares the agent's own next steps or asks for permission
+ *   (hasPendingWorkTail), even inside a structured recap;
  * - the response is only the "Как я понял задачу" preamble with no result.
  *
  * A turn is considered complete when it contains a recognized result heading,
@@ -1370,6 +1417,9 @@ export function isIncompleteDevinResponse(
 
   const content = hasToolCalls ? afterTool : fullText;
 
+  // Объявленная своя работа и вопрос-разрешение сильнее «результатной»
+  // структуры: статус-рекап со списком всё равно может обрывать задачу.
+  if (hasPendingWorkTail(content)) return true;
   if (hasResultStructure(content)) return false;
   if (hasContinuationTail(content)) return true;
   if (looksLikeUnderstandingOnly(content)) return true;
@@ -1774,4 +1824,48 @@ export function stripInjectedContext(text: string): string {
     .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
     .replace(/<user-prompt-submit-hook>[\s\S]*?<\/user-prompt-submit-hook>/g, '')
     .trim();
+}
+
+//----------------- PINNED PROJECT PROVIDERS ------------
+
+/**
+ * Проекты, закреплённые за провайдером и пространством списка (Егор 25.10.26):
+ * вкладка «Промпты» владельца живёт в пространстве списка Devin, но её чаты
+ * работают на Claude. Читают project-provider-policy (создание сессии и
+ * приведение модели) и sessions.db (срез списка по пространству помощника —
+ * такие чаты остаются видны в пространстве devin у владельца).
+ */
+export const PINNED_PROJECT_PROVIDERS: ReadonlyMap<string, string> = new Map([
+  ['/home/claude/prompts', 'claude'],
+]);
+
+/** SQL-условие «проект из закреплённых» для срезов списка чатов. */
+export function pinnedProjectPathSql(tableAlias = 'sessions'): string {
+  const paths = [...PINNED_PROJECT_PROVIDERS.keys()].map((p) => `'${p}'`).join(', ');
+  return `${tableAlias}.project_path IN (${paths})`;
+}
+
+/**
+ * Метка каталога стенограмм чатов, рождённых на общем инстансе (cc2)
+ * (Егор 25.10.26): `projects/<slug>--cc2`. Стенограмма пишется в общий
+ * ~/.claude, и основной Claude (cc1) импортировал бы чат себе в список —
+ * «переброс в другой аккаунт». Синхронизатор пропускает каталоги с этой
+ * меткой, поэтому такие чаты в cc1 не появляются вообще: ни в списке,
+ * ни в базе, ни в архиве.
+ */
+export const CC2_BORN_PROJECT_DIR_SUFFIX = '--cc2';
+
+/** Имя каталога `projects/`, которое CLI строит из пути проекта: не-буквы и не-цифры → '-'. */
+export function defaultProjectDirName(projectPath: string): string {
+  return projectPath.replace(/[^a-zA-Z0-9]/g, '-');
+}
+
+/** Помеченное имя каталога `projects/` для чата, рождённого на общем инстансе. */
+export function cc2BornProjectDirName(projectPath: string): string {
+  return `${defaultProjectDirName(projectPath)}${CC2_BORN_PROJECT_DIR_SUFFIX}`;
+}
+
+/** Каталог `projects/` помечен как принадлежащий чату общего инстанса. */
+export function isCc2BornProjectDir(dirName: string): boolean {
+  return dirName.endsWith(CC2_BORN_PROJECT_DIR_SUFFIX);
 }

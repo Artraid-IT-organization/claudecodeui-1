@@ -127,6 +127,35 @@ test('pickConnection: chosen channel in cooldown or already tried falls back to 
   });
 });
 
+test('pickConnection: all channels cooling down — still picks the one that recovers first, never blocks SWE', async () => {
+  await withIsolatedDatabase(() => {
+    const first = devinConnectionsDb.create({ name: 'first', priority: 0, xdgDataHome: '/tmp/xdg-c1' });
+    const second = devinConnectionsDb.create({ name: 'second', priority: 1, xdgDataHome: '/tmp/xdg-c2' });
+    devinConnectionsDb.markHealth(first.id, 'rate_limited', { cooldownMinutes: 720 });
+    devinConnectionsDb.markHealth(second.id, 'rate_limited', { cooldownMinutes: 360 });
+    // 22.10.26: обе на паузе → берётся та, что вернётся раньше (second), а не отказ 503.
+    assert.equal(devinConnectionsService.pickConnection().id, second.id);
+    // Уже перепробованная в этом ходе исключается, как и раньше.
+    assert.equal(devinConnectionsService.pickConnection([second.id]).id, first.id);
+    // Все перепробованы — отказ остаётся (повторять некуда).
+    assert.throws(
+      () => devinConnectionsService.pickConnection([first.id, second.id]),
+      (error: unknown) => (error as { code?: string }).code === 'DEVIN_CONNECTION_UNAVAILABLE',
+    );
+    // Годная подписка без паузы по-прежнему идёт раньше любой на паузе.
+    const ready = devinConnectionsDb.create({ name: 'ready', priority: 5, xdgDataHome: '/tmp/xdg-c3' });
+    assert.equal(devinConnectionsService.pickConnection().id, ready.id);
+    // Отозванная креда и админское выключение — настоящие запреты, их пауза-обход не касается.
+    devinConnectionsDb.markHealth(ready.id, 'auth_failed', { lastError: 'x' });
+    assert.equal(devinConnectionsService.pickConnection().id, second.id);
+    getConnection().prepare('UPDATE devin_connections SET enabled = 0 WHERE id IN (?, ?)').run(first.id, second.id);
+    assert.throws(
+      () => devinConnectionsService.pickConnection(),
+      (error: unknown) => (error as { code?: string }).code === 'DEVIN_CONNECTION_UNAVAILABLE',
+    );
+  });
+});
+
 test('classifyDevinFailure: hex trace ID with "403" inside is still a rate limit, not auth', () => {
   const live = 'Reached free model rate limit. Your limit will reset in 34 minutes (at 21:01 UTC). (trace ID: afd89c403f6c84cbe2c1)';
   assert.equal(classifyDevinFailure(live), 'rate_limit');
@@ -153,19 +182,20 @@ test('recordOutcome: rate limit cools the subscription down until the reset time
   });
 });
 
-test('recordOutcome: weekly quota without a named reset cools down for hours, repeated failures double it', async () => {
+test('recordOutcome: usage quota of paid models does not pause the subscription; plain limits do, repeats double it', async () => {
   await withIsolatedDatabase(() => {
     const conn = devinConnectionsDb.create({ name: 'weekly', xdgDataHome: '/tmp/xdg-weekly' });
     const minutes = (id: number) => {
       const row = devinConnectionsDb.getById(id)!;
       return (Date.parse(`${row.cooldown_until!.replace(' ', 'T')}Z`) - Date.now()) / 60_000;
     };
-    devinConnectionsService.recordOutcome(conn.id, 'failed', 'Your weekly usage quota has been exhausted. Visit https://app.devin.ai/settings/usage');
-    assert.ok(minutes(conn.id) > 350 && minutes(conn.id) <= 361, `weekly ≈ 360 min, got ${minutes(conn.id)}`);
-    // Повторный rate limit после отстоявшего cooldown удваивает отдых.
-    getConnection().prepare("UPDATE devin_connections SET cooldown_until = datetime('now', '-1 minute') WHERE id = ?").run(conn.id);
-    devinConnectionsService.recordOutcome(conn.id, 'failed', 'Your weekly usage quota has been exhausted.');
-    assert.ok(minutes(conn.id) > 700 && minutes(conn.id) <= 721, `repeated weekly ≈ 720 min, got ${minutes(conn.id)}`);
+    // 22.10.26: квота платных моделей не ставит паузу — бесплатные SWE-2 на этой подписке работают.
+    devinConnectionsService.recordOutcome(conn.id, 'failed', 'Your weekly usage quota has been exhausted. Visit https://app.devin.ai/settings/usage (trace ID: abc)');
+    devinConnectionsService.recordOutcome(conn.id, 'failed', 'Your daily usage quota has been exhausted.');
+    const quotaRow = devinConnectionsDb.getById(conn.id)!;
+    assert.equal(quotaRow.cooldown_until, null);
+    assert.notEqual(quotaRow.health_status, 'rate_limited');
+    assert.equal(devinConnectionsDb.isEligible(conn.id), true);
     // Обычный лимит без срока — короткий отдых, повтор — удвоенный.
     const daily = devinConnectionsDb.create({ name: 'daily', xdgDataHome: '/tmp/xdg-daily' });
     devinConnectionsService.recordOutcome(daily.id, 'failed', 'Reached free model rate limit.');

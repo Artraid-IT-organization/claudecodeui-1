@@ -32,11 +32,11 @@ import {
   notifyRunStopped,
   notifyUserIfEnabled
 } from '@/modules/notifications/index.js';
-import { createCompleteMessage, createNormalizedMessage, getClaudeConfigDir, getClaudeJsonPath } from '@/shared/utils.js';
+import { createCompleteMessage, createNormalizedMessage, getClaudeConfigDir, getClaudeJsonPath, OPEN_REGISTRATION } from '@/shared/utils.js';
 import { getRequestRuntimeContext } from '@/shared/request-context.js';
 import { INHERITED_CLAUDE_AUTH_ENV_KEYS } from '@/shared/claude-login.js';
 import { noteSurvivorProviderSession, spawnSurvivableClaude } from '@/modules/providers/list/claude/survivor-runs.js';
-import { hasTranscriptOnDisk } from '@/modules/providers/list/claude/transcript-presence.js';
+import { hasTranscriptOnDisk, resolveBornTranscriptDirName } from '@/modules/providers/list/claude/transcript-presence.js';
 
 const activeSessions = new Map();
 const pendingToolApprovals = new Map();
@@ -1051,6 +1051,23 @@ async function queryClaudeSDK(command, options = {}, ws, context) {
       console.warn(`[Claude SDK] переписки ${sdkOptions.resume} нет на диске — начинаю разговор под тем же номером`);
       sdkOptions.sessionId = sdkOptions.resume;
       delete sdkOptions.resume;
+    }
+
+    // Любая claude-сессия, рождённая на общем инстансе (cc2), пишет
+    // стенограмму в помеченный каталог `projects/<slug>--cc2`: основной
+    // Claude (cc1) такие каталоги не импортирует, и чат не всплывает в его
+    // списке/архиве (Егор 26.10.26 — пометка на весь инстанс, не только на
+    // «Промпты»: claude-чат в любой папке cc2 не должен протекать в cc1).
+    // При продолжении пишем туда, где файл уже лежит: старые чаты — обычный
+    // каталог, новые — помеченный. Папка конфигурации общая — вход, токен и
+    // лимит те же.
+    const bornConfigDir = sdkOptions.env?.CLAUDE_CONFIG_DIR || getClaudeConfigDir();
+    if (OPEN_REGISTRATION && bornConfigDir) {
+      sdkOptions.env.CLAUDE_CODE_PROJECT_DIR_NAME = await resolveBornTranscriptDirName(
+        bornConfigDir,
+        sdkOptions.cwd,
+        sdkOptions.resume,
+      );
     }
 
     const mcpServers = await loadMcpConfig(options.cwd, options.claudeConfigDir);

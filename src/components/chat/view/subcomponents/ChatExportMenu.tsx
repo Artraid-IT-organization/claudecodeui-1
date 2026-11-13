@@ -1,12 +1,13 @@
-import { useState } from 'react';
-import { Download, FileJson, FileText, Loader2 } from 'lucide-react';
+import { useRef, useState } from 'react';
+import { Check, Copy, Download, FileJson, FileText, Loader2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import type { NormalizedMessage } from '../../../../stores/useSessionStore';
 import { authenticatedFetch } from '../../../../utils/api';
+import { copyTextToClipboard } from '../../../../utils/clipboard';
 import { normalizedToChatMessages } from '../../hooks/useChatMessages';
 import type { ChatMessage } from '../../types/types';
-import { downloadMarkdown, downloadHTML, downloadPDF, EXPORT_FORMATS } from '../../utils/chatExport';
+import { downloadMarkdown, downloadHTML, downloadPDF, exportToMarkdown, EXPORT_FORMATS } from '../../utils/chatExport';
 
 type ChatExportMenuProps = {
   /** Сколько сообщений в ленте прямо сейчас — только чтобы не рисовать кнопку у пустого чата. */
@@ -126,36 +127,42 @@ export default function ChatExportMenu({
   const { t } = useTranslation('chat');
   const [isOpen, setIsOpen] = useState(false);
   const [isPreparing, setIsPreparing] = useState(false);
+  const [didCopyText, setDidCopyText] = useState(false);
+  const copyFeedbackTimerRef = useRef<number | null>(null);
 
   if (loadedCount === 0) {
     return null;
   }
 
-  const handleExport = async (format: 'markdown' | 'html' | 'pdf') => {
-    if (isPreparing) return;
-    setIsPreparing(true);
-    try {
-      // Основной путь — полный поток с сервера: переписка целиком, от первого
-      // сообщения, вне зависимости от длины чата. Запасной путь (поток
-      // недоступен) — дотянуть ленту как раньше.
-      let messages: ChatMessage[];
-      if (sessionId) {
-        try {
-          messages = await fetchWholeTranscript(sessionId);
-        } catch {
-          await onLoadAll();
-          await waitUntilSettled(() => getMessages().length);
-          messages = getMessages();
-        }
-      } else {
+  // Основной путь — полный поток с сервера: переписка целиком, от первого
+  // сообщения, вне зависимости от длины чата. Запасной путь (поток
+  // недоступен) — дотянуть ленту как раньше.
+  const collectExport = async (): Promise<{ messages: ChatMessage[]; filename: string }> => {
+    let messages: ChatMessage[];
+    if (sessionId) {
+      try {
+        messages = await fetchWholeTranscript(sessionId);
+      } catch {
         await onLoadAll();
         await waitUntilSettled(() => getMessages().length);
         messages = getMessages();
       }
-      const firstUserText = messages.find((msg) => msg.type === 'user')?.content;
-      const fallbackName = typeof firstUserText === 'string' ? firstUserText : '';
-      const namePart = toFilenamePart(sessionTitle || fallbackName || 'chat') || 'chat';
-      const filename = `${namePart}-${formatExportStamp(new Date())}`;
+    } else {
+      await onLoadAll();
+      await waitUntilSettled(() => getMessages().length);
+      messages = getMessages();
+    }
+    const firstUserText = messages.find((msg) => msg.type === 'user')?.content;
+    const fallbackName = typeof firstUserText === 'string' ? firstUserText : '';
+    const namePart = toFilenamePart(sessionTitle || fallbackName || 'chat') || 'chat';
+    return { messages, filename: `${namePart}-${formatExportStamp(new Date())}` };
+  };
+
+  const handleExport = async (format: 'markdown' | 'html' | 'pdf') => {
+    if (isPreparing) return;
+    setIsPreparing(true);
+    try {
+      const { messages, filename } = await collectExport();
 
       switch (format) {
         case 'markdown':
@@ -174,6 +181,58 @@ export default function ChatExportMenu({
     }
   };
 
+  // Четвёртый пункт (Егор 28.10.26): одно нажатие — вся переписка текстом в
+  // буфере обмена, дальше вставляется в любой чат. Положить в буфер именно
+  // файл сайту iOS не даёт (ограничение системы), поэтому копируется текст
+  // .md-выгрузки. Не скопировалось — отдаём файл как раньше, не теряем.
+  //
+  // iOS пускает запись в буфер только по свежему касанию, а текст собирается
+  // секунды (поток всей переписки) — запись после await отклонялась, и пункт
+  // превращался в обычное скачивание. Поэтому write() вызываем синхронно с
+  // ОБЕЩАНИЕМ текста: система докопирует сама, когда сборка закончится.
+  const handleCopyToClipboard = async () => {
+    if (isPreparing) return;
+    setIsPreparing(true);
+    try {
+      const textPromise = collectExport().then((collected) =>
+        exportToMarkdown(collected.messages, sessionTitle),
+      );
+
+      const nav = navigator as Navigator & {
+        clipboard?: { write?: (items: unknown[]) => Promise<void> };
+      };
+      const ItemCtor = (window as { ClipboardItem?: new (items: Record<string, unknown>) => unknown })
+        .ClipboardItem;
+
+      let copied = false;
+      if (nav.clipboard?.write && ItemCtor) {
+        try {
+          const blobPromise = textPromise.then((text) => new Blob([text], { type: 'text/plain' }));
+          await nav.clipboard.write([new ItemCtor({ 'text/plain': blobPromise })]);
+          copied = true;
+        } catch {
+          copied = false;
+        }
+      }
+      if (!copied) {
+        copied = await copyTextToClipboard(await textPromise);
+      }
+      setIsOpen(false);
+      if (copied) {
+        setDidCopyText(true);
+        if (copyFeedbackTimerRef.current !== null) {
+          window.clearTimeout(copyFeedbackTimerRef.current);
+        }
+        copyFeedbackTimerRef.current = window.setTimeout(() => setDidCopyText(false), 1600);
+      } else {
+        const { messages, filename: name } = await collectExport();
+        downloadMarkdown(messages, `${name}.md`, sessionTitle);
+      }
+    } finally {
+      setIsPreparing(false);
+    }
+  };
+
   return (
     <div className="relative">
       <button
@@ -183,7 +242,13 @@ export default function ChatExportMenu({
         title={t('export.button', { defaultValue: 'Сохранить переписку' })}
         className="flex h-8 w-8 items-center justify-center rounded-lg border border-border/50 text-muted-foreground transition-all hover:bg-accent hover:text-foreground"
       >
-        {isPreparing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+        {isPreparing ? (
+          <Loader2 className="h-4 w-4 animate-spin" />
+        ) : didCopyText ? (
+          <Check className="h-4 w-4" />
+        ) : (
+          <Download className="h-4 w-4" />
+        )}
       </button>
 
       {isOpen && (
@@ -217,6 +282,16 @@ export default function ChatExportMenu({
                   <span>{fmt.label}</span>
                 </button>
               ))
+            )}
+            {!isPreparing && (
+              <button
+                type="button"
+                onClick={() => void handleCopyToClipboard()}
+                className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-foreground transition-colors hover:bg-muted"
+              >
+                <Copy className="h-4 w-4" />
+                <span>{t('export.copyToClipboard', { defaultValue: 'Копировать (.txt)' })}</span>
+              </button>
             )}
             {totalCount > loadedCount && !isPreparing && (
               <p className="px-3 pb-1 pt-2 text-[11px] leading-snug text-muted-foreground/80">

@@ -26,6 +26,8 @@ import {
 import { getWebUserWorkspaceRoot } from '@/shared/web-user-paths.js';
 import { hasOwnClaudeAccess, resolveWebUserRuntimeContext } from '@/shared/web-user-runtime.js';
 
+import { resolvePinnedProjectBrain } from './project-provider-policy.js';
+
 /**
  * Любой чат читает владелец площадки и человек, которому чат принадлежит
  * (`initiated_by_user_id` или каталог аккаунта — то же правило, что у
@@ -395,13 +397,30 @@ export const sessionsService = {
       });
     }
 
+    // Привязка проекта (project-provider-policy, Егор 26.10.26): вкладка
+    // «Промпты» владельца сама на Claude не запускается — новый чат наследует
+    // последнюю использованную в папке пару помощник+модель; без пригодной
+    // истории — умолчание папки Claude Opus, не глобальный выбор composer'а.
+    // Только для владельца: у остальных пользователей своя зона —
+    // scopeRoot !== null означает не-владельца, и его выбор остаётся нетронутым.
+    const pinnedBrain = scopeRoot === null
+      ? resolvePinnedProjectBrain(
+          normalizedProjectPath,
+          effectiveProvider,
+          sessionsDb.getLatestProjectBrain(normalizedProjectPath),
+        )
+      : { provider: effectiveProvider, model: null };
+
     const sessionId = randomUUID();
     const sessionName = buildCloudCliSessionName(initialMessage);
-    sessionsDb.createAppSession(sessionId, effectiveProvider, normalizedProjectPath, sessionName);
+    sessionsDb.createAppSession(sessionId, pinnedBrain.provider, normalizedProjectPath, sessionName);
+    if (pinnedBrain.model) {
+      sessionsDb.setSessionModel(sessionId, pinnedBrain.model);
+    }
 
     return {
       sessionId,
-      provider: effectiveProvider,
+      provider: pinnedBrain.provider,
       projectPath: normalizedProjectPath,
       sessionName,
     };

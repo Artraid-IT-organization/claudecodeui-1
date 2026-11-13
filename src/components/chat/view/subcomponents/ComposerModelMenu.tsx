@@ -145,17 +145,31 @@ export default function ComposerModelMenu({
                       {t('composer.loadingModels', { defaultValue: 'Loading models…' })}
                     </p>
                   )}
-                  {modelOptions.map((option) => (
-                    <ComposerMenuItem
-                      key={option.value}
-                      label={option.label || option.value}
-                      isSelected={option.value === model}
-                      onSelect={() => {
-                        onSelectModel(option.value);
-                        setIsOpen(false);
-                      }}
-                    />
-                  ))}
+                  {modelOptions.map((option, index) => {
+                    // Объединённое меню привязанной вкладки: опции помечены
+                    // мозгом — рисуем заголовок группы при смене провайдера.
+                    const showGroupHeading = Boolean(
+                      option.provider
+                      && (index === 0 || modelOptions[index - 1]?.provider !== option.provider),
+                    );
+                    return (
+                      <div key={option.value}>
+                        {showGroupHeading && (
+                          <ComposerMenuHeading>
+                            {option.provider === 'devin' ? 'Devin' : 'Claude'}
+                          </ComposerMenuHeading>
+                        )}
+                        <ComposerMenuItem
+                          label={option.label || option.value}
+                          isSelected={option.value === model}
+                          onSelect={() => {
+                            onSelectModel(option.value);
+                            setIsOpen(false);
+                          }}
+                        />
+                      </div>
+                    );
+                  })}
                 </>
               )}
             </>
