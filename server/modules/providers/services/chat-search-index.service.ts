@@ -99,8 +99,12 @@ export function closeChatSearchDbForTests(): void {
  * ё и Ё не складываются unicode61 (ё — отдельная буква, не е+диакритика),
  * поэтому нормализация делается вручную и при индексации, и при запросе.
  * Регистр не трогаем: токенайзер складывает регистр сам, а сниппет читабельнее.
+ *
+ * Потребители: этот модуль (индексация и запрос) и
+ * session-conversations-search.service.ts — сопоставление сниппета находки с
+ * сообщением выжимки идёт в той же норме, в какой текст лёг в FTS-колонку.
  */
-function normalizeSearchText(text: string): string {
+export function normalizeSearchText(text: string): string {
   return text.replace(/ё/g, 'е').replace(/Ё/g, 'Е');
 }
 
@@ -127,12 +131,13 @@ function termsForWord(word: string): string[] {
 
 /** FTS5 MATCH: AND по словам, внутри слова — OR термов; каждый терм — префикс. */
 function buildMatchQuery(words: string[], column: 'title' | 'body'): string {
-  return words
-    .map((word) => {
-      const terms = termsForWord(word).map((term) => `${term}*`).join(' OR ');
-      return `${column} : (${terms})`;
-    })
-    .join(' ');
+  // Фильтр колонки один раз на всё выражение: «body : (…) body : (…)» FTS5
+  // не разбирает (syntax error near "body"), поэтому группы слов соединяются
+  // AND ВНУТРИ одного «column :».
+  const groups = words
+    .map((word) => `(${termsForWord(word).map((term) => `${term}*`).join(' OR ')})`)
+    .join(' AND ');
+  return `${column} : (${groups})`;
 }
 
 /** Точная фраза как бонус: сырой текст запроса одной FTS-фразой. */
@@ -666,9 +671,9 @@ export function searchChatDocs(input: ChatSearchInput): RankedSessionHit[] {
     return fuzzy;
   });
   if (fuzzyPerWord.every((terms) => terms.length > 0)) {
-    const fuzzyQuery = fuzzyPerWord
-      .map((terms) => `body : (${terms.map((term) => `${term}*`).join(' OR ')})`)
-      .join(' ');
+    const fuzzyQuery = `body : (${fuzzyPerWord
+      .map((terms) => `(${terms.map((term) => `${term}*`).join(' OR ')})`)
+      .join(' AND ')})`;
     try {
       const fuzzyRows = db
         .prepare(

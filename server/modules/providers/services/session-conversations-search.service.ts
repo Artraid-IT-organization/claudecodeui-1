@@ -2,9 +2,10 @@ import fsSync from 'node:fs';
 import path from 'node:path';
 
 import { devinConnectionsDb, projectsDb, sessionsDb } from '@/modules/database/index.js';
-import { reconcileChatSearchIndex, searchChatDocs } from '@/modules/providers/services/chat-search-index.service.js';
+import { normalizeSearchText, reconcileChatSearchIndex, searchChatDocs } from '@/modules/providers/services/chat-search-index.service.js';
 import {
   ensureSearchIndex,
+  readIndexedMessagesForSession,
   type IndexedMessage,
   type RecordExtractor,
   type SearchableRole,
@@ -614,6 +615,77 @@ function groupSessionsByFile(sessions: SearchableSessionRow[]): SearchFile[] {
 }
 
 /**
+ * Выжимка одна на файл переписки — запрос сниппетов держит разбор файла на
+ * разговор, чтобы десяток находок из одного файла не читал его десять раз.
+ * У Devin файла переписки нет — сообщения идут из sessions.db канала, там
+ * привязки к uuid сообщения нет и находка уходит без messageUuid.
+ */
+function createDigestMessageLookup(): (session: SessionRepositoryRow) => Array<{ message: IndexedMessage; normalizedText: string }> {
+  const cache = new Map<string, Array<{ message: IndexedMessage; normalizedText: string }>>();
+  return (session) => {
+    const provider = session.provider;
+    if (!session.jsonl_path || (provider !== 'claude' && provider !== 'codex')) {
+      return [];
+    }
+    const providerSessionId = session.provider_session_id ?? session.session_id;
+    const key = `${provider}:${session.jsonl_path}:${providerSessionId}`;
+    let messages = cache.get(key);
+    if (!messages) {
+      messages = readIndexedMessagesForSession(session.jsonl_path, provider, providerSessionId)
+        .map((message) => ({ message, normalizedText: normalizeSearchText(message.x) }));
+      cache.set(key, messages);
+    }
+    return messages;
+  };
+}
+
+/**
+ * Какое именно сообщение попало в сниппет. Текст сниппета — подстрока
+ * нормализованного FTS-тела (сообщения склеены переводом строки): обычно он
+ * целиком внутри одного сообщения, но окно в 18 токенов может захватить край
+ * соседнего. Поэтому первым кандидатом идёт кусок сниппета, в котором стоит
+ * первый совпавший термин (позиция — из highlights), потом остальные куски
+ * длиннее, в конце — сниппет целиком. Совпадение не нашлось — привязки нет,
+ * не гадаем.
+ */
+function findSnippetMessage(
+  messages: Array<{ message: IndexedMessage; normalizedText: string }>,
+  snippet: string,
+  highlights: SearchSnippetHighlight[],
+): IndexedMessage | null {
+  const pieces = snippet.split('\n');
+  let cursor = 0;
+  let hitPieceIndex = -1;
+  const hitStart = highlights[0]?.start ?? -1;
+  for (let index = 0; index < pieces.length; index += 1) {
+    const end = cursor + pieces[index].length;
+    if (hitStart >= cursor && hitStart < end) {
+      hitPieceIndex = index;
+      break;
+    }
+    cursor = end + 1;
+  }
+  const orderedPieces = hitPieceIndex >= 0
+    ? [pieces[hitPieceIndex], ...pieces.filter((_, index) => index !== hitPieceIndex)]
+    : pieces;
+  const candidates = [
+    ...orderedPieces,
+    snippet,
+  ].map((piece) => piece.replace(/^[…\s]+|[…\s]+$/g, '')).filter(Boolean);
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    if (!seen.add(candidate)) {
+      continue;
+    }
+    const found = messages.find((entry) => entry.normalizedText.includes(candidate));
+    if (found) {
+      return found.message;
+    }
+  }
+  return null;
+}
+
+/**
  * Поиск по чатам: FTS5-индекс (chat-search-index.service.ts) выдаёт ярусы
  * название → содержимое (частота через bm25) → нечёткое; свежесть — тай-брейк.
  * Перед запросом индекс точечно догоняет изменившиеся чаты (reconcile с
@@ -702,6 +774,7 @@ export async function searchConversations(
   onTitleResults?.(titleResults);
 
   const resultsByProject = new Map<string, ProjectConversationResult>();
+  const digestMessageLookup = createDigestMessageLookup();
   let totalMatches = 0;
   for (const hit of hits) {
     if (signal?.aborted) {
@@ -710,18 +783,21 @@ export async function searchConversations(
     const session = sessionById.get(hit.sessionId);
     const projectKey = makeProjectKey(session?.project_path ?? null);
     const metadata = projectMetadata(projectKey);
+    const foundMessage = hit.snippet && session
+      ? findSnippetMessage(digestMessageLookup(session), hit.snippet, hit.highlights)
+      : null;
     const sessionResult: SessionConversationResult = {
       sessionId: hit.sessionId,
       provider: hit.provider as SearchableProvider | 'devin',
       sessionSummary: session?.custom_name?.trim() || hit.sessionId,
       matches: hit.snippet
         ? [{
-            role: '',
+            role: foundMessage?.r ?? '',
             snippet: hit.snippet,
             highlights: hit.highlights,
-            timestamp: null,
+            timestamp: foundMessage?.t ?? null,
             provider: hit.provider as SearchableProvider | 'devin',
-            messageUuid: null,
+            messageUuid: foundMessage?.u ?? null,
           }]
         : [],
     };

@@ -358,3 +358,46 @@ export async function readIndexedSummaries(
   const meta = await loadMeta(indexPathsFor(sourcePath).metaPath);
   return meta?.sessions ?? {};
 }
+
+/**
+ * Сообщения выжимки одного разговора.
+ *
+ * Потребитель: session-conversations-search.service.ts — по тексту сниппета
+ * находит исходное сообщение и возвращает его `u` (messageUuid), роль и время,
+ * чтобы лента могла прокрутиться к находке. Читает уже построенную выжимку:
+ * если сверка ещё не дошла до файла — пустой список, находка уходит без
+ * привязки. Фильтр разговора тот же, что при сборке тела FTS-документа:
+ * у Claude в одном файле бывает несколько разговоров, строки помечены `s`.
+ */
+export function readIndexedMessagesForSession(
+  sourcePath: string,
+  provider: IndexedProvider,
+  providerSessionId: string | null,
+): IndexedMessage[] {
+  let raw: string;
+  try {
+    raw = fsSync.readFileSync(indexPathsFor(sourcePath).indexPath, 'utf8');
+  } catch {
+    return [];
+  }
+  const messages: IndexedMessage[] = [];
+  for (const line of raw.split('\n')) {
+    if (!line) continue;
+    let message: IndexedMessage;
+    try {
+      message = JSON.parse(line) as IndexedMessage;
+    } catch {
+      continue;
+    }
+    if (provider !== 'codex' && message.s && providerSessionId && message.s !== providerSessionId) {
+      continue;
+    }
+    if (provider !== 'codex' && providerSessionId && !message.s) {
+      continue;
+    }
+    if (typeof message.x === 'string' && message.x.trim()) {
+      messages.push(message);
+    }
+  }
+  return messages;
+}
