@@ -1,4 +1,4 @@
-import React, { lazy, Suspense, useEffect } from 'react';
+import React, { lazy, Suspense, useCallback, useEffect } from 'react';
 
 import ChatInterface from '../../chat/view/ChatInterface';
 import type { MainContentProps } from '../types/types';
@@ -7,6 +7,7 @@ import { usePaletteOpsRegister } from '../../../contexts/PaletteOpsContext';
 import { useTasksSettings } from '../../../contexts/TasksSettingsContext';
 import { useUiPreferences } from '../../../hooks/useUiPreferences';
 import { useFileOpenResolver } from '../../../hooks/useFileOpenResolver';
+import { api } from '../../../utils/api';
 import { useEditorSidebar } from '../../code-editor/hooks/useEditorSidebar';
 import type { Project } from '../../../types/app';
 
@@ -113,6 +114,37 @@ function MainContent({
   // real project files before opening them in the in-app editor.
   const resolvedFileOpen = useFileOpenResolver(selectedProject, handleFileOpen);
 
+  // Deliverables linked in chat (.docx/.zip/…) save straight to the user's
+  // machine instead of opening the editor, which cannot display binary files.
+  const handleWorkspaceFileDownload = useCallback(
+    async (filePath: string) => {
+      if (!selectedProject) {
+        return;
+      }
+      const fileName = filePath.split(/[\\/]/).pop() || 'download';
+      try {
+        const response = await api.readFileBlob(selectedProject.projectId, filePath);
+        if (!response.ok) {
+          throw new Error(`download failed: ${response.status}`);
+        }
+        const blobUrl = URL.createObjectURL(await response.blob());
+        const anchor = document.createElement('a');
+        anchor.href = blobUrl;
+        anchor.download = fileName;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        window.setTimeout(() => URL.revokeObjectURL(blobUrl), 0);
+      } catch {
+        // File missing or outside the project: fall back to the editor view,
+        // which shows its own error instead of failing silently.
+        handleFileOpen(filePath);
+      }
+    },
+    [selectedProject, handleFileOpen],
+  );
+  const resolvedFileDownload = useFileOpenResolver(selectedProject, handleWorkspaceFileDownload);
+
   useEffect(() => {
     // Identify projects by DB `projectId`; the TaskMaster context uses the
     // same identifier to key its internal maps.
@@ -144,6 +176,9 @@ function MainContent({
     // Opens the editor side panel in place, keeping the current tab (e.g. chat).
     openFileInEditor: (filePath: string) => {
       resolvedFileOpen(filePath);
+    },
+    downloadFile: (filePath: string) => {
+      resolvedFileDownload(filePath);
     },
   });
 

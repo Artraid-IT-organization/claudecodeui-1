@@ -217,5 +217,8 @@
   },
   "tasks": {
     "nextTaskPrompt": "Sonraki görevi başlat"
+  },
+  "fileDownload": {
+    "tooltip": "Dosyayı indir"
   }
 }

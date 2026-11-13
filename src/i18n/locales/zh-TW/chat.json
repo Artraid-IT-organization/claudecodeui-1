@@ -253,5 +253,8 @@
   },
   "tasks": {
     "nextTaskPrompt": "開始下一個任務"
+  },
+  "fileDownload": {
+    "tooltip": "下載檔案"
   }
 }

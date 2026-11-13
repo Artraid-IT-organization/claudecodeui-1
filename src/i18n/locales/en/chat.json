@@ -276,5 +276,8 @@
   },
   "tasks": {
     "nextTaskPrompt": "Start the next task"
+  },
+  "fileDownload": {
+    "tooltip": "Download file"
   }
 }
