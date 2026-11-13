@@ -207,5 +207,8 @@
     "providers": {
       "assistant": "Assistant"
     }
+  },
+  "fileDownload": {
+    "tooltip": "ファイルをダウンロード"
   }
 }

@@ -242,5 +242,8 @@
   },
   "tasks": {
     "nextTaskPrompt": "开始下一个任务"
+  },
+  "fileDownload": {
+    "tooltip": "下载文件"
   }
 }

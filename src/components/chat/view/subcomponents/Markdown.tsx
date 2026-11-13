@@ -24,6 +24,7 @@ import lang_tsx from 'react-syntax-highlighter/dist/esm/languages/prism/tsx';
 import lang_typescript from 'react-syntax-highlighter/dist/esm/languages/prism/typescript';
 import lang_yaml from 'react-syntax-highlighter/dist/esm/languages/prism/yaml';
 import { oneDark, oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { DownloadIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import MermaidDiagram from '../../../code-editor/view/subcomponents/markdown/MermaidDiagram';
@@ -98,6 +99,44 @@ const looksLikeFilePath = (value?: string): value is string => {
   return /[\\/]/.test(cleaned) || /\.[a-z0-9]+$/i.test(cleaned);
 };
 
+// File types a person can only consume as a saved file (documents, archives,
+// exports). References to them render as a download chip instead of opening
+// the editor, which cannot display binary content anyway.
+const DOWNLOADABLE_FILE_PATTERN = /\.(docx?|xlsx?|xls|pptx?|ppt|csv|zip|rar|7z|tar|gz|tgz|bz2|xz)$/i;
+
+const isDownloadableRef = (value?: string): value is string => {
+  if (!value) {
+    return false;
+  }
+  const cleaned = stripLineSuffix(value.trim());
+  const base = cleaned.split(/[\\/]/).pop() ?? '';
+  // Reject a bare extension (`*.docx` mentioned as `.docx` in prose): a real
+  // file name has a non-empty stem before the last dot.
+  const stem = base.replace(/\.[^.]+$/, '');
+  return stem.length > 0 && DOWNLOADABLE_FILE_PATTERN.test(base);
+};
+
+// One-click download chip for agent-produced deliverables linked in a message.
+function FileDownloadChip({ fileRef, label }: { fileRef: string; label: React.ReactNode }) {
+  const { t } = useTranslation('chat');
+  const { downloadFile } = usePaletteOps();
+  return (
+    <button
+      type="button"
+      title={t('fileDownload.tooltip', { defaultValue: 'Скачать файл' })}
+      aria-label={t('fileDownload.tooltip', { defaultValue: 'Скачать файл' })}
+      onClick={(event) => {
+        event.preventDefault();
+        downloadFile(stripLineSuffix(fileRef));
+      }}
+      className="mx-0.5 inline-flex max-w-full items-center gap-1.5 rounded-md border border-blue-300/70 bg-blue-50 px-1.5 py-0.5 align-baseline text-[0.875em] font-medium text-blue-700 transition-colors hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-300 dark:hover:bg-blue-900/50"
+    >
+      <DownloadIcon className="h-3.5 w-3.5 shrink-0" aria-hidden />
+      <span className="truncate">{label}</span>
+    </button>
+  );
+}
+
 // Extract plain text from link children so a reference rendered only as link
 // text (e.g. `[src/foo.ts]()` with an empty href) can still be opened.
 const childrenToText = (children: React.ReactNode): string => {
@@ -135,6 +174,11 @@ const CodeBlock = ({ node: _node, className, children, forceBlock, ...props }: C
   const shouldInline = !forceBlock && !/[\r\n]/.test(raw);
 
   if (shouldInline) {
+    // A code span that names a deliverable file (`report.docx`) becomes a
+    // download chip — models often hand files over as code, not links.
+    if (isDownloadableRef(raw)) {
+      return <FileDownloadChip fileRef={raw} label={raw} />;
+    }
     // box-decoration-clone + overflow-wrap:anywhere: this is an INLINE box with
     // horizontal padding and a border, so when its text filled the line the
     // padding and border kept painting past the container's right edge
@@ -438,6 +482,9 @@ export function Markdown({ children, className }: MarkdownProps) {
         const fileRef = looksLikeFilePath(href) ? href : looksLikeFilePath(linkText) ? linkText : undefined;
 
         if (fileRef && !isExternalHref(href)) {
+          if (isDownloadableRef(fileRef)) {
+            return <FileDownloadChip fileRef={fileRef} label={linkChildren} />;
+          }
           return (
             <a
               href={href || fileRef}
