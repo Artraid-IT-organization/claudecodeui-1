@@ -1105,7 +1105,7 @@ export function useChatSessionState({
     // Returning from another tab must not reset pagination or scroll. Refresh
     // a stale hydrated session through the bounded tail path instead.
     if (isCurrentHydratedSession) {
-      if (sessionStore.isStale(selectedSessionId)) {
+      if (sessionStore.needsLatestRefresh(selectedSessionId)) {
         void requestLatestMessages(selectedSessionId);
       }
       return;
@@ -1225,9 +1225,10 @@ export function useChatSessionState({
         // шаги появлялись бы разом только в конце.
         if (!isProcessing || isDetachedRun(selectedSession.id)) {
           // upsert-события приходят пачками (файл транскрипта пишется часто):
-          // свежий хвост (<30 с) не перечитываем — иначе каждый upsert гнал бы
-          // REST-запрос, и индикатор истории мигал бы непрерывно.
-          if (sessionStore.isStale(selectedSession.id)) {
+          // свежий хвост (<30 с) и уже летящий запрос не перечитываем — иначе
+          // каждый upsert гнал бы REST-запрос, и индикатор истории мигал бы
+          // непрерывно.
+          if (sessionStore.needsLatestRefresh(selectedSession.id)) {
             const shouldStickToBottom = isActiveRef.current && isNearBottom();
             await requestLatestMessages(selectedSession.id);
 
