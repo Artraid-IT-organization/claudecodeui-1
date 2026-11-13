@@ -475,7 +475,7 @@ function ChatInterface({
     // рефреш хвоста на каждый реконнект гнал бы REST-запросы спина-к-спине.
     // Свежий хвост (<30 с) перечитывать не надо — replay по lastSeq уже добирает
     // пропущенное, а лишние запросы мигают индикатором истории и дёргают ленту.
-    if (sessionStore.isStale(selectedSession.id)) {
+    if (sessionStore.needsLatestRefresh(selectedSession.id)) {
       await requestLatestMessages(selectedSession.id, isActive, 'reconnect');
     }
     statusCheckSentAtRef.current.set(selectedSession.id, Date.now());
