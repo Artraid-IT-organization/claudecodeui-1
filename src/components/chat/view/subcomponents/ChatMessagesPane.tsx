@@ -1,5 +1,5 @@
 import { useTranslation } from 'react-i18next';
-import { memo, useCallback, useLayoutEffect, useMemo } from 'react';
+import { memo, useCallback, useLayoutEffect, useMemo, useRef } from 'react';
 import type { Dispatch, RefObject, SetStateAction } from 'react';
 
 import type { ChatMessage } from '../../types/types';
@@ -165,12 +165,20 @@ function ChatMessagesPane({
   // Индикатор «догружаю историю» монтируется с задержкой 250 мс — после того,
   // как лента уже доскроллена к последнему сообщению. Без доводки его высота
   // уходит под фолд: пользователь у низа увидел бы только дёрганье.
+  const lastSyncScrollAtRef = useRef(0);
   useLayoutEffect(() => {
     if (!isHistorySyncing) return;
     const el = scrollContainerRef.current;
     if (!el) return;
+    // Доводка — не чаще раза в 15 с: при повторных рефрешах (реконнекты,
+    // upsert-пачки) индикатор монтируется снова, и каждая доводка дёргала бы
+    // ленту вниз заново.
+    if (Date.now() - lastSyncScrollAtRef.current < 15_000) return;
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
-    if (nearBottom) el.scrollTop = el.scrollHeight;
+    if (nearBottom) {
+      el.scrollTop = el.scrollHeight;
+      lastSyncScrollAtRef.current = Date.now();
+    }
   }, [isHistorySyncing, scrollContainerRef]);
   // Вся работа между сообщением и ответом — одной свёрнутой строкой «Ход работы»,
   // как в Claude Code для VS Code; внутри — ключевые мысли и сделанные шаги.
