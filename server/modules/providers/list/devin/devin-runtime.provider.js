@@ -10,6 +10,7 @@ import {
 } from '@/shared/image-attachments.js';
 import { notifyRunFailed, notifyRunStopped } from '@/modules/notifications/index.js';
 import {
+  isTrackedLiveRunPid,
   noteSurvivorProviderSession,
   registerProviderRun,
 } from '@/modules/providers/list/claude/survivor-runs.js';
@@ -72,6 +73,12 @@ const DEVIN_USAGE_POLL_MS = 4_000;
 const LOCK_HOLDER_POLL_MS = 2_000;
 const LOCK_HOLDER_WAIT_MS = 30 * 60_000;
 const LOCK_ZOMBIE_RETRIES = 3;
+/**
+ * Пауза после добития сироты-держателя замка перед повтором session/load
+ * (кейс 12.11.26: чат igor — 29 отказов «ещё занят» за 38 минут, держателем
+ * был процесс уже завершённого хода, переживший кадр «stop» супервизора).
+ */
+const LOCK_ORPHAN_POLL_MS = 1_500;
 /** initialize/session/new must answer promptly; a hung handshake = broken CLI. */
 const HANDSHAKE_TIMEOUT_MS = 60_000;
 /** Devin logs progress to stderr (INFO lines) — keep the tail for error text. */
@@ -106,6 +113,41 @@ function isDevinPidAlive(pid) {
   } catch {
     return false;
   }
+}
+
+/**
+ * Номер процесса-держателя замка беседы: структурное поле ответа Devin, а при
+ * его отсутствии — текст «(PID N)» из message (формат обоих встречается).
+ */
+function lockHolderPidOf(error) {
+  const structured = Number(error?.data?.['cognition.ai/lockHolderPid']);
+  if (structured) {
+    return structured;
+  }
+  const match = /\(PID (\d+)\)/.exec(error?.message || '');
+  return match ? Number(match[1]) : null;
+}
+
+/**
+ * Держатель замка-сирота: процесс жив (и это точно `devin acp`), но ни
+ * live-runs, ни активные ходы этого сервера о нём не знают. Живого чужого
+ * хода он быть не может — его ход бы числился в реестре; значит, ждать
+ * бессмысленно: замок снимаем добитием процесса.
+ */
+function isUntrackedLockHolder(pid) {
+  const num = Number(pid);
+  if (!num || !isDevinPidAlive(num)) {
+    return false;
+  }
+  if (isTrackedLiveRunPid(num)) {
+    return false;
+  }
+  for (const active of activeDevinRuns.values()) {
+    if (active?.child?.pid === num || active?.child?.supervisorPid === num) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /**
@@ -255,6 +297,8 @@ function createAcpConnection(child, { onNotification, onRequest, onClose }) {
           if (msg.error) {
             const err = new Error(msg.error.message || `JSON-RPC error ${msg.error.code}`);
             err.code = msg.error.code;
+            // structured payload (cognition.ai/* metadata — lock holder pid etc.)
+            err.data = msg.error.data;
             waiter.reject(err);
           } else {
             waiter.resolve(msg.result ?? {});
@@ -1061,13 +1105,29 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
               noteConfigOptions(run, loadResult?.configOptions);
               break;
             } catch (loadError) {
-              const retryable = loadError?.data?.['cognition.ai/retryable'] === true
-                && loadError?.data?.['cognition.ai/errorKind'] === 'session_locked';
-              if (!retryable) {
+              // session_locked (10.10.26 зомби, 11.10.26 живой держатель,
+              // 13.11.26 сирота после abort): замок бывает трёх видов —
+              // процесс-держатель мёртв (зомби), жив и числится в реестре
+              // (чужой живой ход — ждём конца), или жив и НЕ числится
+              // (сирота: ход завершён, канал к супервизору мёртв — убиваем
+              // и грузим сразу, иначе каждая отправка вязнет в красной
+              // ошибке, кейс igor 12.11: 38 минут «чат ещё занят»).
+              const isSessionLocked = loadError?.data?.['cognition.ai/errorKind'] === 'session_locked';
+              if (!isSessionLocked) {
                 throw loadError;
               }
-              const holderPid = Number(loadError?.data?.['cognition.ai/lockHolderPid']) || null;
-              if (holderPid && isDevinPidAlive(holderPid) && !run.aborted && Date.now() < lockWaitDeadline) {
+              const holderPid = lockHolderPidOf(loadError);
+              if (!run.aborted && holderPid && isUntrackedLockHolder(holderPid)) {
+                console.warn(`[Devin] беседу ${providerSessionId} держит сирота ${holderPid} — снимаю замок и повторяю session/load`);
+                try {
+                  process.kill(holderPid, 'SIGKILL');
+                } catch {
+                  // уже умер между проверкой и сигналом
+                }
+                await new Promise((r) => setTimeout(r, LOCK_ORPHAN_POLL_MS));
+                continue;
+              }
+              if (!run.aborted && holderPid && isDevinPidAlive(holderPid) && Date.now() < lockWaitDeadline) {
                 if (!lockWaitNotified) {
                   lockWaitNotified = true;
                   console.warn(`[Devin] беседу ${providerSessionId} держит живой процесс ${holderPid} — жду конца его хода`);
@@ -1425,6 +1485,17 @@ export const devinRuntime = {
           child.kill('SIGKILL');
         } catch {
           // Already gone.
+        }
+        // Страховка: `kill` у виртуального ребёнка — это кадр «stop»
+        // супервизору по сокету; если канал мёртв, кадр уходит в никуда, а
+        // агент живёт дальше и держит замок беседы (сирота). Добиваем по pid
+        // напрямую — если супервизор справился, процесс уже труп.
+        if (child.pid && isDevinPidAlive(child.pid)) {
+          try {
+            process.kill(child.pid, 'SIGKILL');
+          } catch {
+            // уже умер
+          }
         }
       }, ABORT_GRACE_MS);
       timer.unref?.();

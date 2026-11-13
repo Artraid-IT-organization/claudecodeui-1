@@ -89,6 +89,34 @@ export function forgetSurvivableProcess(pid) {
   removeRecord(pid);
 }
 
+/**
+ * Числится ли pid в реестре live-runs — как pid агента или его супервизора.
+ * Нужен devin-runtime при session_locked: держателя замка беседы убиваем,
+ * только если о нём реестр не знает (сирота); живой чужой ход по-прежнему
+ * ждём конца — за это отвечает ожидание session/load в провайдере.
+ */
+export function isTrackedLiveRunPid(pid) {
+  const num = Number(pid);
+  if (!num) return false;
+  let files = [];
+  try {
+    files = fs.readdirSync(liveRunsDir()).filter((name) => name.endsWith('.json'));
+  } catch {
+    return false;
+  }
+  for (const name of files) {
+    try {
+      const record = JSON.parse(fs.readFileSync(path.join(liveRunsDir(), name), 'utf8'));
+      if (record && (Number(record.pid) === num || Number(record.supervisorPid) === num)) {
+        return true;
+      }
+    } catch {
+      // битая запись — не мешает остальным
+    }
+  }
+  return false;
+}
+
 function removeRecord(pid) {
   try {
     fs.unlinkSync(recordPath(pid));

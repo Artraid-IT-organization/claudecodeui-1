@@ -40,6 +40,7 @@ const request = (id, method, params) => process.stdout.write(JSON.stringify({ js
 
 let pendingPrompt = null; // msg.id of session/prompt waiting on permission
 let promptCount = 0; // сколько session/prompt получил этот процесс (для сценариев продолжения)
+let lockOnceDone = false; // DEVIN_LOCK_ONCE: замок держится только на первый session/load
 const finishPrompt = () => {
   if (!pendingPrompt) return;
   const { id, sid } = pendingPrompt;
@@ -69,10 +70,12 @@ rl.on('line', (line) => {
       respond(msg.id, { sessionId: 'devin-sess-1' });
       break;
     case 'session/load':
-      if (process.env.DEVIN_SESSION_LOCKED === '1') {
+      if (process.env.DEVIN_SESSION_LOCKED === '1' && !(process.env.DEVIN_LOCK_ONCE === '1' && lockOnceDone)) {
         // Живой ответ Devin 10.10.26: сессию держит процесс прошлого хода.
+        if (process.env.DEVIN_LOCK_ONCE === '1') lockOnceDone = true;
         if (process.env.DEVIN_TURN_LOG) fs.appendFileSync(process.env.DEVIN_TURN_LOG, JSON.stringify({ locked: true, xdg: process.env.XDG_DATA_HOME }) + '\\n');
-        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code: -32015, message: "Session '" + msg.params.sessionId + "' is already open in another process (PID 291819). Close the other instance before opening it here.", data: { 'cognition.ai/errorKind': 'session_locked' } } }) + '\\n');
+        const lockPid = process.env.DEVIN_LOCK_PID || '291819';
+        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code: -32015, message: "Session '" + msg.params.sessionId + "' is already open in another process (PID " + lockPid + "). Close the other instance before opening it here.", data: { 'cognition.ai/errorKind': 'session_locked' } } }) + '\\n');
         break;
       }
       // Replayed history MUST be muted by the runtime.
@@ -571,7 +574,11 @@ test('devin runtime: сессию держит прошлый ход — без 
       const writer = makeWriter();
       await devinRuntime.run('Hi', { cwd: tempRoot, sessionId: 'app-resume' }, writer, runtimeContext).catch(() => {});
 
-      assert.equal((await readTurns()).length, 1, 'одна попытка — другие подписки замок не снимут');
+      // Мёртвый держатель — зомби-замок: ретраим на одной и той же линии,
+      // подписки не перебираем (перебор замок не снимет, только штрафанёт их).
+      const turns = await readTurns();
+      assert.ok(turns.length >= 1 && turns.length <= 4, `ретраи внутри одной линии, а не перебор подписок: ${turns.length}`);
+      assert.equal(new Set(turns.map((t) => t.xdg)).size, 1, 'все попытки — на одной подписке');
       const errors = writer.messages.filter((m) => m.kind === 'error');
       assert.equal(errors.length, 1);
       assert.match(errors[0].content, /чат ещё занят/);
@@ -580,6 +587,39 @@ test('devin runtime: сессию держит прошлый ход — без 
       assert.equal(devinConnectionsDb.getById(spare.id).health_status, 'unknown');
     } finally {
       delete process.env.DEVIN_SESSION_LOCKED;
+      restoreLaneEnv();
+    }
+  });
+});
+
+test('devin runtime: session_locked сиротой — держателя добивают, сессия грузится без красной ошибки', async () => {
+  await withFakeDevin(async (tempRoot) => {
+    // Сирота: процесс с cmdline «devin acp …» жив, но в live-runs о нём ничего
+    // не известно (реальный кейс igor 12.11 — 29 отказов «ещё занят» подряд).
+    const { spawn } = await import('node:child_process');
+    const orphan = spawn('bash', ['-c', 'exec -a "devin acp x" sleep 60'], { stdio: 'ignore' });
+    await waitFor(() => {
+      try { process.kill(orphan.pid, 0); return true; } catch { return false; }
+    }, 5000, 'orphan pid alive');
+    process.env.DEVIN_SESSION_LOCKED = '1';
+    process.env.DEVIN_LOCK_ONCE = '1';
+    process.env.DEVIN_LOCK_PID = String(orphan.pid);
+    try {
+      const { readTurns } = await setupExhaustedLane(tempRoot, { hostSession: true });
+      const writer = makeWriter();
+      await devinRuntime.run('Hi', { cwd: tempRoot, sessionId: 'app-resume' }, writer, runtimeContext).catch(() => {});
+      const errors = writer.messages.filter((m) => m.kind === 'error');
+      assert.equal(errors.filter((m) => /чат ещё занят/.test(m.content)).length, 0,
+        'сироту не ждём и человеку не шлём «чат занят» — добиваем и грузим сессию');
+      await waitFor(() => {
+        try { process.kill(orphan.pid, 0); return false; } catch { return true; }
+      }, 5000, 'orphan killed');
+      assert.equal(writer.messages.filter((m) => m.kind === 'complete').length, 1);
+    } finally {
+      try { orphan.kill('SIGKILL'); } catch { /* уже добит */ }
+      delete process.env.DEVIN_SESSION_LOCKED;
+      delete process.env.DEVIN_LOCK_ONCE;
+      delete process.env.DEVIN_LOCK_PID;
       restoreLaneEnv();
     }
   });
