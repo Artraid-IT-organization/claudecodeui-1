@@ -471,7 +471,13 @@ function ChatInterface({
   // missed live events, and re-attaches a still-running stream to this socket.
   const handleWebSocketReconnect = useCallback(async () => {
     if (!selectedProject || !selectedSession) return;
-    await requestLatestMessages(selectedSession.id, isActive, 'reconnect');
+    // Сокет на нестабильной сети переподключается пачками (iPhone, RU-выход):
+    // рефреш хвоста на каждый реконнект гнал бы REST-запросы спина-к-спине.
+    // Свежий хвост (<30 с) перечитывать не надо — replay по lastSeq уже добирает
+    // пропущенное, а лишние запросы мигают индикатором истории и дёргают ленту.
+    if (sessionStore.isStale(selectedSession.id)) {
+      await requestLatestMessages(selectedSession.id, isActive, 'reconnect');
+    }
     statusCheckSentAtRef.current.set(selectedSession.id, Date.now());
     sendMessage({
       type: 'chat.subscribe',
@@ -481,7 +487,7 @@ function ChatInterface({
         runStartedAt: knownRunStartedAt(selectedSession.id) ?? null,
       }],
     });
-  }, [isActive, requestLatestMessages, selectedProject, selectedSession, sendMessage]);
+  }, [isActive, requestLatestMessages, selectedProject, selectedSession, sendMessage, sessionStore]);
 
   useChatRealtimeHandlers({
     isActive,

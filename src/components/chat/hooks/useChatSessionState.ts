@@ -1224,16 +1224,21 @@ export function useChatSessionState({
         // перезапуск сайта: живого потока у него нет, и без перечитывания его
         // шаги появлялись бы разом только в конце.
         if (!isProcessing || isDetachedRun(selectedSession.id)) {
-          const shouldStickToBottom = isActiveRef.current && isNearBottom();
-          await requestLatestMessages(selectedSession.id);
+          // upsert-события приходят пачками (файл транскрипта пишется часто):
+          // свежий хвост (<30 с) не перечитываем — иначе каждый upsert гнал бы
+          // REST-запрос, и индикатор истории мигал бы непрерывно.
+          if (sessionStore.isStale(selectedSession.id)) {
+            const shouldStickToBottom = isActiveRef.current && isNearBottom();
+            await requestLatestMessages(selectedSession.id);
 
-          // Перепроверка в момент срабатывания: за время запроса (секунды на
-          // медленной сети) человек мог уйти листать — не утаскивать его.
-          if (shouldStickToBottom) {
-            setTimeout(() => {
-              if (isUserScrolledUpRef.current || !isActiveRef.current) return;
-              scrollToBottom();
-            }, 200);
+            // Перепроверка в момент срабатывания: за время запроса (секунды на
+            // медленной сети) человек мог уйти листать — не утаскивать его.
+            if (shouldStickToBottom) {
+              setTimeout(() => {
+                if (isUserScrolledUpRef.current || !isActiveRef.current) return;
+                scrollToBottom();
+              }, 200);
+            }
           }
         }
       } catch (error) {
@@ -1250,6 +1255,7 @@ export function useChatSessionState({
     selectedProject,
     selectedSession,
     isProcessing,
+    sessionStore,
   ]);
 
   // Search navigation target
