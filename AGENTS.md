@@ -1548,9 +1548,8 @@ REST-запросы спина-к-спине — индикатор мигал �
 
 Ссылки на бинарные результаты (`docx/xlsx/pptx/csv/zip/rar/7z/tar/gz/tgz/bz2/xz`) рендерятся в `Markdown.tsx` чипом `FileDownloadChip` → `downloadFile` из `PaletteOpsContext` → `handleWorkspaceFileDownload` в `MainContent.tsx`.
 
-Контракт — НАТИВНОЕ скачивание браузером (решение владельца 13.11.26: «загрузка именно в браузер, как обычно скачивания происходят»), не молчаливый blob-сейв:
+Контракт — скачивание по эталону апстрима (`useFileTreeOperations.ts`, апстрим-PR #634 «corrupted binary downloads»; решение владельца 14.11.26: «не выдумывать, копировать как делают»), не токен-в-URL:
 
-- `authenticatedFetch(..., {method:'HEAD'})` — проба: не-ok → fallback `handleFileOpen` (редактор со своей ошибкой), а не битый файл из JSON-ошибки.
-- Успех → программный клик по `a[download]` с `href = <door><apiPath>&token=<jwt>` — файл качает сам браузер (панель загрузок). Токен в query — тот же канал, что у SSE/WS (`req.query.token` в auth middleware); без него навигация браузера получит 401.
-- `apiPath` содержит `&download=1` — по этому флагу роут `files/content` ставит `Content-Disposition: attachment` с именем файла из basename пути. Без флага навигационная загрузка получает имя из последнего сегмента URL (`content.zip`); fetch-потребители (редактор) заголовок не чувствуют.
-- `getDoorBase()` в href обязателен — иначе при запасном входе (sobsila.ru:8444) ссылка уйдёт на основной хост; кросс-ориджин `download`-атрибут игнорируется, но `Content-Disposition` всё равно даёт файл и правильное имя, браузер не уходит со страницы.
+- `api.readFileBlob(projectId, path)` — авторизованный fetch на `files/content`; не-ok → fallback `handleFileOpen` (редактор со своей ошибкой), а не битый файл из JSON-ошибки.
+- Успех → `response.blob()` → `URL.createObjectURL` → программный клик по `a[download]` с именем файла — браузер регистрирует обычную загрузку в своей панели, имя берётся из атрибута `download`, токены в URL не светятся и не протухают.
+- Роут `files/content` остаётся «сырым» (Content-Type + стрим, без Content-Disposition): его fetch-потребителям (редактор, превью, скачивания) заголовок не нужен — имя всегда задаёт клиент.
