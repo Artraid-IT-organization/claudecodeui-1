@@ -1546,7 +1546,7 @@ REST-запросы спина-к-спине — индикатор мигал �
 
 ## Скачивание файлов из ответа чата (чип файла)
 
-Ссылки на бинарные результаты (`docx/xlsx/pptx/csv/zip/rar/7z/tar/gz/tgz/bz2/xz`) рендерятся в `Markdown.tsx` чипом `FileDownloadChip` → `downloadFile` из `PaletteOpsContext` → `handleWorkspaceFileDownload` в `MainContent.tsx`.
+Ссылки на бинарные результаты (`docx/xlsx/pptx/csv/zip/rar/7z/tar/gz/tgz/bz2/xz`) рендерятся в `Markdown.tsx` через `FileDownloadChip` — обычная ссылка (стиль как у file-link, плюс иконка загрузки; владелец 14.11.26: «синие плашки неудобны») → `downloadFile` из `PaletteOpsContext` → `handleWorkspaceFileDownload` в `MainContent.tsx`.
 
 Контракт — скачивание по эталону апстрима (`useFileTreeOperations.ts`, апстрим-PR #634 «corrupted binary downloads»; решение владельца 14.11.26: «не выдумывать, копировать как делают»), не токен-в-URL:
 

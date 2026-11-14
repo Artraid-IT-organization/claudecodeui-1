@@ -116,24 +116,26 @@ const isDownloadableRef = (value?: string): value is string => {
   return stem.length > 0 && DOWNLOADABLE_FILE_PATTERN.test(base);
 };
 
-// One-click download chip for agent-produced deliverables linked in a message.
+// One-click download link for agent-produced deliverables linked in a message.
+// Looks like a regular file link; the click downloads instead of opening the
+// editor, which cannot display binary content anyway.
 function FileDownloadChip({ fileRef, label }: { fileRef: string; label: React.ReactNode }) {
   const { t } = useTranslation('chat');
   const { downloadFile } = usePaletteOps();
   return (
-    <button
-      type="button"
+    <a
+      href={fileRef}
       title={t('fileDownload.tooltip', { defaultValue: 'Скачать файл' })}
       aria-label={t('fileDownload.tooltip', { defaultValue: 'Скачать файл' })}
       onClick={(event) => {
         event.preventDefault();
         downloadFile(stripLineSuffix(fileRef));
       }}
-      className="mx-0.5 inline-flex max-w-full items-center gap-1.5 rounded-md border border-blue-300/70 bg-blue-50 px-1.5 py-0.5 align-baseline text-[0.875em] font-medium text-blue-700 transition-colors hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-300 dark:hover:bg-blue-900/50"
+      className="cursor-pointer text-blue-600 hover:underline dark:text-blue-400"
     >
-      <DownloadIcon className="h-3.5 w-3.5 shrink-0" aria-hidden />
-      <span className="truncate">{label}</span>
-    </button>
+      <DownloadIcon className="mr-0.5 inline-block h-3.5 w-3.5 align-[-0.125em]" aria-hidden />
+      {label}
+    </a>
   );
 }
 
