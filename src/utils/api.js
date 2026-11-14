@@ -250,7 +250,9 @@ export const api = {
     // надо тот же срез, иначе страница приходит со всеми помощниками сразу.
     if (space) params.set('space', space);
     if (serverScope) params.set('serverScope', serverScope);
-    return authenticatedFetch(`/api/projects/${encodeURIComponent(projectId)}/sessions?${params.toString()}`);
+    // gate: страница лёгкая, а без ответа кнопка «показать ещё» молча умирает —
+    // на замороженном входе fetch не вернёт ни ответа, ни ошибки.
+    return authenticatedFetch(`/api/projects/${encodeURIComponent(projectId)}/sessions?${params.toString()}`, {}, { gate: true });
   },
   projectTaskmaster: (projectId) =>
     authenticatedFetch(`/api/projects/${encodeURIComponent(projectId)}/taskmaster`),
@@ -292,12 +294,16 @@ export const api = {
   // Resolves one session (by app id or provider-native id) to its metadata and
   // owning project — used when a /session/<id> URL isn't in loaded payloads.
   sessionDetails: (sessionId) =>
-    authenticatedFetch(`/api/providers/sessions/${encodeURIComponent(sessionId)}`),
+    // gate: резолв ссылки /session/<id> — одна попытка на id (sessionLookupRef),
+    // зависший запрос оставлял бы чат неоткрытым до перезагрузки страницы.
+    authenticatedFetch(`/api/providers/sessions/${encodeURIComponent(sessionId)}`, {}, { gate: true }),
   runningSessions: () =>
     authenticatedFetch('/api/providers/sessions/running'),
   // Последние слова человека и ответ по списку чатов — строки главного экрана.
   sessionPreviews: (sessionIds) =>
-    authenticatedFetch(`/api/providers/sessions/previews?ids=${sessionIds.map(encodeURIComponent).join(',')}`),
+    // gate: лёгкий запрос строк главного экрана — без него превью молча
+    // пустеют на замороженном входе.
+    authenticatedFetch(`/api/providers/sessions/previews?ids=${sessionIds.map(encodeURIComponent).join(',')}`, {}, { gate: true }),
   // `serverScope` — блок верхней панели («Проекты» / «2-й сервер»). Отбор
   // делает сервер: страница берётся по 40 чатов, и отбор после выдачи
   // оставлял бы второй блок почти пустым.
@@ -313,7 +319,8 @@ export const api = {
     if (serverScope) params.set('serverScope', serverScope);
     if (providerSpace) params.set('space', providerSpace);
     if (includeInternal) params.set('includeInternal', '1');
-    return authenticatedFetch(`/api/providers/sessions/recent?${params.toString()}`);
+    // gate: лента сайдбара — без ответа остаются вечные заглушки списка чатов.
+    return authenticatedFetch(`/api/providers/sessions/recent?${params.toString()}`, {}, { gate: true });
   },
   providerSessionId: (sessionId) =>
     authenticatedFetch(`/api/providers/sessions/${encodeURIComponent(sessionId)}/provider-id`),
