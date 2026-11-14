@@ -176,7 +176,14 @@ router.get('/files/:filename', async (req, res) => {
 
   res.setHeader('Content-Type', asset.contentType);
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('Content-Disposition', `attachment; filename="${req.params.filename.replace(/["\r\n]/g, '_')}"`);
+  // HTTP-заголовки допускают только Latin-1: кириллическое имя в `filename="…"`
+  // бросает ERR_INVALID_CHAR и вешает запрос. Даём ASCII-fallback и
+  // RFC-5987 `filename*` с UTF-8 — браузер берёт настоящее имя оттуда.
+  const asciiFallback = req.params.filename.replace(/[^\x20-\x7e]/g, '_').replace(/["\r\n]/g, '_');
+  res.setHeader(
+    'Content-Disposition',
+    `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodeURIComponent(req.params.filename)}`,
+  );
   asset.stream.pipe(res);
   asset.stream.on('error', (error) => {
     console.error('Error streaming attachment asset:', error);

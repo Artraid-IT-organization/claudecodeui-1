@@ -102,7 +102,7 @@ const looksLikeFilePath = (value?: string): value is string => {
 // File types a person can only consume as a saved file (documents, archives,
 // exports). References to them render as a download chip instead of opening
 // the editor, which cannot display binary content anyway.
-const DOWNLOADABLE_FILE_PATTERN = /\.(docx?|xlsx?|xls|pptx?|ppt|csv|zip|rar|7z|tar|gz|tgz|bz2|xz)$/i;
+const DOWNLOADABLE_FILE_PATTERN = /\.(docx?|xlsx?|xls|pptx?|ppt|csv|pdf|zip|rar|7z|tar|gz|tgz|bz2|xz|png|jpe?g|gif|webp|bmp|ico|mp3|mp4|mov|wav)$/i;
 
 const isDownloadableRef = (value?: string): value is string => {
   if (!value) {
