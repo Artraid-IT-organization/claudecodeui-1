@@ -5,6 +5,8 @@ import os from 'os';
 
 import { spawn } from 'cross-spawn';
 
+import { wrapInBuildScope } from '@/shared/agent-rooms.js';
+
 const PLUGINS_DIR = path.join(os.homedir(), '.claude-code-ui', 'plugins');
 const PLUGINS_CONFIG_PATH = path.join(os.homedir(), '.claude-code-ui', 'plugins.json');
 
@@ -108,8 +110,12 @@ function runBuildIfNeeded(dir, packageJsonPath, onSuccess, onError) {
     return onSuccess(); // Unreadable package.json — skip build
   }
 
-  const buildProcess = spawn('npm', ['run', 'build'], {
+  // Своя комната сборок (ccui-builds.slice): npm build — тяжёлый служебный
+  // ребёнок, без обёртки ел потолок группы сайта (15.11.26).
+  const buildRoom = wrapInBuildScope('npm', ['run', 'build'], process.env, 'plgb');
+  const buildProcess = spawn(buildRoom.command, buildRoom.args, {
     cwd: dir,
+    env: buildRoom.env,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -295,7 +301,9 @@ export function installPluginFromGit(url) {
       resolve(manifest);
     };
 
-    const gitProcess = spawn('git', ['clone', '--depth', '1', '--', url, tempDir], {
+    const cloneRoom = wrapInBuildScope('git', ['clone', '--depth', '1', '--', url, tempDir], process.env, 'plgc');
+    const gitProcess = spawn(cloneRoom.command, cloneRoom.args, {
+      env: cloneRoom.env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
@@ -340,8 +348,10 @@ export function installPluginFromGit(url) {
       // --ignore-scripts prevents postinstall hooks from executing arbitrary code.
       const packageJsonPath = path.join(tempDir, 'package.json');
       if (fs.existsSync(packageJsonPath)) {
-        const npmProcess = spawn('npm', ['install', '--ignore-scripts'], {
+        const npmRoom = wrapInBuildScope('npm', ['install', '--ignore-scripts'], process.env, 'plgi');
+        const npmProcess = spawn(npmRoom.command, npmRoom.args, {
           cwd: tempDir,
+          env: npmRoom.env,
           stdio: ['ignore', 'pipe', 'pipe'],
         });
 
@@ -377,8 +387,10 @@ export function updatePluginFromGit(name) {
     }
 
     // Only fast-forward to avoid silent divergence
-    const gitProcess = spawn('git', ['pull', '--ff-only', '--'], {
+    const pullRoom = wrapInBuildScope('git', ['pull', '--ff-only', '--'], process.env, 'plgp');
+    const gitProcess = spawn(pullRoom.command, pullRoom.args, {
       cwd: pluginDir,
+      env: pullRoom.env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
@@ -407,8 +419,10 @@ export function updatePluginFromGit(name) {
       // Re-run npm install if package.json exists
       const packageJsonPath = path.join(pluginDir, 'package.json');
       if (fs.existsSync(packageJsonPath)) {
-        const npmProcess = spawn('npm', ['install', '--ignore-scripts'], {
+        const npmRoom = wrapInBuildScope('npm', ['install', '--ignore-scripts'], process.env, 'plgu');
+        const npmProcess = spawn(npmRoom.command, npmRoom.args, {
           cwd: pluginDir,
+          env: npmRoom.env,
           stdio: ['ignore', 'pipe', 'pipe'],
         });
         npmProcess.on('close', (npmCode) => {

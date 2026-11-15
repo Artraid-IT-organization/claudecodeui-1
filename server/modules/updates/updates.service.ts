@@ -32,6 +32,7 @@ import path from 'node:path';
 
 import { sessionsService } from '@/modules/providers/index.js';
 import { dispatchChatQueues, queueChatMessage } from '@/modules/websocket/index.js';
+import { wrapInBuildScope } from '@/shared/agent-rooms.js';
 import { AppError } from '@/shared/utils.js';
 
 /** Сколько ждать результат применения, прежде чем считать попытку зависшей. */
@@ -213,10 +214,16 @@ export function startApply(updateId: string, force: boolean): { started: true } 
 
   const logFile = path.join(stateDir(), 'apply.log');
   const out = fs.openSync(logFile, 'a');
-  const child = spawn('bash', ['-c', cmd], {
+  // Применение — в комнате сборок (ccui-builds.slice): npm-сборка и пробный
+  // node dist-server — минуты и сотни МБ; без обёртки всё это жило в группе
+  // сайта и душило его во время каждой выкатки (15.11.26).
+  const room = wrapInBuildScope('bash', ['-c', cmd], {
+    ...process.env, CCUI_UPDATE_ID: pending.id,
+  }, `upd${pending.id.slice(0, 8)}`);
+  const child = spawn(room.command, room.args, {
     detached: true,
     stdio: ['ignore', out, out],
-    env: { ...process.env, CCUI_UPDATE_ID: pending.id },
+    env: room.env,
   });
   child.unref();
   fs.closeSync(out);
