@@ -7,7 +7,7 @@ import { usePaletteOpsRegister } from '../../../contexts/PaletteOpsContext';
 import { useTasksSettings } from '../../../contexts/TasksSettingsContext';
 import { useUiPreferences } from '../../../hooks/useUiPreferences';
 import { useFileOpenResolver } from '../../../hooks/useFileOpenResolver';
-import { api } from '../../../utils/api';
+import { api, getStoredAuthToken } from '../../../utils/api';
 import { useEditorSidebar } from '../../code-editor/hooks/useEditorSidebar';
 import type { Project } from '../../../types/app';
 
@@ -125,6 +125,27 @@ function MainContent({
         return;
       }
       const fileName = filePath.split(/[\\/]/).pop() || 'download';
+      // iOS и standalone-PWA: blob-клик не имеет загрузок — WebView уходит на
+      // blob: и показывает белый экран. Там качаем настоящим URL: window.open
+      // открывает Safari-view, Content-Disposition отдаёт файл в «Файлы».
+      const isStandalone =
+        (navigator as Navigator & { standalone?: boolean }).standalone === true ||
+        window.matchMedia('(display-mode: standalone)').matches;
+      const isIOS =
+        /iP(hone|ad|od)/.test(navigator.userAgent) ||
+        (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+      if (isIOS || isStandalone) {
+        const params = new URLSearchParams({
+          path: filePath,
+          download: '1',
+          token: getStoredAuthToken() || '',
+        });
+        window.open(
+          `/api/file-tree/projects/${selectedProject.projectId}/files/content?${params}`,
+          '_blank',
+        );
+        return;
+      }
       try {
         const response = await api.readFileBlob(selectedProject.projectId, filePath);
         if (!response.ok) {
