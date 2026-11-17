@@ -211,14 +211,18 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
   // временем: файл-результат агент кладёт в видимые папки недалеко от корня.
   const BASENAME_LOOKUP_MAX_DEPTH = 4;
   const BASENAME_LOOKUP_MAX_ENTRIES = 80_000;
-  const BASENAME_LOOKUP_MAX_MS = 4_000;
+  const BASENAME_LOOKUP_MAX_MS = 8_000;
 
   async function findFileByBasename(projectRoot: string, basename: string): Promise<string | null> {
     const deadline = Date.now() + BASENAME_LOOKUP_MAX_MS;
     const queue: Array<{ directory: string; depth: number }> = [{ directory: projectRoot, depth: 0 }];
+    // Индекс, не shift(): на широком корне очередь десятки тысяч каталогов,
+    // shift() копирует её каждый шаг — O(n²) и event loop встаёт (прод: HTTP
+    // переставал отвечать на любом запросе, пока шли несколько таких поисков).
+    let head = 0;
     let scanned = 0;
-    while (queue.length > 0) {
-      const { directory, depth } = queue.shift() as { directory: string; depth: number };
+    while (head < queue.length) {
+      const { directory, depth } = queue[head++];
       if (Date.now() > deadline) break;
       try {
         for await (const entry of fileSystem.openDirectory(directory)) {
@@ -485,12 +489,28 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
         // Поиск только при «нет такого файла»: отказ доступа к существующему
         // пути подменять другим найденным нельзя.
         if (options?.resolveByName && readErrorCode(accessError) === 'ENOENT') {
-          const basename = path.basename(filePath.replace(/\\/g, '/'));
-          const found = basename ? await findFileByBasename(projectRoot, basename) : null;
-          if (found) {
-            resolvedPath = found;
-          } else {
-            throw createFileTreeError('File not found', 404, 'FILE_NOT_FOUND');
+          // `~/dir/file.zip` при корне workspace, отличном от корня проекта
+          // (на общей площадке «дом» запросившего — не «дом» агента): хвост
+          // после `~/` пробуем внутри проекта — точная проверка до обхода.
+          let tailFound = false;
+          if (/^~[\\/]/.test(filePath)) {
+            try {
+              const tailPath = resolvePathInsideProject(projectRoot, filePath.slice(2));
+              await fileSystem.access(tailPath);
+              resolvedPath = tailPath;
+              tailFound = true;
+            } catch {
+              // Хвост тоже не лёг — дальше ищем по имени файла.
+            }
+          }
+          if (!tailFound) {
+            const basename = path.basename(filePath.replace(/\\/g, '/'));
+            const found = basename ? await findFileByBasename(projectRoot, basename) : null;
+            if (found) {
+              resolvedPath = found;
+            } else {
+              throw createFileTreeError('File not found', 404, 'FILE_NOT_FOUND');
+            }
           }
         } else {
           throw createFileTreeError('File not found', 404, 'FILE_NOT_FOUND');

@@ -58,7 +58,14 @@ export const requestRuntimeContextMiddleware: RequestHandler = (
     {
       userId,
       claudeConfigDir: getWebUserClaudeConfigDir(userId, ownerSlot),
-      workspaceRoot: getWebUserWorkspaceRoot(userId),
+      // У владельца площадки нет ~/.claude-webuser-<id>: его «рабочий корень»
+      // — общий WORKSPACES_ROOT (undefined → фолбэк в getWorkspacesRoot), как и
+      // в resolveWebUserRuntimeContext. Иначе `~/…` из ответов агента раскрывается
+      // в несуществующий per-user каталог и скачивание уходит в поиск по имени.
+      workspaceRoot:
+        Number.isFinite(numericUserId) && isPlatformOwnerWebUser(numericUserId)
+          ? undefined
+          : getWebUserWorkspaceRoot(userId),
       anthropicApiKey,
     },
     next,
