@@ -33,12 +33,21 @@
  * Если менеджер пользователя совсем недоступен — запуск напрямую, как
  * раньше: чат важнее комнаты; сторож ~/self-heal таких стреев выносит из
  * группы сайта и докладывает. Выключить: CLOUDCLI_AGENT_ROOMS=off.
+ * Прямой запуск при этом идёт через bash-обёртку, поднимающую
+ * oom_score_adj ребёнка: при нехватке памяти в группе сайта ядро снимает
+ * стрея, а не веб-сервер (15.11.26 — стреи душили группу, renice сторожа
+ * память не спасал).
+ *
+ * Сборки и установки (выкатка обновления, плагины, browser-use) идут в срез
+ * ccui-builds.slice через wrapInBuildScope — у него свой потолок, отдельный
+ * и от сайта, и от комнат агентов.
  */
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 
 const SLICE = process.env.CLOUDCLI_AGENT_SLICE || 'ccui-agents.slice';
+const BUILD_SLICE = process.env.CLOUDCLI_BUILD_SLICE || 'ccui-builds.slice';
 // Потолок комнаты — жёсткий (MemoryMax), не мягкий (24.10.26). Только MemoryHigh
 // ядро не убивает никогда — тормозит (docs.kernel.org cgroup-v2: «going over
 // the high limit never invokes the OOM killer»). Разовые команды мёртвых чатов
@@ -160,11 +169,37 @@ export type AgentRoomSpec = {
 };
 
 /**
+ * Прямой запуск без комнаты (менеджер недоступен): ребёнок всё равно родится
+ * в группе сайта, поэтому поднимаем ему oom_score_adj через exec-обёртку —
+ * при нехватке памяти ядро снимает стрея, а не веб-сервер. Свой
+ * oom_score_adj процесс может повышать без root; пишем в /proc/self до
+ * exec, PID и каналы не меняются (15.11.26: renice сторожа прижимал CPU,
+ * но стреи продолжали есть память группы и душить сервер).
+ */
+function oomGuarded(
+    command: string,
+    args: string[],
+    env: NodeJS.ProcessEnv | undefined,
+): AgentRoomSpec {
+    return {
+        command: 'bash',
+        args: [
+            '-c',
+            'echo 800 > /proc/self/oom_score_adj 2>/dev/null; exec "$@"',
+            'agent-fallback', command, ...args,
+        ],
+        env: env || process.env,
+        room: null,
+    };
+}
+
+/**
  * Обернуть запуск агента в комнату. Возвращает то, что передать в spawn:
  * либо systemd-run с агентом внутри, либо исходную команду без изменений.
  * Вызывается из всех точек рождения процессов агентов: survivor-runs
  * (claude), devin-acp-client и devin-runtime (devin), codex-worker,
- * cursor-runtime, opencode-runtime, shell-websocket (терминал).
+ * cursor-runtime, opencode-runtime, shell-websocket (терминал),
+ * devin-model/askCodexOnce (разовые вызовы выжимки), codex-account-limits.
  */
 export function wrapInAgentRoom(
     command: string,
@@ -173,7 +208,7 @@ export function wrapInAgentRoom(
     appSessionId?: string | null,
 ): AgentRoomSpec {
     if (!available || disabled()) {
-        return { command, args, env: env || process.env, room: null };
+        return oomGuarded(command, args, env);
     }
     const tag = String(appSessionId || 'chat').replace(/[^A-Za-z0-9]/g, '').slice(0, 8) || 'chat';
     const unit = `ccui-agent-${tag}-${crypto.randomBytes(3).toString('hex')}`;
@@ -186,6 +221,38 @@ export function wrapInAgentRoom(
             '-p', `MemoryMax=${AGENT_MEMORY_MAX}`,
             '-p', `MemorySwapMax=${AGENT_SWAP_MAX}`,
             '-p', 'OOMPolicy=continue',
+            '--', command, ...args,
+        ],
+        env: managerEnv(env || process.env),
+        room: `${unit}.scope`,
+    };
+}
+
+/**
+ * Та же комната, но в срезе сборок ccui-builds.slice — для тяжёлых
+ * служебных детей сайта, которые не являются ходом чата: apply-update /
+ * build-shared при выкатке, установка плагинов и browser-use. 15.11.26
+ * выкатка (npm build + пробный node dist-server) жила в группе сайта и
+ * делила с ним потолок — во время каждого обновления сайт задыхался.
+ * Без комнаты — та же oom-обёртка, что у агентов.
+ */
+export function wrapInBuildScope(
+    command: string,
+    args: string[],
+    env: NodeJS.ProcessEnv | undefined,
+    tag = 'build',
+): AgentRoomSpec {
+    if (!available || disabled()) {
+        return oomGuarded(command, args, env);
+    }
+    const clean = String(tag).replace(/[^A-Za-z0-9]/g, '').slice(0, 8) || 'build';
+    const unit = `ccui-build-${clean}-${crypto.randomBytes(3).toString('hex')}`;
+    return {
+        command: 'systemd-run',
+        args: [
+            '--user', '--scope', '--quiet', '--collect',
+            `--slice=${BUILD_SLICE}`,
+            `--unit=${unit}`,
             '--', command, ...args,
         ],
         env: managerEnv(env || process.env),

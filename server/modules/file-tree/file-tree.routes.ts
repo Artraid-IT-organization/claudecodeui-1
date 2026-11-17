@@ -132,8 +132,21 @@ export function createFileTreeRouter(
 
   router.get('/projects/:projectId/files/content', createRouteHandler(async (request, response) => {
     const filePath = readRequiredString(request.query.path, 'path', 'Invalid file path');
-    const file = await services.openFile(readProjectId(request), filePath);
+    const file = await services.openFile(readProjectId(request), filePath, {
+      resolveByName: request.query.resolve === '1',
+    });
     response.setHeader('Content-Type', file.contentType);
+    // `?download=1` — настоящая навигационная скачка (iOS/PWA): blob-клик в
+    // standalone WebView не имеет загрузок и даёт белый экран. Имя кодируем
+    // как в assets: ASCII-fallback + RFC-5987 filename* для кириллицы.
+    if (request.query.download === '1') {
+      const fileName = filePath.split(/[\\/]/).pop() || 'download';
+      const asciiFallback = fileName.replace(/[^\x20-\x7e]/g, '_').replace(/["\r\n]/g, '_');
+      response.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+      );
+    }
     file.stream.pipe(response);
     file.stream.on('error', (error) => {
       logger.error('Error streaming File Tree content', error);

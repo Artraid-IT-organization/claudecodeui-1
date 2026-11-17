@@ -55,6 +55,7 @@ import path from 'node:path';
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
 
+import { wrapInAgentRoom } from '@/shared/agent-rooms.js';
 import { devinConnectionsDb, sessionsDb } from '@/modules/database/index.js';
 import {
   askDevinOnce,
@@ -370,8 +371,13 @@ export async function askCodexOnce(prompt: string): Promise<string> {
     '-c', 'model_reasoning_effort="low"', '-C', MODEL_CWD, '-o', outFile, '-',
   ];
   const errorText = await new Promise<string | null>((resolve) => {
-    const child = spawn(resolveCodexBinary(), args, {
-      env: { ...process.env, CODEX_HOME: codexHome() },
+    // Своя комната (agent-rooms): codex exec — отдельный тяжёлый процесс;
+    // без обёртки жил в группе сайта и ел её потолок (стреи 14–15.11.26).
+    const room = wrapInAgentRoom(resolveCodexBinary(), args, {
+      ...process.env, CODEX_HOME: codexHome(),
+    }, 'codexonce');
+    const child = spawn(room.command, room.args, {
+      env: room.env,
       stdio: ['pipe', 'ignore', 'pipe'],
     });
     let stderr = '';

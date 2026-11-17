@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { markDetachedRun } from '../utils/detachedRuns';
 import type { NavigateFunction } from 'react-router-dom';
 
+import { markDetachedRun } from '../utils/detachedRuns';
 import { api } from '../utils/api';
 import { DEFAULT_PROVIDER } from '../utils/defaultProvider';
 import type { ServerEvent } from '../contexts/WebSocketContext';
@@ -19,9 +19,10 @@ import type {
   ServerScope,
   ProjectSession,
 } from '../types/app';
+import { readSelectedProviderRaw } from '../utils/selectedProvider';
+import { readProjectsSnapshot, writeProjectsSnapshot } from '../utils/projectsSnapshot';
 
 import type { SessionActivityMap } from './useSessionProtection';
-import { readSelectedProviderRaw } from '../utils/selectedProvider';
 
 type UseProjectsStateArgs = {
   sessionId?: string;
@@ -413,7 +414,10 @@ export function useProjectsState({
   isMobile,
   activeSessions,
 }: UseProjectsStateArgs) {
-  const [projects, setProjects] = useState<Project[]>([]);
+  // Последний снимок списка папок этого пользователя — приложение рисуется
+  // сразу с ним, не дожидаясь /api/projects (см. utils/projectsSnapshot).
+  const [initialSnapshot] = useState<Project[] | null>(() => readProjectsSnapshot());
+  const [projects, setProjects] = useState<Project[]>(initialSnapshot ?? []);
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [selectedSession, setSelectedSession] = useState<ProjectSession | null>(null);
   const [attentionSessionIds, setAttentionSessionIds] = useState<Set<string>>(new Set());
@@ -428,7 +432,8 @@ export function useProjectsState({
   }, [activeTab]);
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [isLoadingProjects, setIsLoadingProjects] = useState(true);
+  // Снимок есть — заставки нет: свежий список догрузится молча.
+  const [isLoadingProjects, setIsLoadingProjects] = useState(initialSnapshot === null);
   const [loadingProgress, setLoadingProgress] = useState<LoadingProgress | null>(null);
   const [isInputFocused, setIsInputFocused] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -475,6 +480,27 @@ export function useProjectsState({
   projectsRef.current = projects;
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
+
+  // Снимок для следующего захода пишем с задержкой: session_upserted меняет
+  // список часто, а синхронная запись сотен КБ JSON на каждое событие жгла бы
+  // кадр. Таймер откладывается, пока изменения идут подряд.
+  const snapshotWriteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (snapshotWriteTimerRef.current) {
+      clearTimeout(snapshotWriteTimerRef.current);
+    }
+    snapshotWriteTimerRef.current = setTimeout(() => {
+      snapshotWriteTimerRef.current = null;
+      writeProjectsSnapshot(projectsRef.current);
+    }, 2000);
+    return () => {
+      if (snapshotWriteTimerRef.current) {
+        clearTimeout(snapshotWriteTimerRef.current);
+        snapshotWriteTimerRef.current = null;
+      }
+    };
+  }, [projects]);
+
   /** URL session id whose backend lookup already ran (or is in flight) — one attempt per id. */
   const sessionLookupRef = useRef<string | null>(null);
 
@@ -671,8 +697,9 @@ export function useProjectsState({
   }, []);
 
   useEffect(() => {
-    void fetchProjects();
-  }, [fetchProjects]);
+    // Со снимком экран уже показан — список обновляем без заставки.
+    void fetchProjects({ showLoadingState: initialSnapshot === null });
+  }, [fetchProjects, initialSnapshot]);
 
   useEffect(() => {
     if (!selectedProject?.projectId) {

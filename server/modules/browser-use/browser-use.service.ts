@@ -9,6 +9,7 @@ import spawn from 'cross-spawn';
 
 import { appConfigDb } from '@/modules/database/index.js';
 import { providerMcpService } from '@/modules/providers/index.js';
+import { wrapInBuildScope } from '@/shared/agent-rooms.js';
 import { getModuleDirectory } from '@/shared/utils.js';
 
 import { getBrowserUseRuntime } from './browser-use-runtime.js';
@@ -243,9 +244,12 @@ const INSTALL_COMMAND_TIMEOUT_MS = Number.parseInt(
 
 function runCommand(command: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
+    // Своя комната сборок (ccui-builds.slice): установка браузера — тяжёлый
+    // служебный ребёнок, без обёртки ел потолок группы сайта (15.11.26).
+    const room = wrapInBuildScope(command, args, process.env, 'buse');
+    const child = spawn(room.command, room.args, {
       cwd: process.cwd(),
-      env: process.env,
+      env: room.env,
       shell: false,
       stdio: ['ignore', 'pipe', 'pipe'],
     });

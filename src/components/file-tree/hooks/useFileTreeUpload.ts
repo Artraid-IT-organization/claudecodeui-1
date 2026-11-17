@@ -140,7 +140,12 @@ const uploadFormDataWithProgress = (
       if (refreshedToken) {
         storeAuthToken(refreshedToken);
       }
-      if (xhr.getResponseHeader('X-Auth-Error')) {
+      // Та же проверка, что в sendAuthenticatedFetch (api.js): сессию сносит
+      // только отказ ТОКЕНА, который был отправлен и всё ещё текущий. Ответ
+      // на запрос без токена или со старым (сессия уже восстановлена по
+      // ссылке) не должен раз за разом сбрасывать вход — иначе поздние 401
+      // загрузки зацикливали экран загрузка↔приложение (14.11.26).
+      if (token && xhr.getResponseHeader('X-Auth-Error') && getStoredAuthToken() === token) {
         expireAuthSession();
       }
 

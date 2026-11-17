@@ -24,6 +24,7 @@
 
 import spawn from 'cross-spawn';
 
+import { wrapInAgentRoom } from '@/shared/agent-rooms.js';
 import { openDevinDatabase } from '@/modules/providers/list/devin/devin-sessions.provider.js';
 import { readConfiguredDefaultModel } from '@/modules/providers/list/devin/devin-models.provider.js';
 import {
@@ -113,46 +114,91 @@ function readUsageNumber(value: unknown): number {
 }
 
 /**
- * model_uid → max_context_tokens из `devin models list --format json`
- * (кэш 10 минут — это subprocess). Недоступен → пустая карта, и вызывающий
+ * Разбор вывода `devin models list --format json` → карта
+ * model_uid → max_context_tokens. Битый вывод → пустая карта, вызывающий
  * берёт окно SWE-2 по умолчанию.
+ */
+function parseContextWindowCatalog(stdout: string): Map<string, number> {
+  const windows = new Map<string, number>();
+  try {
+    const catalog = readJsonRecord(stdout);
+    const families = Array.isArray(catalog?.families) ? catalog.families : [];
+    for (const family of families) {
+      const variants = Array.isArray(readObjectRecord(family)?.variants)
+        ? (readObjectRecord(family)?.variants as unknown[])
+        : [];
+      for (const variant of variants) {
+        const record = readObjectRecord(variant);
+        const modelUid = readOptionalString(record?.model_uid);
+        const maxContext = readUsageNumber(record?.max_context_tokens);
+        if (modelUid && maxContext > 0) {
+          windows.set(modelUid, maxContext);
+        }
+      }
+    }
+  } catch {
+    // Битый вывод каталога — работаем на окне по умолчанию.
+  }
+  return windows;
+}
+
+let catalogInFlight = false;
+
+/**
+ * Асинхронное обновление кэша каталога. Раньше здесь был spawn.sync —
+ * синхронный subprocess до 15 с морозил event loop сайта целиком: все
+ * сокеты и запросы вставали (15.11.26). Теперь читатель сразу получает
+ * кэш/окно по умолчанию, а каталог догружается в своей комнате
+ * (agent-rooms): `devin` раньше рождался в группе сайта стреем.
+ */
+function refreshContextWindowCatalog(): void {
+  if (catalogInFlight) {
+    return;
+  }
+  if (contextWindowCache && Date.now() - contextWindowCache.at < WINDOW_CACHE_TTL_MS) {
+    return;
+  }
+  catalogInFlight = true;
+  const room = wrapInAgentRoom(
+    resolveDevinCliCommand(), ['models', 'list', '--format', 'json'],
+    buildDevinChildEnv(), 'winmap',
+  );
+  const child = spawn(room.command, room.args, {
+    env: room.env,
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  let stdout = '';
+  const timer = setTimeout(() => {
+    child.kill();
+  }, CATALOG_TIMEOUT_MS);
+  timer.unref?.();
+  child.stdout?.on('data', (chunk: Buffer) => {
+    stdout += chunk.toString();
+    if (stdout.length > 4 * 1024 * 1024) {
+      child.kill();
+    }
+  });
+  const done = () => {
+    clearTimeout(timer);
+    catalogInFlight = false;
+    const windows = parseContextWindowCatalog(stdout);
+    contextWindowCache = { at: Date.now(), windows };
+  };
+  child.once('error', done);
+  child.once('exit', done);
+}
+
+/**
+ * model_uid → max_context_tokens из `devin models list --format json`
+ * (кэш 10 минут — это subprocess). Недоступен или ещё грузится →
+ * последний кэш либо пустая карта, и вызывающий берёт окно по умолчанию.
  */
 function readDevinContextWindowMap(): Map<string, number> {
   if (contextWindowCache && Date.now() - contextWindowCache.at < WINDOW_CACHE_TTL_MS) {
     return contextWindowCache.windows;
   }
-
-  const windows = new Map<string, number>();
-  const result = spawn.sync(resolveDevinCliCommand(), ['models', 'list', '--format', 'json'], {
-    encoding: 'utf8',
-    timeout: CATALOG_TIMEOUT_MS,
-    maxBuffer: 4 * 1024 * 1024,
-    env: buildDevinChildEnv(),
-  });
-  if (!result.error && result.status === 0 && result.stdout) {
-    try {
-      const catalog = readJsonRecord(result.stdout);
-      const families = Array.isArray(catalog?.families) ? catalog.families : [];
-      for (const family of families) {
-        const variants = Array.isArray(readObjectRecord(family)?.variants)
-          ? (readObjectRecord(family)?.variants as unknown[])
-          : [];
-        for (const variant of variants) {
-          const record = readObjectRecord(variant);
-          const modelUid = readOptionalString(record?.model_uid);
-          const maxContext = readUsageNumber(record?.max_context_tokens);
-          if (modelUid && maxContext > 0) {
-            windows.set(modelUid, maxContext);
-          }
-        }
-      }
-    } catch {
-      // Битый вывод каталога — работаем на окне по умолчанию.
-    }
-  }
-
-  contextWindowCache = { at: Date.now(), windows };
-  return windows;
+  refreshContextWindowCatalog();
+  return contextWindowCache ? contextWindowCache.windows : new Map<string, number>();
 }
 
 /**

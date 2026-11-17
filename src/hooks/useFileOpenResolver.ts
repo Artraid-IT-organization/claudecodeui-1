@@ -17,7 +17,7 @@ type FlatFile = {
 
 // `diffInfo` is intentionally `any` so this resolver can wrap editor handlers
 // that expect a concrete diff payload type as well as generic callers.
-type OnFileOpen = (filePath: string, diffInfo?: any) => void;
+type OnFileOpen = (filePath: string, diffInfo?: any) => unknown;
 
 const normalize = (value: string): string => value.replace(/\\/g, '/');
 
@@ -35,7 +35,8 @@ const flatten = (nodes: FileNode[], out: FlatFile[]): void => {
 // paths (`utils/foo.ts`) rather than full paths, so match by path suffix and
 // fall back to filename equality.
 const findBestMatch = (files: FlatFile[], ref: string): string | null => {
-  const target = normalize(ref).replace(/^\.\//, '').replace(/^\/+/, '');
+  // `~/…` — домашний путь из ответа агента: сравниваем по хвосту без `~`.
+  const target = normalize(ref).replace(/^\.\//, '').replace(/^~(?=\/|$)/, '').replace(/^\/+/, '');
   if (!target) {
     return null;
   }
@@ -98,9 +99,11 @@ export function useFileOpenResolver(
   return useCallback(
     (filePath: string, diffInfo?: any) => {
       const ref = normalize(filePath).trim();
-      void loadFiles().then((files) => {
+      // Возвращаем промис: вызывающий (чип скачивания) должен увидеть отказ —
+      // молчаливый отказ скачивания уходил в редактор и показывал «бинарный файл».
+      return loadFiles().then((files) => {
         const match = findBestMatch(files, ref);
-        onFileOpen(match ?? filePath, diffInfo);
+        return onFileOpen(match ?? filePath, diffInfo);
       });
     },
     [loadFiles, onFileOpen],

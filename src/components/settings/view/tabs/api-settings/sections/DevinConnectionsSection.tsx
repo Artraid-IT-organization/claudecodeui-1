@@ -29,7 +29,7 @@ type Task = {
 
 const HEALTH_LABELS: Record<string, { text: string; className: string }> = {
   ok: { text: 'ok', className: 'bg-green-600 text-white' },
-  auth_failed: { text: 'креда отозвана', className: 'bg-red-600 text-white' },
+  auth_failed: { text: 'нужна авторизация', className: 'bg-red-600 text-white' },
   rate_limited: { text: 'rate limit', className: 'bg-amber-500 text-white' },
   error: { text: 'сбой', className: 'bg-red-500/80 text-white' },
   unknown: { text: 'не проверен', className: 'bg-muted text-muted-foreground' },

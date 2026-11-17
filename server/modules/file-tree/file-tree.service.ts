@@ -195,6 +195,52 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
     return projectRoot;
   }
 
+  // Агенты в ответах пишут домашний путь как `~/…` — для файловых операций
+  // «дом» это корень рабочего пространства (browseWorkspace раскрывает `~`
+  // так же). Без раскрытия `~/dir/file.zip` резолвился в
+  // `<project>/~/dir/file.zip` и отваливался 404.
+  const resolveProjectFilePath = (projectRoot: string, targetPath: string): string =>
+    resolvePathInsideProject(
+      projectRoot,
+      expandWorkspacePath(dependencies.workspace.rootPath, targetPath),
+    );
+
+  // Имя файла без папки (`Отчёт.zip`) или со ссылкой вне дерева: дерево
+  // домашнего проекта шире лимита и клиентский резолвер получает 413, поэтому
+  // ищем по базовому имени сами. Обход ограничен глубиной, бюджетом записей и
+  // временем: файл-результат агент кладёт в видимые папки недалеко от корня.
+  const BASENAME_LOOKUP_MAX_DEPTH = 4;
+  const BASENAME_LOOKUP_MAX_ENTRIES = 80_000;
+  const BASENAME_LOOKUP_MAX_MS = 4_000;
+
+  async function findFileByBasename(projectRoot: string, basename: string): Promise<string | null> {
+    const deadline = Date.now() + BASENAME_LOOKUP_MAX_MS;
+    const queue: Array<{ directory: string; depth: number }> = [{ directory: projectRoot, depth: 0 }];
+    let scanned = 0;
+    while (queue.length > 0) {
+      const { directory, depth } = queue.shift() as { directory: string; depth: number };
+      if (Date.now() > deadline) break;
+      try {
+        for await (const entry of fileSystem.openDirectory(directory)) {
+          scanned += 1;
+          if (scanned > BASENAME_LOOKUP_MAX_ENTRIES || Date.now() > deadline) return null;
+          if (entry.isDirectory()) {
+            if (depth < BASENAME_LOOKUP_MAX_DEPTH
+                && !entry.name.startsWith('.')
+                && !IGNORED_DIRECTORY_NAMES.has(entry.name)) {
+              queue.push({ directory: path.join(directory, entry.name), depth: depth + 1 });
+            }
+          } else if (entry.name === basename) {
+            return path.join(directory, entry.name);
+          }
+        }
+      } catch {
+        // Нечитаемая папка не отменяет поиск по остальным веткам.
+      }
+    }
+    return null;
+  }
+
   /**
    * Streams one directory and keeps only the entries the tree will show.
    *
@@ -416,7 +462,7 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
 
     async readTextFile(projectId, filePath) {
       const projectRoot = await resolveProjectRoot(projectId);
-      const resolvedPath = resolvePathInsideProject(projectRoot, filePath);
+      const resolvedPath = resolveProjectFilePath(projectRoot, filePath);
       try {
         const content = await fileSystem.readTextFile(resolvedPath);
         return { content, path: resolvedPath };
@@ -428,13 +474,27 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
       }
     },
 
-    async openFile(projectId, filePath) {
+    async openFile(projectId, filePath, options) {
       const projectRoot = await resolveProjectRoot(projectId);
-      const resolvedPath = resolvePathInsideProject(projectRoot, filePath);
+      let resolvedPath = resolveProjectFilePath(projectRoot, filePath);
       try {
         await fileSystem.access(resolvedPath);
-      } catch {
-        throw createFileTreeError('File not found', 404, 'FILE_NOT_FOUND');
+      } catch (accessError) {
+        // `resolve=1` просит скачка из чата: точного пути нет — ищем файл по
+        // базовому имени в видимых папках проекта, а не отвечаем 404 сразу.
+        // Поиск только при «нет такого файла»: отказ доступа к существующему
+        // пути подменять другим найденным нельзя.
+        if (options?.resolveByName && readErrorCode(accessError) === 'ENOENT') {
+          const basename = path.basename(filePath.replace(/\\/g, '/'));
+          const found = basename ? await findFileByBasename(projectRoot, basename) : null;
+          if (found) {
+            resolvedPath = found;
+          } else {
+            throw createFileTreeError('File not found', 404, 'FILE_NOT_FOUND');
+          }
+        } else {
+          throw createFileTreeError('File not found', 404, 'FILE_NOT_FOUND');
+        }
       }
 
       return {
@@ -445,7 +505,7 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
 
     async saveTextFile(projectId, filePath, content) {
       const projectRoot = await resolveProjectRoot(projectId);
-      const resolvedPath = resolvePathInsideProject(projectRoot, filePath);
+      const resolvedPath = resolveProjectFilePath(projectRoot, filePath);
       try {
         await fileSystem.writeTextFile(resolvedPath, content);
       } catch (error) {
@@ -499,7 +559,7 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
       const targetPath = input.parentPath
         ? path.join(input.parentPath, input.name)
         : input.name;
-      const resolvedPath = resolvePathInsideProject(projectRoot, targetPath);
+      const resolvedPath = resolveProjectFilePath(projectRoot, targetPath);
 
       try {
         await fileSystem.access(resolvedPath);
@@ -543,7 +603,7 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
     async renameEntry(input) {
       validateFilename(input.newName);
       const projectRoot = await resolveProjectRoot(input.projectId);
-      const resolvedOldPath = resolvePathInsideProject(projectRoot, input.oldPath);
+      const resolvedOldPath = resolveProjectFilePath(projectRoot, input.oldPath);
 
       try {
         await fileSystem.access(resolvedOldPath);
@@ -552,7 +612,7 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
       }
 
       const resolvedNewPath = path.join(path.dirname(resolvedOldPath), input.newName);
-      resolvePathInsideProject(projectRoot, resolvedNewPath);
+      resolveProjectFilePath(projectRoot, resolvedNewPath);
       try {
         await fileSystem.access(resolvedNewPath);
         throw createFileTreeError(
@@ -585,7 +645,7 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
 
     async deleteEntry(input) {
       const projectRoot = await resolveProjectRoot(input.projectId);
-      const resolvedPath = resolvePathInsideProject(projectRoot, input.targetPath);
+      const resolvedPath = resolveProjectFilePath(projectRoot, input.targetPath);
       let stats;
       try {
         stats = await fileSystem.stat(resolvedPath);
@@ -631,7 +691,7 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
           || input.targetPath === '.'
           || input.targetPath === './'
           ? path.resolve(projectRoot)
-          : resolvePathInsideProject(projectRoot, input.targetPath);
+          : resolveProjectFilePath(projectRoot, input.targetPath);
 
         try {
           await fileSystem.access(resolvedTargetDirectory);
@@ -646,7 +706,7 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
           const destinationPath = path.join(resolvedTargetDirectory, fileName);
 
           try {
-            resolvePathInsideProject(projectRoot, destinationPath);
+            resolveProjectFilePath(projectRoot, destinationPath);
           } catch (error) {
             if (error instanceof AppError && error.statusCode === 403) {
               await cleanupTemporaryFiles([file]);

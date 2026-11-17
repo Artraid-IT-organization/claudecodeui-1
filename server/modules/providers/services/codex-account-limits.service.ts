@@ -4,6 +4,8 @@ import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 
+import { wrapInAgentRoom } from '@/shared/agent-rooms.js';
+
 /**
  * Codex subscription account and its usage windows, read from Codex itself.
  *
@@ -111,8 +113,13 @@ function toUsageWindow(window: RateLimitWindowPayload | null | undefined, now: n
 /** One short-lived app-server: initialize, read account + limits, exit. */
 function queryAppServer(): Promise<CodexAccountLimits> {
   return new Promise((resolve) => {
-    const child = spawn(resolveCodexBinary(), ['app-server'], {
-      env: { ...process.env, CODEX_HOME: codexHome() },
+    // Своя комната (agent-rooms): app-server — отдельный процесс, без
+    // обёртки ел потолок группы сайта (стреи 14–15.11.26).
+    const room = wrapInAgentRoom(resolveCodexBinary(), ['app-server'], {
+      ...process.env, CODEX_HOME: codexHome(),
+    }, 'codexlim');
+    const child = spawn(room.command, room.args, {
+      env: room.env,
       stdio: ['pipe', 'pipe', 'ignore'],
     });
     const result: CodexAccountLimits = { available: false, email: null, planType: null, fetchedAtMs: null, limits: [] };
@@ -188,8 +195,11 @@ let modelListInFlight: Promise<CodexModelList | null> | null = null;
 /** One short-lived app-server: `model/list` - the models THIS login may use. */
 function queryModelList(): Promise<CodexModelList | null> {
   return new Promise((resolve) => {
-    const child = spawn(resolveCodexBinary(), ['app-server'], {
-      env: { ...process.env, CODEX_HOME: codexHome() },
+    const room = wrapInAgentRoom(resolveCodexBinary(), ['app-server'], {
+      ...process.env, CODEX_HOME: codexHome(),
+    }, 'codexmod');
+    const child = spawn(room.command, room.args, {
+      env: room.env,
       stdio: ['pipe', 'pipe', 'ignore'],
     });
     let buffer = '';

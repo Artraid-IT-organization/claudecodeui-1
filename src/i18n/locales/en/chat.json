@@ -308,6 +308,7 @@
     "nextTaskPrompt": "Start the next task"
   },
   "fileDownload": {
-    "tooltip": "Download file"
+    "tooltip": "Download file",
+    "failed": "— file not found"
   }
 }

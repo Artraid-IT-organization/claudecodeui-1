@@ -103,7 +103,15 @@ export function classifyDevinFailure(message: string): DevinFailureClass {
   // Хвост «(trace ID: …) — журнал CLI» отбрасываем: в нём случайный hex и тайминги
   // вида `time.busy=403µs`, которые читались как HTTP 403 — и лимит становился
   // вечным auth_failed (бывший local-patch 0010). Коды статусов — целым словом.
-  const text = message.toLowerCase().replace(/\(trace id:[\s\S]*$/, '');
+  // 09.11.26: тот же дефект через другой формат хвоста — «…timed out — <ISO>
+  // INFO …: close time.busy=401µs time.idle=1.26ms»; таймаут session/load у
+  // npotpz стал auth_failed из-за `401µs`. Чистим весь журнальный хвост за
+  // « — <ISO-дата>» и любые тайминги вида `key=<число><единица>` до проверки
+  // кодов — HTTP-статус в таком поле быть записан не может.
+  const text = message.toLowerCase()
+    .replace(/\(trace id:[\s\S]*$/, '')
+    .replace(/\s[-–—]+\s*\d{4}-\d{2}-\d{2}t[\s\S]*$/i, '')
+    .replace(/[\w.]+\s*=\s*\d[\d.]*\s*(?:ns|µs|us|ms|s|min)\b/g, '');
   // Живой текст 10.10.26: «Session 'x' is already open in another process (PID n)»,
   // errorKind session_locked. Проверка первой: в хвосте stderr бывают и «403».
   if (/already open in another process|session_locked/.test(message.toLowerCase())) {

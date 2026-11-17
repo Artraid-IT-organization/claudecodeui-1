@@ -223,14 +223,32 @@ export function AuthProvider({ children }: AuthProviderProps) {
     }
   }, [token, user]);
 
+  /**
+   * Автомат против цикла «истекло → перевход → снова истекло» (14.11.26).
+   * Отдельный запрос с устаревшим токеном (файл-загрузка шла в фоне) мог
+   * сносить уже восстановленную сессию раз за разом — экран мигал
+   * загрузка↔приложение несколько раз в секунду, а на каждый перезаход
+   * перемонтировалось приложение и переподключался чат-сокет. Если таких
+   * циклов больше трёх за минуту — очередной вход не запускаем здесь: экран
+   * остаётся на устойчивом «Проверяю вход», а пауза и повтор с нарастанием
+   * (statusCheckFailedAt → checkAuthStatus) поднимут сессию сами, когда
+   * ливень отказов стихнет.
+   */
+  const expireCycleTimesRef = useRef<number[]>([]);
+
   useEffect(() => {
     const handleTokenRefreshed = (event: Event) => {
       const nextToken = (event as CustomEvent<unknown>).detail;
       if (isValidRefreshedToken(nextToken)) {
-        setToken(nextToken);
+        setToken((current) => (current === nextToken ? current : nextToken));
       }
     };
     const handleSessionExpired = () => {
+      const now = Date.now();
+      expireCycleTimesRef.current = [
+        ...expireCycleTimesRef.current.filter((at) => now - at < 60_000),
+        now,
+      ];
       clearSession();
       // The session lasts a week; the login link does not expire at all. If
       // this browser came in through one, sign back in with it instead of
@@ -248,7 +266,10 @@ export function AuthProvider({ children }: AuthProviderProps) {
       // оба маркера — isLoading и statusCheckFailedAt — потому что
       // параллельный checkAuthStatus может снять isLoading раньше времени.
       setIsLoading(true);
-      setStatusCheckFailedAt(Date.now());
+      setStatusCheckFailedAt(now);
+      if (expireCycleTimesRef.current.length > 3) {
+        return;
+      }
       void enterWithLoginLinkToken(rememberedLoginToken).then((outcome) => {
         setIsLoading(false);
         if (outcome === 'ok') {
@@ -442,7 +463,15 @@ export function AuthProvider({ children }: AuthProviderProps) {
         return;
       }
 
-      setUser(userPayload.user);
+      // Объект пользователя пересоздаётся при каждой проверке — сохраняем
+      // старый, пока это тот же человек: эффект сокета ключуется на `user`,
+      // и каждая замена объекта обрывала живое соединение (14.11.26).
+      const confirmedUser = userPayload.user;
+      if (confirmedUser) {
+        setUser((current) =>
+          current && current.id === confirmedUser.id ? current : confirmedUser,
+        );
+      }
       await checkOnboardingStatus();
     } catch (caughtError) {
       console.error('[Auth] Auth status check failed:', caughtError);

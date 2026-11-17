@@ -169,6 +169,16 @@ test('classifyDevinFailure: hex trace ID with "403" inside is still a rate limit
   );
 });
 
+test('classifyDevinFailure: ACP log tail with time.busy=401µs is a timeout, not auth', () => {
+  // Живая запись 09.11.26 (канал npotpz): таймаут session/load с журнальным
+  // хвостом — `401µs` читался как HTTP 401 и канал уходил в вечный auth_failed.
+  const stored = 'Devin ACP "session/load" timed out — 2026-11-09T10:49:19.758442Z  INFO acp_startup{pre_init_ms=107}:load_session:session_db_call: chisel_agent::session_db: close time.busy=401µs time.idle=1.26ms';
+  assert.equal(classifyDevinFailure(stored), 'transient');
+  // Настоящий статус 401 в теле сообщения по-прежнему определяется как auth.
+  assert.equal(classifyDevinFailure('Request failed with status 401'), 'auth');
+  assert.equal(classifyDevinFailure('HTTP 401 Unauthorized'), 'auth');
+});
+
 test('recordOutcome: rate limit cools the subscription down until the reset time Devin names', async () => {
   await withIsolatedDatabase(() => {
     const conn = devinConnectionsDb.create({ name: 'limited', xdgDataHome: '/tmp/xdg-cool' });

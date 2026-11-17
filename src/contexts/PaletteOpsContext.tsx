@@ -7,8 +7,9 @@ export type PaletteOps = {
   // (used by in-chat file links so they behave like the inline edit view).
   openFileInEditor: (path: string) => void;
   // Saves a workspace file to the user's machine (agent-produced deliverables
-  // linked in chat — documents, archives, exports).
-  downloadFile: (path: string) => void;
+  // linked in chat — documents, archives, exports). Rejects when the file
+  // cannot be found/streamed so the chip can show a real failure state.
+  downloadFile: (path: string) => Promise<void> | void;
   openSettings: (tab?: string) => void;
   refreshProjects: () => Promise<void> | void;
 };

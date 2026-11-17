@@ -7,7 +7,7 @@ import { usePaletteOpsRegister } from '../../../contexts/PaletteOpsContext';
 import { useTasksSettings } from '../../../contexts/TasksSettingsContext';
 import { useUiPreferences } from '../../../hooks/useUiPreferences';
 import { useFileOpenResolver } from '../../../hooks/useFileOpenResolver';
-import { api } from '../../../utils/api';
+import { api, getStoredAuthToken } from '../../../utils/api';
 import { useEditorSidebar } from '../../code-editor/hooks/useEditorSidebar';
 import type { Project } from '../../../types/app';
 
@@ -115,34 +115,60 @@ function MainContent({
   // real project files before opening them in the in-app editor.
   const resolvedFileOpen = useFileOpenResolver(selectedProject, handleFileOpen);
 
-  // Deliverables linked in chat (.docx/.zip/…) save straight to the user's
-  // machine instead of opening the editor, which cannot display binary files.
+  // Deliverables linked in chat (.docx/.zip/…) download through the same
+  // upstream-proven path the file tree uses: authenticated fetch → blob →
+  // object URL → `a[download]` click. The browser registers it as a normal
+  // download with the correct file name; the editor never opens.
   const handleWorkspaceFileDownload = useCallback(
     async (filePath: string) => {
       if (!selectedProject) {
         return;
       }
       const fileName = filePath.split(/[\\/]/).pop() || 'download';
-      try {
-        const response = await api.readFileBlob(selectedProject.projectId, filePath);
-        if (!response.ok) {
-          throw new Error(`download failed: ${response.status}`);
-        }
-        const blobUrl = URL.createObjectURL(await response.blob());
-        const anchor = document.createElement('a');
-        anchor.href = blobUrl;
-        anchor.download = fileName;
-        document.body.appendChild(anchor);
-        anchor.click();
-        anchor.remove();
-        window.setTimeout(() => URL.revokeObjectURL(blobUrl), 0);
-      } catch {
-        // File missing or outside the project: fall back to the editor view,
-        // which shows its own error instead of failing silently.
-        handleFileOpen(filePath);
+      // iOS и standalone-PWA: blob-клик не имеет загрузок — WebView уходит на
+      // blob: и показывает белый экран. Там качаем настоящим URL: window.open
+      // открывает Safari-view, Content-Disposition отдаёт файл в «Файлы».
+      const isStandalone =
+        (navigator as Navigator & { standalone?: boolean }).standalone === true ||
+        window.matchMedia('(display-mode: standalone)').matches;
+      const isIOS =
+        /iP(hone|ad|od)/.test(navigator.userAgent) ||
+        (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+      if (isIOS || isStandalone) {
+        const params = new URLSearchParams({
+          path: filePath,
+          download: '1',
+          resolve: '1',
+          token: getStoredAuthToken() || '',
+        });
+        window.open(
+          `/api/file-tree/projects/${selectedProject.projectId}/files/content?${params}`,
+          '_blank',
+        );
+        return;
       }
+      // `resolve=1`: ссылку вида `~/…` или голое имя сервер сам раскрывает и
+      // ищет по имени — дерево домашнего проекта шире лимита (413) и
+      // клиентский резолвер тут бессилен. Ошибку НЕ глушим в редактор:
+      // «бинарный файл в редакторе» пользователь читал как «скачать нельзя» —
+      // отказ должен отразиться на чипе, поэтому бросаем наружу.
+      const response = await api.readFileBlob(selectedProject.projectId, filePath, {
+        resolveByName: true,
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to download file: HTTP ${response.status}`);
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = fileName;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      URL.revokeObjectURL(url);
     },
-    [selectedProject, handleFileOpen],
+    [selectedProject],
   );
   const resolvedFileDownload = useFileOpenResolver(selectedProject, handleWorkspaceFileDownload);
 

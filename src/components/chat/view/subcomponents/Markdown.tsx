@@ -102,7 +102,7 @@ const looksLikeFilePath = (value?: string): value is string => {
 // File types a person can only consume as a saved file (documents, archives,
 // exports). References to them render as a download chip instead of opening
 // the editor, which cannot display binary content anyway.
-const DOWNLOADABLE_FILE_PATTERN = /\.(docx?|xlsx?|xls|pptx?|ppt|csv|zip|rar|7z|tar|gz|tgz|bz2|xz)$/i;
+const DOWNLOADABLE_FILE_PATTERN = /\.(docx?|xlsx?|xls|pptx?|ppt|csv|pdf|zip|rar|7z|tar|gz|tgz|bz2|xz|png|jpe?g|gif|webp|bmp|ico|mp3|mp4|mov|wav)$/i;
 
 const isDownloadableRef = (value?: string): value is string => {
   if (!value) {
@@ -116,24 +116,35 @@ const isDownloadableRef = (value?: string): value is string => {
   return stem.length > 0 && DOWNLOADABLE_FILE_PATTERN.test(base);
 };
 
-// One-click download chip for agent-produced deliverables linked in a message.
+// One-click download link for agent-produced deliverables linked in a message.
+// Looks like a regular file link; the click downloads instead of opening the
+// editor, which cannot display binary content anyway.
 function FileDownloadChip({ fileRef, label }: { fileRef: string; label: React.ReactNode }) {
   const { t } = useTranslation('chat');
   const { downloadFile } = usePaletteOps();
+  const [failed, setFailed] = useState(false);
   return (
-    <button
-      type="button"
-      title={t('fileDownload.tooltip', { defaultValue: 'Скачать файл' })}
-      aria-label={t('fileDownload.tooltip', { defaultValue: 'Скачать файл' })}
+    <a
+      href={fileRef}
+      title={failed
+        ? t('fileDownload.failed', { defaultValue: 'Файл не найден' })
+        : t('fileDownload.tooltip', { defaultValue: 'Скачать файл' })}
+      aria-label={failed
+        ? t('fileDownload.failed', { defaultValue: 'Файл не найден' })
+        : t('fileDownload.tooltip', { defaultValue: 'Скачать файл' })}
       onClick={(event) => {
         event.preventDefault();
-        downloadFile(stripLineSuffix(fileRef));
+        setFailed(false);
+        // Отказ скачивания должен быть виден на самой ссылке: прежний откат в
+        // редактор показывал «бинарный файл» и читался как «скачать нельзя».
+        void Promise.resolve(downloadFile(stripLineSuffix(fileRef))).catch(() => setFailed(true));
       }}
-      className="mx-0.5 inline-flex max-w-full items-center gap-1.5 rounded-md border border-blue-300/70 bg-blue-50 px-1.5 py-0.5 align-baseline text-[0.875em] font-medium text-blue-700 transition-colors hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-300 dark:hover:bg-blue-900/50"
+      className={`cursor-pointer ${failed ? 'text-red-600 dark:text-red-400' : 'text-blue-600 hover:underline dark:text-blue-400'}`}
     >
-      <DownloadIcon className="h-3.5 w-3.5 shrink-0" aria-hidden />
-      <span className="truncate">{label}</span>
-    </button>
+      <DownloadIcon className="mr-0.5 inline-block h-3.5 w-3.5 align-[-0.125em]" aria-hidden />
+      {label}
+      {failed && <span className="ml-1 text-[0.85em]">{t('fileDownload.failed', { defaultValue: '— файл не найден' })}</span>}
+    </a>
   );
 }
 

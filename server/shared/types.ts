@@ -1132,7 +1132,11 @@ export type FileTreeServices = {
   }>;
   createWorkspaceFolder(folderPath: string): Promise<{ success: true; path: string }>;
   readTextFile(projectId: string, filePath: string): Promise<{ content: string; path: string }>;
-  openFile(projectId: string, filePath: string): Promise<{ contentType: string; stream: Readable }>;
+  openFile(
+    projectId: string,
+    filePath: string,
+    options?: { resolveByName?: boolean },
+  ): Promise<{ contentType: string; stream: Readable }>;
   saveTextFile(projectId: string, filePath: string, content: string): Promise<{
     success: true;
     path: string;

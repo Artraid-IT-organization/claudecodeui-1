@@ -392,3 +392,69 @@ test('listProjectFiles помнит, что папка не влезла в пр
   assert.equal(openedDirectories, openedAfterFirstCall, 'второй запрос не должен обходить папки');
 });
 
+
+test('openFile раскрывает ~/ как корень рабочего пространства', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  const targetPath = path.join(projectRoot, 'reports', 'archive.zip');
+  const fileSystem = createFakeFileSystem({
+    access: async (candidatePath) => {
+      assert.equal(candidatePath, targetPath, '«~/reports/…» обязан резолвиться в корень, а не в <project>/~');
+    },
+  });
+  const service = createFileTreeService(createDependencies(fileSystem, projectRoot));
+
+  const result = await service.openFile('project-1', '~/reports/archive.zip');
+
+  assert.equal(result.contentType, 'text/plain');
+});
+
+test('openFile с resolveByName находит файл по базовому имени при промахе пути', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  const reportsDir = path.join(projectRoot, 'reports');
+  const nestedDir = path.join(reportsDir, 'mops');
+  const targetPath = path.join(nestedDir, 'МОП-отчёты-связь.zip');
+  const fileSystem = createFakeFileSystem({
+    access: async (candidatePath) => {
+      if (candidatePath !== path.join(projectRoot, 'МОП-отчёты-связь.zip')) return;
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    },
+    openDirectory: createDirectoryReader((directoryPath) => {
+      if (directoryPath === projectRoot) {
+        return [
+          createDirectoryEntry('reports', true),
+          createDirectoryEntry('.hidden', true),
+          createDirectoryEntry('node_modules', true),
+        ];
+      }
+      if (directoryPath === reportsDir) return [createDirectoryEntry('mops', true)];
+      if (directoryPath === nestedDir) return [createDirectoryEntry('МОП-отчёты-связь.zip', false)];
+      return [];
+    }),
+  });
+  const service = createFileTreeService(createDependencies(fileSystem, projectRoot));
+
+  const result = await service.openFile('project-1', 'МОП-отчёты-связь.zip', { resolveByName: true });
+
+  assert.equal(result.contentType, 'text/plain');
+});
+
+test('openFile без resolveByName на промахе отвечает 404 без обхода дерева', async () => {
+  const projectRoot = path.resolve('file-tree-test-project');
+  let directoriesOpened = 0;
+  const fileSystem = createFakeFileSystem({
+    access: async () => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    },
+    openDirectory: createDirectoryReader(() => {
+      directoriesOpened += 1;
+      return [];
+    }),
+  });
+  const service = createFileTreeService(createDependencies(fileSystem, projectRoot));
+
+  await assert.rejects(
+    service.openFile('project-1', 'missing.zip'),
+    (error: unknown) => error instanceof AppError && error.statusCode === 404,
+  );
+  assert.equal(directoriesOpened, 0);
+});

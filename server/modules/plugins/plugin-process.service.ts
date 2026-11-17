@@ -4,6 +4,8 @@ import path from 'path';
 // cross-spawn: drop-in spawn with Windows .cmd/PATHEXT resolution.
 import spawn from 'cross-spawn';
 
+import { wrapInAgentRoom } from '@/shared/agent-rooms.js';
+
 import { scanPlugins, getPluginsConfig, getPluginDir } from './plugin-registry.service.js';
 
 // Map<pluginName, { process, port }>
@@ -65,9 +67,12 @@ export function startPluginServer(name, pluginDir, serverEntry) {
 
     const serverPath = path.join(pluginDir, serverEntry);
 
-    const pluginProcess = spawn('node', [serverPath], {
+    // Своя комната (agent-rooms): плагин-сервер живёт долго — без обёртки
+    // ел потолок группы сайта всё время жизни (15.11.26).
+    const room = wrapInAgentRoom('node', [serverPath], buildPluginEnv(name), `plg${name}`.replace(/[^A-Za-z0-9]/g, '').slice(0, 8));
+    const pluginProcess = spawn(room.command, room.args, {
       cwd: pluginDir,
-      env: buildPluginEnv(name),
+      env: room.env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 

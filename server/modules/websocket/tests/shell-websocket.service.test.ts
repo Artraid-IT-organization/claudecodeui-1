@@ -144,8 +144,17 @@ test('общая командная строка без команды запу�
   );
 
   assert.equal(spawns.length, 1);
+  // Без менеджера systemd запуск идёт через oomGuarded-обёртку
+  // `bash -c 'oom_score_adj; exec "$@"' agent-fallback <cmd> …` (agent-rooms.ts):
+  // внешний `-c` — это сторож памяти, а не «пустая оболочка» — после exec
+  // работает настоящий интерактив. Снимаем слой обёртки и проверяем саму команду.
+  const outerArgs = spawns[0].args;
+  const innerArgs =
+    spawns[0].file === 'bash' && outerArgs[0] === '-c' && outerArgs[2] === 'agent-fallback'
+      ? outerArgs.slice(3)
+      : outerArgs;
   assert.ok(
-    !spawns[0].args.includes('-c'),
+    !innerArgs.includes('-c'),
     'без команды оболочка не должна запускаться через -c: так она сразу выходит',
   );
 });

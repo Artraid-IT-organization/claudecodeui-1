@@ -746,6 +746,19 @@ export function useSessionStore() {
   }, []);
 
   /**
+   * Устаревший хвост И отсутствие работы с историей в очереди/полёте.
+   * Авто-рефреши (реконнект сокета, внешние upsert) зовут это вместо голого
+   * isStale: пока запрос летит (на Devin — до ~20 с), fetchedAt ещё старый,
+   * и без этой проверки каждый триггер ставил бы следующий запрос.
+   */
+  const needsLatestRefresh = useCallback((sessionId: string) => {
+    const slot = storeRef.current.get(sessionId);
+    if (!slot) return true;
+    if (slot.historyInFlight > 0) return false;
+    return Date.now() - slot.fetchedAt > STALE_THRESHOLD_MS;
+  }, []);
+
+  /**
    * Update or create a streaming message (accumulated text so far).
    * Uses a well-known ID so subsequent calls replace the same message.
    */
@@ -899,6 +912,7 @@ export function useSessionStore() {
     setStatus,
     setRunOutcome,
     isStale,
+    needsLatestRefresh,
     updateStreaming,
     finalizeStreaming,
     updateThinkingStreaming,
@@ -910,7 +924,7 @@ export function useSessionStore() {
   }), [
     getSlot, has, fetchFromServer, fetchMore,
     appendRealtime, appendRealtimeBatch, refreshLatestFromServer,
-    setActiveSession, setStatus, setRunOutcome, isStale, updateStreaming, finalizeStreaming,
+    setActiveSession, setStatus, setRunOutcome, isStale, needsLatestRefresh, updateStreaming, finalizeStreaming,
     updateThinkingStreaming, finalizeThinkingStreaming,
     clearRealtime, removeRealtimeWhere, getMessages, getSessionSlot,
   ]);

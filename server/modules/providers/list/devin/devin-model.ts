@@ -4,6 +4,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
+import { verifyAgentRoom, wrapInAgentRoom } from '@/shared/agent-rooms.js';
 import { buildDevinChildEnv, resolveDevinCliCommand } from '@/shared/utils.js';
 
 import { hideDevinSessionsInDirectory } from './devin-chain.js';
@@ -36,14 +37,20 @@ export async function askDevinOnce(prompt: string, timeoutMs = MODEL_TIMEOUT_MS)
   const promptFile = path.join(DEVIN_MODEL_CWD, `.prompt-${process.pid}-${randomUUID().slice(0, 8)}.txt`);
   await writeFile(promptFile, prompt, 'utf8');
   const result = await new Promise<{ text: string; error: string | null }>((resolve) => {
-    const child = spawn(resolveDevinCliCommand(), [
+    // Своя комната (agent-rooms): `devin -p` — полноценный ход на сотни МБ и
+    // минуты работы; без обёртки рождался в группе сайта и ел её потолок
+    // (стреи 14–15.11.26). `devin -p` внутри поднимает `devin acp` — внук
+    // наследует ту же комнату.
+    const room = wrapInAgentRoom(resolveDevinCliCommand(), [
       '--respect-workspace-trust', 'false',
       '-p', '--prompt-file', promptFile,
-    ], {
+    ], buildDevinChildEnv(), `digest${process.pid % 100000}`);
+    const child = spawn(room.command, room.args, {
       cwd: DEVIN_MODEL_CWD,
-      env: buildDevinChildEnv(),
+      env: room.env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    verifyAgentRoom(child.pid, room.room);
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => {

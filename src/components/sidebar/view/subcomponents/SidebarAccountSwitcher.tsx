@@ -15,7 +15,7 @@ import { reportProviderProbe } from '../../../../hooks/providerProbe';
 
 /** Короткая отметка канала Devin в меню: норма — «Devin», иначе — что мешает ходу. */
 function devinConnectionStatus(connection: DevinConnectionOption): string {
-  if (connection.health === 'auth_failed') return 'нужна креда';
+  if (connection.health === 'auth_failed') return 'нужна авторизация';
   const cooldownEnd = connection.cooldownUntil ? Date.parse(`${connection.cooldownUntil.replace(' ', 'T')}Z`) : NaN;
   if (cooldownEnd > Date.now()) {
     const time = new Date(cooldownEnd).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
@@ -73,6 +73,19 @@ export default function SidebarAccountSwitcher({
   const nonClaudeSelected = codexSelected || devinSelected;
   const selectedDevin = devinConnections.find((connection) => connection.id === selectedDevinId) ?? null;
   const canSwitch = available.length + (codexReady ? 1 : 0) + devinConnections.length > 1;
+  // Один и тот же ящик бывает у двух каналов (личный и серверный путь к одной
+  // подписке). Без пометки имени канала два одинаковых email выглядят дублем.
+  const duplicatedDevinEmails = new Set(
+    devinConnections
+      .map((connection) => connection.accountEmail)
+      .filter((email, index, all): email is string => Boolean(email) && all.indexOf(email) !== index),
+  );
+  const devinDisplayName = (connection: DevinConnectionOption): string => {
+    if (connection.accountEmail && duplicatedDevinEmails.has(connection.accountEmail)) {
+      return `${connection.accountEmail} · ${connection.name}`;
+    }
+    return connection.accountEmail ?? connection.name;
+  };
 
   useEffect(() => {
     if (!isOpen) return;
@@ -231,7 +244,7 @@ export default function SidebarAccountSwitcher({
                         {isActive && <Check className="h-4 w-4 text-green-600 dark:text-green-400" />}
                       </span>
                       <span className="min-w-0 flex-1 truncate" title={connection.description || undefined}>
-                        {connection.accountEmail ?? connection.name}
+                        {devinDisplayName(connection)}
                       </span>
                       <span className="flex-shrink-0 text-[10px] text-muted-foreground">{devinConnectionStatus(connection)}</span>
                     </button>

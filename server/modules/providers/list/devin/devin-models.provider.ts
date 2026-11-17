@@ -5,6 +5,7 @@ import path from 'node:path';
 import spawn from 'cross-spawn';
 
 import { devinConnectionsDb, sessionsDb } from '@/modules/database/index.js';
+import { wrapInAgentRoom } from '@/shared/agent-rooms.js';
 import type { IProviderModels } from '@/shared/interfaces.js';
 import type {
   AnyRecord,
@@ -86,30 +87,52 @@ function parseDevinModelsCatalog(raw: unknown): ProviderModelOption[] {
   return options;
 }
 
-function readDevinModelsFromCli(): ProviderModelOption[] {
+function readDevinModelsFromCli(): Promise<ProviderModelOption[]> {
   // Каталог моделей одинаков для всех каналов одной подписки — спрашиваем его
   // у первого годного (Connection Layer), legacy-дефолт — запасной ответ.
   const usable = devinConnectionsDb.list().find(
     (conn) => conn.enabled && conn.health_status !== 'auth_failed',
   );
-  const result = spawn.sync(resolveDevinCliCommand(), ['models', 'list', '--format', 'json'], {
-    encoding: 'utf8',
-    timeout: CATALOG_TIMEOUT_MS,
-    maxBuffer: 4 * 1024 * 1024,
-    env: {
+  // Async spawn в своей комнате: sync-вариант до 15 с морозил event loop
+  // сайта целиком, а незавёрнутый процесс ел потолок группы (15.11.26).
+  return new Promise((resolve) => {
+    const room = wrapInAgentRoom(resolveDevinCliCommand(), ['models', 'list', '--format', 'json'], {
       ...process.env,
       PATH: `${path.join(os.homedir(), '.local', 'bin')}:${process.env.PATH || ''}`,
       ...(usable ? { XDG_DATA_HOME: usable.xdg_data_home } : {}),
-    },
+    }, 'models');
+    const child = spawn(room.command, room.args, {
+      env: room.env,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    let stdout = '';
+    const timer = setTimeout(() => {
+      child.kill();
+    }, CATALOG_TIMEOUT_MS);
+    timer.unref?.();
+    child.stdout?.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString();
+      if (stdout.length > 4 * 1024 * 1024) {
+        child.kill();
+      }
+    });
+    child.once('error', () => {
+      clearTimeout(timer);
+      resolve([]);
+    });
+    child.once('exit', (code) => {
+      clearTimeout(timer);
+      if (code !== 0 || !stdout) {
+        resolve([]);
+        return;
+      }
+      try {
+        resolve(parseDevinModelsCatalog(JSON.parse(stdout)));
+      } catch {
+        resolve([]);
+      }
+    });
   });
-  if (result.error || result.status !== 0 || !result.stdout) {
-    return [];
-  }
-  try {
-    return parseDevinModelsCatalog(JSON.parse(result.stdout));
-  } catch {
-    return [];
-  }
 }
 
 /** Reads the model stored on a Devin session row (`sessions.model`) — из базы канала чата. */
@@ -158,7 +181,7 @@ export class DevinModelsProvider implements IProviderModels {
       : null;
 
     if (!models) {
-      models = readDevinModelsFromCli();
+      models = await readDevinModelsFromCli();
       if (models.length > 0) {
         cachedCatalog = { at: Date.now(), models };
       }
