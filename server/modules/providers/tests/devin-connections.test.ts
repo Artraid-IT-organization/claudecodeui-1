@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import Database from 'better-sqlite3';
+import { lstat, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -279,6 +280,74 @@ test('prepareTurnDataHome: shadow XDG mirrors the lane and carries the subscript
     });
   } finally {
     if (previousRoot === undefined) delete process.env.DEVIN_CONNECTIONS_ROOT; else process.env.DEVIN_CONNECTIONS_ROOT = previousRoot;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('prepareTurnDataHome: island in shadow merges back into the lane (18.11.26 regression)', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'devin-overlay-'));
+  const previousRoot = process.env.DEVIN_CONNECTIONS_ROOT;
+  process.env.DEVIN_CONNECTIONS_ROOT = path.join(root, 'connections');
+  try {
+    await withIsolatedDatabase(async () => {
+      // Инцидент 18.11.26: первый ход создал devin/cli прямо в тени раньше,
+      // чем линия обзавелась своим — тень стала «островом» со своим
+      // sessions.db, session/load честно отвечал session_not_found на
+      // беседу, живая в линии, и ход заводил фантомную session/new.
+      const laneXdg = path.join(root, 'lane');
+      const credXdg = path.join(root, 'cred');
+      await mkdir(path.join(credXdg, 'devin'), { recursive: true });
+      await writeFile(path.join(credXdg, 'devin', 'credentials.toml'), 'windsurf_api_key = "cred"\n');
+      const lane = devinConnectionsDb.create({ name: 'lane', xdgDataHome: laneXdg });
+      const credential = devinConnectionsDb.create({ name: 'cred', xdgDataHome: credXdg });
+
+      // Первый ход: у линии ещё нет devin/cli — зеркало пустое; процесс
+      // создаёт в тени настоящий каталог со своим стором.
+      const shadow = devinConnectionsService.prepareTurnDataHome(lane, credential);
+      await mkdir(path.join(shadow, 'devin', 'cli'), { recursive: true });
+      await writeFile(path.join(shadow, 'devin', 'cli', 'sessions.db'), 'ISLAND-DB');
+      // ...линия тем временем обзавелась своим cli со своим стором.
+      await mkdir(path.join(laneXdg, 'devin', 'cli'), { recursive: true });
+      await writeFile(path.join(laneXdg, 'devin', 'cli', 'sessions.db'), 'LANE-DB');
+
+      // Следующий ход сливает остров обратно: стор тени не затирает стор
+      // линии, а сохраняется рядом суффиксом .detached-.
+      devinConnectionsService.prepareTurnDataHome(lane, credential);
+      assert.equal(await readFile(path.join(laneXdg, 'devin', 'cli', 'sessions.db'), 'utf8'), 'LANE-DB', 'lane store untouched');
+      const detached = (await readdir(path.join(laneXdg, 'devin', 'cli'))).filter((e) => e.startsWith('sessions.db.detached-'));
+      assert.equal(detached.length, 1, 'island store preserved as detached copy');
+      assert.equal(await readFile(path.join(laneXdg, 'devin', 'cli', detached[0]), 'utf8'), 'ISLAND-DB');
+      assert.ok((await lstat(path.join(shadow, 'devin', 'cli'))).isSymbolicLink(), 'cli relinked to lane');
+      assert.equal(await readFile(path.join(shadow, 'devin', 'cli', 'sessions.db'), 'utf8'), 'LANE-DB', 'shadow sees lane store');
+    });
+  } finally {
+    if (previousRoot === undefined) delete process.env.DEVIN_CONNECTIONS_ROOT; else process.env.DEVIN_CONNECTIONS_ROOT = previousRoot;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('sessionExistsInDataHome: store check distinguishes lane from empty shadow', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'devin-overlay-'));
+  try {
+    const laneXdg = path.join(root, 'lane');
+    const emptyXdg = path.join(root, 'empty');
+    await mkdir(path.join(laneXdg, 'devin', 'cli'), { recursive: true });
+    await mkdir(path.join(emptyXdg, 'devin', 'cli'), { recursive: true });
+    const db = new Database(path.join(laneXdg, 'devin', 'cli', 'sessions.db'));
+    db.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY)');
+    db.prepare('INSERT INTO sessions (id) VALUES (?)').run('sess-live');
+    db.close();
+    // Битый файл тоже не должен считаться «беседы нет»-пустотой без проверки —
+    // но и не валить ход: false без исключения.
+    await writeFile(path.join(emptyXdg, 'devin', 'cli', 'sessions.db'), 'NOT-A-DB');
+
+    assert.equal(devinConnectionsService.sessionExistsInDataHome(laneXdg, 'sess-live'), true);
+    assert.equal(devinConnectionsService.sessionExistsInDataHome(laneXdg, 'sess-other'), false);
+    assert.equal(devinConnectionsService.sessionExistsInDataHome(emptyXdg, 'sess-live'), false, 'garbage store → false, no throw');
+    assert.equal(devinConnectionsService.sessionExistsInDataHome(path.join(root, 'missing'), 'sess-live'), false, 'no store → false');
+    assert.equal(devinConnectionsService.sessionExistsInDataHome(null, 'sess-live'), false);
+    assert.equal(devinConnectionsService.sessionExistsInDataHome(laneXdg, null), false);
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });

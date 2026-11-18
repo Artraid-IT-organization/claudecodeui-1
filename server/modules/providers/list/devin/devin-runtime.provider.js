@@ -630,6 +630,21 @@ async function queryDevin(command, options = {}, ws, context) {
         ? devinConnectionsService.pickCredentialForLane(lane, attempted, preferredConnectionId)
         : devinConnectionsService.pickConnection(attempted, preferredConnectionId);
       dataHome = devinConnectionsService.prepareTurnDataHome(lane ?? connection, connection);
+      // Сторож от «острова» (инцидент 18.11.26): отклеенная тень честно
+      // отвечает session_not_found на беседу, живая в линии, и ход молча
+      // заводил фантомную session/new без истории. Прежде чем процесс
+      // увидит пустой стор — проверяем его сами: тень не видит беседу,
+      // а линия видит → пересобираем тень (зеркало сливает острова) и
+      // проверяем снова; не помогло — стоп, фантома не будет.
+      if (providerSessionId && lane != null && dataHome !== lane.xdg_data_home
+          && !devinConnectionsService.sessionExistsInDataHome(dataHome, providerSessionId)
+          && devinConnectionsService.sessionExistsInDataHome(lane.xdg_data_home, providerSessionId)) {
+        console.warn(`[Devin] тень lane-${lane.id}-cred-${connection.id} не видит беседу ${providerSessionId} — пересобираю`);
+        dataHome = devinConnectionsService.prepareTurnDataHome(lane, connection);
+        if (!devinConnectionsService.sessionExistsInDataHome(dataHome, providerSessionId)) {
+          throw new Error(`тень не видит беседу ${providerSessionId} и после пересборки — ход остановлен, фантомная сессия не создаётся`);
+        }
+      }
     } catch (error) {
       // Каналов нет вовсе или все перепробованы — причину показываем, а не
       // молча заканчиваем ход.

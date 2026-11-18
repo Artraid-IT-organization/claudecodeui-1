@@ -191,11 +191,60 @@ function getCredentialOverlaysRoot(): string {
 }
 
 /**
+ * «Остров» в тени: реальная запись, у которой в линии уже есть одноимённая
+ * (процесс создал её напрямую раньше, чем линия обзавелась своей — гонка
+ * первого прогона). Содержимое возвращается в линию: отсутствующие там
+ * записи переезжают целиком, конфликтующие файлы сохраняются суффиксом
+ * `.detached-<ts>` рядом с оригиналом линии — данные тени не теряются,
+ * а освободившееся место занимает симлинк.
+ */
+function mergeShadowEntryIntoSource(overlayEntry: string, sourceEntry: string): void {
+  const stat = fsSync.lstatSync(overlayEntry);
+  if (stat.isDirectory()) {
+    for (const child of fsSync.readdirSync(overlayEntry)) {
+      mergeShadowChild(path.join(overlayEntry, child), path.join(sourceEntry, child));
+    }
+    fsSync.rmdirSync(overlayEntry);
+    return;
+  }
+  preserveDetachedShadowEntry(overlayEntry, sourceEntry);
+}
+
+function mergeShadowChild(overlayEntry: string, sourceEntry: string): void {
+  const stat = fsSync.lstatSync(overlayEntry);
+  if (!fsSync.existsSync(sourceEntry)) {
+    // В линии такой записи нет — возвращаем как есть (симлинк переезжает
+    // симлинком: его цель уже указывает внутрь линии).
+    fsSync.renameSync(overlayEntry, sourceEntry);
+    return;
+  }
+  if (stat.isDirectory()) {
+    mergeShadowEntryIntoSource(overlayEntry, sourceEntry);
+    return;
+  }
+  if (stat.isSymbolicLink()) {
+    // Ссылка острова на уже существующую запись линии лишняя — цель в линии.
+    fsSync.unlinkSync(overlayEntry);
+    return;
+  }
+  preserveDetachedShadowEntry(overlayEntry, sourceEntry);
+}
+
+function preserveDetachedShadowEntry(overlayEntry: string, sourceEntry: string): void {
+  const detached = `${sourceEntry}.detached-${Date.now()}`;
+  fsSync.renameSync(overlayEntry, detached);
+  console.warn(`[Devin] overlay: запись тени сохранена в линии как ${path.basename(detached)}`);
+}
+
+/**
  * Зеркалит каталог `sourceDir` в `overlayDir` симлинками (кроме `skip`).
  * Сначала возвращает в источник то, что процесс создал прямо в тени
  * (новые каталоги MCP-серверов, файлы CLI) — иначе эти данные жили бы
  * только в тени конкретной пары «линия + подписка». Висячие ссылки убираются,
  * иначе открытие с O_CREAT создало бы файл по старому адресу.
+ * Реальная запись при живой одноимённой в источнике — «остров»: её
+ * содержимое сливается обратно в источник, иначе тень навсегда хранит
+ * свой невидимый линии стор (инцидент 18.11.26).
  */
 function mirrorDirectoryWithSymlinks(sourceDir: string, overlayDir: string, skip: Set<string>): void {
   fsSync.mkdirSync(overlayDir, { recursive: true, mode: 0o700 });
@@ -219,6 +268,13 @@ function mirrorDirectoryWithSymlinks(sourceDir: string, overlayDir: string, skip
         // Другая ФС или гонка с соседним ходом — запись остаётся в тени, ход не ломаем.
         console.warn(`[Devin] overlay: не вернул ${overlayEntry} в линию:`, (error as Error).message);
       }
+      continue;
+    }
+    try {
+      mergeShadowEntryIntoSource(overlayEntry, sourceEntry);
+      console.warn(`[Devin] overlay: остров ${overlayEntry} слит обратно в линию`);
+    } catch (error) {
+      console.warn(`[Devin] overlay: остров ${overlayEntry} не слит в линию:`, (error as Error).message);
     }
   }
   for (const entry of fsSync.readdirSync(sourceDir)) {
@@ -430,6 +486,33 @@ export const devinConnectionsService = {
       }
     }
     return null;
+  },
+
+  /**
+   * Есть ли сессия в sessions.db данного XDG-каталога — линии или её тени.
+   * Сторож против «острова»: тень с отклеенным стором честно отвечает
+   * session_not_found на беседу, которая жива в линии. Рантайм перед ходом
+   * сверяет оба стора и пересобирает тень, вместо того чтобы заводить
+   * фантомную session/new без истории (инцидент 18.11.26).
+   */
+  sessionExistsInDataHome(xdgDataHome: string | null | undefined, providerSessionId: string | null | undefined): boolean {
+    if (!xdgDataHome || !providerSessionId) {
+      return false;
+    }
+    const dbPath = path.join(xdgDataHome, 'devin', 'cli', 'sessions.db');
+    try {
+      if (!fsSync.existsSync(dbPath)) {
+        return false;
+      }
+      const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+      try {
+        return Boolean(db.prepare('SELECT 1 FROM sessions WHERE id = ?').get(providerSessionId));
+      } finally {
+        db.close();
+      }
+    } catch {
+      return false;
+    }
   },
 
   createConnection(input: { name: string; description?: string; priority?: number }): DevinConnectionView {
