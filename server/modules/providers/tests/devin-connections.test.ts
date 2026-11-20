@@ -180,6 +180,14 @@ test('classifyDevinFailure: ACP log tail with time.busy=401µs is a timeout, not
   assert.equal(classifyDevinFailure('HTTP 401 Unauthorized'), 'auth');
 });
 
+test('classifyDevinFailure: model-unavailable refusal is model class, channel not penalized', () => {
+  // Отказ рантайма 20.11.26: модели нет в списке канала — подписка здорова,
+  // виновата не она. Текст нашего отказа обязан оставаться классом model,
+  // иначе recordOutcome пометит живой канал 'error'.
+  const refusal = 'Модель «swe-2-high» недоступна на активном канале Devin — в сессии сейчас swe-2-flash-medium. Её нет в списке моделей канала.';
+  assert.equal(classifyDevinFailure(refusal), 'model');
+});
+
 test('recordOutcome: rate limit cools the subscription down until the reset time Devin names', async () => {
   await withIsolatedDatabase(() => {
     const conn = devinConnectionsDb.create({ name: 'limited', xdgDataHome: '/tmp/xdg-cool' });

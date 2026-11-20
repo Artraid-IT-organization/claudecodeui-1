@@ -585,6 +585,19 @@ const MODEL_FALLBACK_TAG = '__devinModelFallback';
 const MAX_TURN_ATTEMPTS = 4;
 
 /**
+ * Итоговый текст хода, когда подписки кончились. Сбой модели — уже готовая
+ * фраза человеку («Модель «X» недоступна…»), оборачивать её в «Devin
+ * недоступен» вводило бы в заблуждение: живой Devin есть, нет модели.
+ */
+function finalTurnFailureText(error) {
+  if (error && classifyDevinFailure(error.message || '') === 'model') {
+    const model = error.requestedModel ? `«${error.requestedModel}» ` : '';
+    return `Модель ${model}сейчас недоступна на подписках Devin. Повторите сообщение позже или выберите другую модель в списке чата.`;
+  }
+  return `Devin недоступен: ${error?.message || 'no usable connection'}`;
+}
+
+/**
  * Runs one Devin turn over ACP — обёртка выбора линии и подписки.
  *
  * ЛИНИЯ (`sessions.devin_connection_id`) — каталог с sessions.db чата, она
@@ -653,7 +666,7 @@ async function queryDevin(command, options = {}, ws, context) {
         provider: 'devin',
         sessionId: sessionId || providerSessionId || null,
         kind: 'error',
-        content: `Devin недоступен: ${failure.message}`,
+        content: finalTurnFailureText(failure),
       }));
       throw failure;
     }
@@ -692,9 +705,12 @@ async function queryDevin(command, options = {}, ws, context) {
         continue;
       }
       // Без имени подписки: строку видит и гость, а реестр подписок — только владелец.
-      const reason = classifyDevinFailure(lastError.message) === 'rate_limit'
+      const failureCls = classifyDevinFailure(lastError.message);
+      const reason = failureCls === 'rate_limit'
         ? 'У текущей подписки Devin исчерпан лимит'
-        : 'Текущая подписка Devin не отвечает';
+        : failureCls === 'model'
+          ? `На этой подписке нет модели «${lastError.requestedModel || '?'}»`
+          : 'Текущая подписка Devin не отвечает';
       console.log(`[Devin] ход чата ${sessionId || '-'}: подписка #${connection.id} (${connection.name}) — ${reason}, переход на другую (попытка заняла ${lastError.attemptMs ?? '?'}мс)`);
       sendMessage(ws, createNormalizedMessage({
         provider: 'devin',
@@ -708,7 +724,7 @@ async function queryDevin(command, options = {}, ws, context) {
     provider: 'devin',
     sessionId: sessionId || providerSessionId || null,
     kind: 'error',
-    content: `Devin недоступен: ${lastError?.message || 'no usable connection'}`,
+    content: finalTurnFailureText(lastError),
   }));
   throw lastError ?? new Error('Devin run failed: no usable connection');
 }
@@ -770,7 +786,6 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
     modelOptions: null,
     modelCurrent: null,
     modelSetFailed: new Set(),
-    modelDowngradeNotified: false,
     // Первый живой вывод хода (дельта, мысль, запрос разрешения) ушёл в UI.
     liveOutputSent: false,
   };
@@ -1255,24 +1270,31 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
         // stored model unless we set the config option explicitly.
         // The option list is the channel's truth: a model the picker offered
         // but the channel doesn't have would fail with Invalid params on
-        // every turn and silently run the old model — so it's skipped and
-        // named honestly, once per run.
+        // every turn and silently run the old model.
+        //
+        // 20.11.26 (инцидент: SWE-2 High пропала из списка ACP у Devin на
+        // утро): модель, которую канал не может выполнить, НЕ подменяем
+        // текущей моделью сессии — молчаливый ход на Flash это скрытый
+        // даунгрейд платной подписки. Честный отказ: ход повторяется на
+        // другой подписке (у неё свой каталог моделей), а если модель не
+        // приняла ни одна — человеку ошибка, а не тихий Flash.
         const knownUnavailable = run.modelOptions instanceof Set && !run.modelOptions.has(resolvedModel);
-        const notifyDowngrade = () => {
-          if (run.modelDowngradeNotified) return;
-          run.modelDowngradeNotified = true;
-          const effective = run.modelCurrent || DEVIN_DEFAULT_MODEL;
-          console.warn(`[Devin] model "${resolvedModel}" is not in this channel's options — running ${effective}`);
-          sendMessage(ws, createNormalizedMessage({
-            provider: 'devin',
-            sessionId: sessionId || run.devinSessionId || null,
-            kind: 'error',
-            content: `Модель «${resolvedModel}» недоступна на активном канале Devin — ход идёт на ${effective}.`,
-          }));
+        const refuseUnavailable = (why) => {
+          const detail = `Модель «${resolvedModel}» недоступна на активном канале Devin` +
+            (run.modelCurrent && run.modelCurrent !== resolvedModel ? ` — в сессии сейчас ${run.modelCurrent}` : '') +
+            `. ${why}`;
+          if (canFailoverNow()) {
+            console.warn(`[Devin] ${detail} — пробую другую подписку`);
+            requestFailover(detail);
+            return;
+          }
+          hardFail(`${detail} Повторите позже или выберите другую модель в списке чата.`);
         };
         if (knownUnavailable || run.modelSetFailed.has(resolvedModel)) {
-          notifyDowngrade();
-        } else {
+          refuseUnavailable(knownUnavailable ? 'Её нет в списке моделей канала.' : 'Канал отказал в переключении на неё.');
+          return;
+        }
+        if (run.modelCurrent !== resolvedModel) {
           try {
             await connection.call('session/set_config_option', {
               sessionId: run.devinSessionId,
@@ -1284,7 +1306,8 @@ async function attemptDevinTurn(command, options = {}, ws, context, route, provi
             // подмена; говорим честно один раз.
             run.modelSetFailed.add(resolvedModel);
             console.warn('[Devin] session/set_config_option model failed:', error.message);
-            notifyDowngrade();
+            refuseUnavailable('Канал отказал в переключении на неё.');
+            return;
           }
         }
       }

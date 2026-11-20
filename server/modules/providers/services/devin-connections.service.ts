@@ -120,7 +120,7 @@ export function classifyDevinFailure(message: string): DevinFailureClass {
   // Живой текст 13.10.26 (adaptive в чате с историей SWE-2): «Protocol error (invalid_argument):
   // There is an issue with this request, please try a different model». Подписка здорова —
   // не принимает запрос сама модель; лечится повтором на другой модели, не сменой аккаунта.
-  if (/invalid_argument|please try a different model/.test(text)) {
+  if (/invalid_argument|please try a different model|модел[ьи][^.\n]{0,80}недоступн/.test(text)) {
     return 'model';
   }
   if (
