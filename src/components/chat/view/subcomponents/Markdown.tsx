@@ -102,7 +102,12 @@ const looksLikeFilePath = (value?: string): value is string => {
 // File types a person can only consume as a saved file (documents, archives,
 // exports). References to them render as a download chip instead of opening
 // the editor, which cannot display binary content anyway.
-const DOWNLOADABLE_FILE_PATTERN = /\.(docx?|xlsx?|xls|pptx?|ppt|csv|pdf|zip|rar|7z|tar|gz|tgz|bz2|xz|png|jpe?g|gif|webp|bmp|ico|mp3|mp4|mov|wav)$/i;
+const DOWNLOADABLE_EXTENSIONS = 'docx?|xlsx?|xls|pptx?|ppt|csv|pdf|zip|rar|7z|tar|gz|tgz|bz2|xz|png|jpe?g|gif|webp|bmp|ico|mp3|mp4|mov|wav';
+const DOWNLOADABLE_FILE_PATTERN = new RegExp(`\\.(${DOWNLOADABLE_EXTENSIONS})$`, 'i');
+const DOWNLOADABLE_LINK_PATTERN = new RegExp(
+  `(\\[[^\\]\\n]+\\]\\()([^()\\n]+?\\.(?:${DOWNLOADABLE_EXTENSIONS}))(\\))`,
+  'gi',
+);
 
 const isDownloadableRef = (value?: string): value is string => {
   if (!value) {
@@ -114,6 +119,36 @@ const isDownloadableRef = (value?: string): value is string => {
   // file name has a non-empty stem before the last dot.
   const stem = base.replace(/\.[^.]+$/, '');
   return stem.length > 0 && DOWNLOADABLE_FILE_PATTERN.test(base);
+};
+
+const decodeFileReference = (value: string): string => {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+};
+
+const normalizeDownloadableLinkDestinations = (value: string): string => {
+  let fence: string | null = null;
+  return value.split('\n').map((line) => {
+    const marker = /^\s*(`{3,}|~{3,})/.exec(line);
+    if (marker) {
+      const token = marker[1][0];
+      if (!fence) fence = token;
+      else if (fence === token) fence = null;
+      return line;
+    }
+    if (fence || line.includes('`')) return line;
+    return line.replace(
+      DOWNLOADABLE_LINK_PATTERN,
+      (match: string, prefix: string, destination: string, suffix: string) => {
+        const cleaned = destination.trim();
+        if (isExternalHref(cleaned) || !/\s/.test(cleaned) || cleaned.startsWith('<')) return match;
+        return `${prefix}<${cleaned}>${suffix}`;
+      },
+    );
+  }).join('\n');
 };
 
 // One-click download link for agent-produced deliverables linked in a message.
@@ -137,7 +172,7 @@ function FileDownloadChip({ fileRef, label }: { fileRef: string; label: React.Re
         setFailed(false);
         // Отказ скачивания должен быть виден на самой ссылке: прежний откат в
         // редактор показывал «бинарный файл» и читался как «скачать нельзя».
-        void Promise.resolve(downloadFile(stripLineSuffix(fileRef))).catch(() => setFailed(true));
+        void Promise.resolve(downloadFile(decodeFileReference(stripLineSuffix(fileRef)))).catch(() => setFailed(true));
       }}
       className={`cursor-pointer ${failed ? 'text-red-600 dark:text-red-400' : 'text-blue-600 hover:underline dark:text-blue-400'}`}
     >
@@ -475,7 +510,9 @@ const markdownComponents = {
 installCopyParagraphBreaks();
 
 export function Markdown({ children, className }: MarkdownProps) {
-  const content = separateMarkdownBlocks(normalizeInlineCodeFences(String(children ?? '')));
+  const content = separateMarkdownBlocks(normalizeInlineCodeFences(
+    normalizeDownloadableLinkDestinations(String(children ?? '')),
+  ));
   // Перенос строки теперь значим везде, а не только в репликах человека.
   // Модель разбивает мысль на строки осмысленно; склеивать их обратно в
   // сплошной абзац — ровно то, на что было больно смотреть.
