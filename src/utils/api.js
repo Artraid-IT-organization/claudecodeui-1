@@ -62,19 +62,67 @@ export const getAuthTokenRefreshDelay = (token) => {
   }
 
   const refreshAt = claims.issuedAt + ((claims.expiresAt - claims.issuedAt) / 2);
-  return Math.max(0, refreshAt - Date.now());
+  // Пол не меньше минуты: на часах, убежавших вперёд, «0» превращал
+  // планировщик refresh в цикл «запрос → ответ → снова 0».
+  return Math.max(60_000, refreshAt - Date.now());
+};
+
+// Браузер может не дать хранилище (отключены данные сайта, приватный webview,
+// переполнение): localStorage бросает, а не молчит. Тогда в localStorage
+// остаётся старый протухший токен, каждое чтение сносило свежий вход — петля
+// «вход → сброс» без единой ошибки на экране (06.12.26). Живой токен
+// дополнительно держим в памяти страницы: до перезагрузки сессия работает,
+// после — честный экран входа, а не цикл.
+let memoryAuthToken = null;
+// Токен, который сервер выдал в этой загрузке страницы (enter/login/refresh),
+// локальной проверкой срока не сносится: сервер — источник истины. Часы
+// устройства, убежавшие вперёд, иначе превращали каждый свежий вход в петлю
+// «выдали токен → клиент прочитал его протухшим → сброс → повторный вход».
+let serverIssuedToken = null;
+
+const storageGet = (key) => {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+};
+
+const storageSet = (key, value) => {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // записать некуда — токен держится в памяти до перезагрузки
+  }
+};
+
+const storageRemove = (key) => {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // хранилище недоступно — и не требуется
+  }
+};
+
+// Тихая очистка токена (logout, отказ сервера) — БЕЗ события «сессия истекла»:
+// событие запускает автоматический повторный вход по запомненной ссылке, и
+// штатный выход превратился бы в мгновенный повторный вход.
+export const clearAuthToken = () => {
+  memoryAuthToken = null;
+  serverIssuedToken = null;
+  storageRemove('auth-token');
 };
 
 export const expireAuthSession = () => {
-  localStorage.removeItem('auth-token');
+  clearAuthToken();
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new Event(AUTH_SESSION_EXPIRED_EVENT));
   }
 };
 
 export const getStoredAuthToken = () => {
-  const token = localStorage.getItem('auth-token');
-  if (token && isAuthTokenExpired(token)) {
+  const token = memoryAuthToken || storageGet('auth-token');
+  if (token && token !== serverIssuedToken && isAuthTokenExpired(token)) {
     expireAuthSession();
     return null;
   }
@@ -86,7 +134,9 @@ export const storeAuthToken = (token) => {
     return false;
   }
 
-  localStorage.setItem('auth-token', token);
+  memoryAuthToken = token;
+  serverIssuedToken = token;
+  storageSet('auth-token', token);
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent(AUTH_TOKEN_REFRESHED_EVENT, { detail: token }));
   }
@@ -182,11 +232,13 @@ export const api = {
   // Auth endpoints (no token required)
   auth: {
     status: () => doorFetch('/api/auth/status', {}, { gate: true }),
+    // gate+retryable: вход идемпотентен (сервер лишь проверяет пару и выдаёт
+    // токен), а замёрзший ответ без повтора оставлял человека на экране входа.
     login: (username, password) => doorFetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password }),
-    }),
+    }, { gate: true, retryable: true }),
     register: (username, password) => doorFetch('/api/auth/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -204,6 +256,10 @@ export const api = {
     // Timeout: the request used to hang without limit, and on the owner's
     // freezing home route a silent re-login could sit on the login screen
     // for minutes. A timed-out enter is retried by the auth state machine.
+    // gate+retryable: enter на сервере — lookup + выдача токена, повтор
+    // безопасен; без этого замёрзший POST шёл без ретрая по одному мёртвому
+    // адресу и никакая ссылка человека не спасала (05.12.26, заморозка на
+    // ноге устройство↔московский релей).
     enter: (token) => doorFetch('/api/auth/enter', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -211,7 +267,7 @@ export const api = {
       ...(typeof AbortSignal !== 'undefined' && AbortSignal.timeout
         ? { signal: AbortSignal.timeout(15000) }
         : {}),
-    }),
+    }, { gate: true, retryable: true }),
     // Public: checks whether an invite token (the `/invite/<token>` URL) is
     // still valid before showing the registration form.
     inviteStatus: (token) => doorFetch(`/api/auth/invite-status/${encodeURIComponent(token)}`),
@@ -223,7 +279,9 @@ export const api = {
     listInvites: () => authenticatedFetch('/api/auth/invites'),
     getLoginLink: () => authenticatedFetch('/api/auth/login-link'),
     regenerateLoginLink: () => authenticatedFetch('/api/auth/regenerate-login-link', { method: 'POST' }),
-    refresh: () => authenticatedFetch('/api/auth/refresh', { method: 'POST' }),
+    // gate+retryable: обмен токена идемпотентен, а молчание refresh-цикла —
+    // та же заморозка провайдера, что и у входа.
+    refresh: () => authenticatedFetch('/api/auth/refresh', { method: 'POST' }, { gate: true, retryable: true }),
     user: () => authenticatedFetch('/api/auth/user', {}, { gate: true }),
     logout: () => authenticatedFetch('/api/auth/logout', { method: 'POST' }),
   },

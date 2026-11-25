@@ -18,12 +18,26 @@
 // запомненному адресу: резать их по времени нельзя — тяжёлый запрос законно
 // отвечает долго, а повтор удвоил бы работу сервера.
 //
-// Работает только на двух известных адресах; на любом другом (разработка,
-// чужой стенд) всё как раньше.
+// Исключение из «мутирующие не повторяем» — `retryable: true`: входы
+// (/api/auth/enter, /login, /refresh) идемпотентны на сервере, а именно они
+// страдали больше всего — замёрзший enter не выживал никогда, сколько бы
+// раз человек ни вставлял ссылку. Теперь они проходят тот же gate-контур
+// с переключением адресов.
+//
+// На адресах этого инстанса запасной есть всегда; на любом другом
+// (разработка, чужой стенд) всё как раньше.
 
+// Пары «первый ↔ второй» для доменов с двумя физическими путями:
+// cc2.infozdorovcom.ru — московский релей 5.129.198.44,
+// egor.infozdorovcom.ru — прямой путь до того же сервера в США. У разных
+// провайдеров замерзает своя нога: одному молчит прямой адрес (провайдер
+// рубит до зарубежного IP), другому — релейная (ответы до устройства не
+// доходят). Запасной есть всегда — вопрос только, куда уходить.
 const RESERVE_BY_HOST = {
   'cc.sobsila.ru': 'https://sobsila.ru:8444',
   'sobsila.ru:8444': 'https://cc.sobsila.ru',
+  'cc2.infozdorovcom.ru': 'https://egor.infozdorovcom.ru',
+  'egor.infozdorovcom.ru': 'https://cc2.infozdorovcom.ru',
 };
 
 const STORAGE_KEY = 'ccui-door';
@@ -32,7 +46,18 @@ export const GATE_ATTEMPT_TIMEOUT_MS = 7000;
 export const GATE_MAX_ATTEMPTS = 4;
 export const GATE_RETRY_PAUSE_MS = 500;
 
-const reserveOrigin = () => RESERVE_BY_HOST[window.location.host] || null;
+const reserveOrigin = () => {
+  const direct = RESERVE_BY_HOST[window.location.host];
+  if (direct) return direct;
+  // Любой комнатный домен этого инстанса (*.infozdorovcom.ru) обслуживается
+  // тем же бэкендом, и прямой зарубежный путь у такого домена обычно и есть
+  // основной. Вторая дорога — московский релей: именно она спасает, когда
+  // провайдер режет исходящий зарубежный трафик целиком.
+  if (window.location.host.endsWith('.infozdorovcom.ru')) {
+    return 'https://cc2.infozdorovcom.ru';
+  }
+  return null;
+};
 
 let useReserve = false;
 let flips = 0;
@@ -97,9 +122,11 @@ const isReadOnly = (options) => {
 /**
  * Запрос к серверу через текущий вход. `gate: true` — запрос проверки входа:
  * ждём ответ не дольше GATE_ATTEMPT_TIMEOUT_MS и пробуем другой адрес.
+ * `retryable: true` — то же для безопасных к повтору POST (enter/login/
+ * refresh): сервер либо отработал один раз, либо не получил запрос вовсе.
  */
-export const doorFetch = async (path, options = {}, { gate = false } = {}) => {
-  if (!gate || !reserveOrigin() || !isReadOnly(options)) {
+export const doorFetch = async (path, options = {}, { gate = false, retryable = false } = {}) => {
+  if (!gate || !reserveOrigin() || !(isReadOnly(options) || retryable)) {
     // Обычный запрос на чтение без сигнала отмены: если путь до текущего входа
     // замёрз (провайдер рвёт соединение посередине), один раз перепробуем
     // через другой вход. Мутирующие запросы не повторяем — повтор мог бы

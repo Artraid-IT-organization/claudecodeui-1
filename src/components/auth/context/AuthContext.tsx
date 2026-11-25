@@ -5,6 +5,7 @@ import {
   api,
   AUTH_SESSION_EXPIRED_EVENT,
   AUTH_TOKEN_REFRESHED_EVENT,
+  clearAuthToken,
   getAuthTokenRefreshDelay,
   isValidRefreshedToken,
   storeAuthToken,
@@ -38,17 +39,43 @@ const LOGIN_LINK_PATH_PATTERN = /\/enter\/([^/]+)\/?$/;
 // the token is consumed by registerOpen() on submit, not by visiting the URL.
 const INVITE_LINK_PATH_PATTERN = /\/invite\/([^/]+)\/?$/;
 
-const readStoredToken = (): string | null => localStorage.getItem(AUTH_TOKEN_STORAGE_KEY);
+// localStorage может быть недоступен (отключены данные сайта, приватный
+// webview) — обращения страхуем, иначе модуль падает при загрузке страницы.
+const safeStorage = {
+  get(key: string): string | null {
+    try {
+      return localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  },
+  set(key: string, value: string) {
+    try {
+      localStorage.setItem(key, value);
+    } catch {
+      // не пишется — сессия живёт на токене в памяти (см. utils/api.js)
+    }
+  },
+  remove(key: string) {
+    try {
+      localStorage.removeItem(key);
+    } catch {
+      // не стирается — и не требуется
+    }
+  },
+};
+
+const readStoredToken = (): string | null => safeStorage.get(AUTH_TOKEN_STORAGE_KEY);
 
 const readStoredLoginLinkToken = (): string | null =>
-  localStorage.getItem(LOGIN_LINK_TOKEN_STORAGE_KEY);
+  safeStorage.get(LOGIN_LINK_TOKEN_STORAGE_KEY);
 
 const storeLoginLinkToken = (loginToken: string) => {
-  localStorage.setItem(LOGIN_LINK_TOKEN_STORAGE_KEY, loginToken);
+  safeStorage.set(LOGIN_LINK_TOKEN_STORAGE_KEY, loginToken);
 };
 
 const clearStoredLoginLinkToken = () => {
-  localStorage.removeItem(LOGIN_LINK_TOKEN_STORAGE_KEY);
+  safeStorage.remove(LOGIN_LINK_TOKEN_STORAGE_KEY);
 };
 
 /**
@@ -66,7 +93,7 @@ const persistToken = (token: string) => {
 };
 
 const clearStoredToken = () => {
-  localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+  clearAuthToken();
 };
 
 export function useAuth(): AuthContextValue {
